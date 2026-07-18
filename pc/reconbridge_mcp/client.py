@@ -150,9 +150,12 @@ class ReconClient:
         self.ensure()
         events: list = []
         deadline = time.time() + seconds
-        read_to = min(max(seconds, 1.0), 6.0)
+        # 注意：不要设激进的 read 超时。SSE 保活 ping 约 15s 一次，稀疏事件（如某个
+        # Java 方法偶尔命中）在两次 ping 之间会有 >6s 空隙；若 read 超时短于 ping 间隔，
+        # httpx 会在空隙里 ReadTimeout 导致整体提前返回、收不到后续命中。故 read=None，
+        # 由 deadline 控制窗口，ping 负责保活兜底（每条 ping/事件后都会检查 deadline）。
         try:
-            with httpx.Client(timeout=httpx.Timeout(seconds + 10, read=read_to)) as c:
+            with httpx.Client(timeout=httpx.Timeout(seconds + 20, read=None)) as c:
                 with c.stream("GET", self._base + "/events", headers=self._headers) as r:
                     for line in r.iter_lines():
                         if line.startswith("data: "):
@@ -164,8 +167,6 @@ class ReconClient:
                                     events.append(payload)
                         if time.time() > deadline or len(events) >= max_events:
                             break
-        except httpx.ReadTimeout:
-            pass
         except Exception:
             pass
         return events

@@ -226,6 +226,125 @@ def collect_events(seconds: float = 10.0, max_events: int = 200) -> dict:
 
 
 @mcp.tool()
+def trace_java(package: str, class_name: str, method: str,
+               params: Optional[list] = None,
+               args_render: str = "tostring",
+               capture_args: Optional[list] = None,
+               fields: Optional[list] = None,
+               this: str = "class",
+               ret: bool = True,
+               when: str = "after",
+               stack: bool = False,
+               hook_id: str = "",
+               debug: bool = False,
+               restart: bool = True,
+               seconds: float = 12.0,
+               max_events: int = 200) -> dict:
+    """一步下发一个 Java 方法 trace 并采集命中（M5）。
+
+    需设备已装 **ReconBridge Tracer** LSPosed 模块并在 LSPosed 里启用 + 勾选目标 App 作用域。
+    在目标进程用 XposedBridge hook `class_name.method`，实时回传 this/参数/返回值/字段/调用栈，
+    走与 M3 相同的 socket→SSE 链路。协议见 m5/JAVA_HOOK_PROTOCOL.md。
+
+    - params: 精确重载的参数类型全名列表（如 ["java.lang.String","java.lang.String"]）；
+      省略=hook 所有同名重载；method="<init>" 则 hook 构造函数。
+    - capture_args: 逐参数抓取 [{"index":0,"render":"tostring","max":2000}]；省略=按 tostring 抓全部参数。
+    - fields: 反射读取的（私有）字段 [{"target":"this","name":"Z3","render":"tostring"}]。
+    - this: this 渲染 class|tostring|none；when: before|after|both；render: tostring|class|json。
+
+    注意：模块在进程启动时读配置，故对已运行的目标需 restart=True（force-stop 触发重载），
+    之后在 seconds 窗口内手动触发目标行为（如唤起小爱问一句）即可收到命中。
+    """
+    capture: dict[str, Any] = {"this": this, "when": when, "stack": stack}
+    if capture_args is not None:
+        capture["args"] = capture_args
+    else:
+        capture["all_args"] = True
+    if ret:
+        capture["ret"] = {"capture": True, "render": args_render}
+    if fields:
+        capture["fields"] = fields
+    target: dict[str, Any] = {
+        "kind": "java",
+        "id": hook_id or f"{class_name.rsplit('.', 1)[-1]}_{method}",
+        "class": class_name,
+        "method": method,
+        "capture": capture,
+    }
+    if params is not None:
+        target["params"] = params
+    config = {"package": package, "restart": restart, "debug": debug, "targets": [target]}
+    posted = client.post_json("/hook", config)
+    evts = client.collect_sse(seconds=seconds, max_events=max_events)
+    return {"posted": posted, "count": len(evts), "seconds": seconds, "events": evts}
+
+
+@mcp.tool()
+def patch_java(package: str, class_name: str, method: str,
+               params: Optional[list] = None,
+               replace_args: Optional[list] = None,
+               replace_return: Optional[dict] = None,
+               skip_original: bool = False,
+               trace: bool = True,
+               capture_args: Optional[list] = None,
+               this: str = "class",
+               when: str = "after",
+               hook_id: str = "",
+               debug: bool = False,
+               restart: bool = True,
+               seconds: float = 0.0,
+               max_events: int = 100) -> dict:
+    """实时篡改一个 Java 方法（M5 v2）：改参数 / 改返回值 / 跳过原方法。
+
+    需设备已装 **ReconBridge Tracer** LSPosed 模块并启用+勾选目标作用域。篡改是**持久**的
+    （下发后一直生效，直到 unhook）。协议见 m5/JAVA_HOOK_PROTOCOL.md。
+
+    - replace_args: 进入原方法前覆盖参数，[{"index":1,"value":"新内容","type":"string"}]。
+      type ∈ string|int|long|boolean|double|float|short|byte|char；省略 type 则按 JSON 原生类型。
+    - replace_return: 覆盖返回值，{"value":0,"type":"int"}（对无 skip_original 时在 after 生效）。
+    - skip_original: True 则不执行原方法，直接返回 replace_return（没给则返回 null）——用于“拦掉某调用”。
+    - trace: True 同时把命中回传（含 tampered 标记）；想静默篡改设 trace=False（when=none）。
+    - seconds>0 时下发后顺便采集命中；=0 只下发（篡改持续生效）。
+
+    例：把某 String 参数换掉 → replace_args=[{"index":1,"value":"...","type":"string"}]；
+        让某校验方法恒返回 true → replace_return={"value":true,"type":"boolean"}, skip_original=True。
+    注意：模块进程启动时读配置，已运行目标需 restart=True。
+    """
+    target: dict[str, Any] = {
+        "kind": "java",
+        "id": hook_id or f"{class_name.rsplit('.', 1)[-1]}_{method}",
+        "class": class_name,
+        "method": method,
+    }
+    if params is not None:
+        target["params"] = params
+    cap: dict[str, Any] = {"this": this, "when": (when if trace else "none")}
+    if capture_args is not None:
+        cap["args"] = capture_args
+    elif trace:
+        cap["all_args"] = True
+    if trace:
+        cap["ret"] = {"capture": True, "render": "tostring"}
+    target["capture"] = cap
+    act: dict[str, Any] = {}
+    if replace_args is not None:
+        act["replace_args"] = replace_args
+    if replace_return is not None:
+        act["replace_return"] = replace_return
+    if skip_original:
+        act["skip_original"] = True
+    if act:
+        target["action"] = act
+    config = {"package": package, "restart": restart, "debug": debug, "targets": [target]}
+    posted = client.post_json("/hook", config)
+    result: dict[str, Any] = {"posted": posted}
+    if seconds and seconds > 0:
+        evts = client.collect_sse(seconds=seconds, max_events=max_events)
+        result.update({"count": len(evts), "seconds": seconds, "events": evts})
+    return result
+
+
+@mcp.tool()
 def dump_dex(package: str, symbol: str = "", offset: str = "", base_arg: int = 0,
              size_arg: int = 1, lib: str = "libart.so", restart: bool = True) -> dict:
     """通用内存 dex dump（M4）：hook dex 加载入口，把内存中已解密的 dex 回传落盘。

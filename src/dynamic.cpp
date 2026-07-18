@@ -212,12 +212,23 @@ static void inject_client(int fd) {
     if (!sock_read_full(fd, &plen, 4) || plen == 0 || plen > 1024) { close(fd); return; }
     std::string pkg(plen, 0);
     if (!sock_read_full(fd, &pkg[0], plen)) { close(fd); return; }
+    // Android 子进程名形如 "pkg:suffix"（如 com.foo:core），必须放行冒号，
+    // 否则子进程（往往才是真正干活的进程）连接会在这里被静默拒绝，且不落日志。
     for (char c : pkg)
-        if (!(isalnum((unsigned char)c) || c == '.' || c == '_')) { close(fd); return; }
+        if (!(isalnum((unsigned char)c) || c == '.' || c == '_' || c == ':')) { close(fd); return; }
 
-    std::string cfg = read_whole_file(g_hooks_dir + "/" + pkg + ".json");
+    // hook 配置文件按主包名（去掉 :suffix）查找，子进程复用同一份配置
+    std::string base_pkg = pkg;
+    size_t colon = base_pkg.find(':');
+    if (colon != std::string::npos) base_pkg = base_pkg.substr(0, colon);
+
+    std::string cfg = read_whole_file(g_hooks_dir + "/" + base_pkg + ".json");
     uint8_t has = cfg.empty() ? 0 : 1;
-    if (!sock_write_full(fd, &has, 1) || !has) { close(fd); return; }
+    if (!sock_write_full(fd, &has, 1) || !has) {
+        log_line("注入层已连接但无配置：" + pkg);
+        close(fd);
+        return;
+    }
 
     // 只下发 hook 配置；shadowhook 库由注入层从 /system/lib64 按名加载
     uint32_t clen = (uint32_t)cfg.size();

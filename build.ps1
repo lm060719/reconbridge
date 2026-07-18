@@ -1,4 +1,4 @@
-# ReconBridge M1 构建脚本（Windows / PowerShell）
+﻿# ReconBridge M1 构建脚本（Windows / PowerShell）
 # 直接调用 NDK 的 clang++ 交叉编译 arm64-v8a 守护进程，无需安装 cmake / ninja。
 # 输出：module\bin\reconbridge_daemon，随后可用 pack.ps1 打包成刷入 zip。
 

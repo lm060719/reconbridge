@@ -2,7 +2,10 @@
 
 在 Android（KernelSU root）设备上运行的**通用逆向能力后端**。手机侧只做原子能力（拉包 / 读文件 / 列 so / 注入 hook），所有智能（定位函数、生成 hook、分析结果）都在 PC 侧（Claude Code + MCP）完成。
 
-> 进度：**M1 / M2 / M3 / M4 均已完成并真机验证**（Xiaomi SM8750 / Android 16 / KernelSU + ZygiskNext）。
+> 📌 **给 AI agent / 新会话的一页纸速查：[`AGENTS_QUICKSTART.md`](AGENTS_QUICKSTART.md)** —— 全部 MCP 工具签名、M5 用法、典型工作流、高频坑，读一篇即可上手。
+
+> 进度：**M1 / M2 / M3 / M4 / M5 均已完成并真机验证**（Xiaomi SM8750 / Android 16 / KernelSU + ZygiskNext + LSPosed）。
+> - **M5**：通用 Java trace + 实时篡改（LSPosed 模块，`trace_java` / `patch_java`）—— 见 [`m5/README.md`](m5/README.md)、[`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md)。
 
 ---
 

@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">ReconBridge Tracer</string>
+    <string name="module_description">ReconBridge M5：数据驱动的通用 Java trace 执行器（PC 端下发 hook 目标，实时回传 this/参数/返回值/字段/调用栈）。</string>
+    <string-array name="xposed_scope">
+        <item>com.miui.voiceassist</item>
+    </string-array>
+</resources>

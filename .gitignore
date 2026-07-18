@@ -20,6 +20,10 @@ build/
 *.o
 *.obj
 
+# ---- Android Gradle（m5/tracer）中间产物 / 本机配置 ----
+.gradle/
+local.properties
+
 # ---- 打包产物（通过 GitHub Releases 分发，不入库）----
 dist/
 
