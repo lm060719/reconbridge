@@ -24,14 +24,14 @@
 
 ```powershell
 # Windows
-git clone https://github.com/<你的用户名>/reconbridge.git
+git clone https://github.com/lm060719/reconbridge.git
 cd reconbridge
 ./install.ps1              # 建 venv → 装依赖 → 注册 reconbridge 到 Claude Code（用户级）
 ```
 
 ```bash
 # Linux / macOS
-git clone https://github.com/<你的用户名>/reconbridge.git
+git clone https://github.com/lm060719/reconbridge.git
 cd reconbridge
 ./install.sh
 ```
