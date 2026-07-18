@@ -1,0 +1,28 @@
+{
+  "_comment": "Frida/Xposed 检测【定位】：很多 SDK（如网易易盾等）扫 /proc/self/maps、/proc/self/task、端口、特征 so 名。observe 挂 open/openat/strstr，抓被读的文件名与被匹配字符串，定位检测逻辑；再对 App 自身的检测函数做精准 replace_ret。模块本体不需要知道任何具体安全 SDK。",
+  "package": "<TARGET_PKG>",
+  "restart": true,
+  "targets": [
+    {
+      "id": "openat_watch",
+      "lib": "libc.so",
+      "symbol": "openat",
+      "capture": {
+        "args": [ {"index": 0, "type": "int"}, {"index": 1, "type": "string", "max": 256} ],
+        "ret": {"capture": true, "type": "int"},
+        "backtrace": true
+      },
+      "action": { "type": "observe" }
+    },
+    {
+      "id": "strstr_watch",
+      "lib": "libc.so",
+      "symbol": "strstr",
+      "capture": {
+        "args": [ {"index": 0, "type": "string", "max": 256}, {"index": 1, "type": "string", "max": 64} ],
+        "ret": {"capture": true, "type": "ptr"}
+      },
+      "action": { "type": "observe" }
+    }
+  ]
+}

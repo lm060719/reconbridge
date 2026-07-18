@@ -1,0 +1,34 @@
+{
+  "_comment": "通用内存 dex dump 模板（应对整体加固壳）。原理：加固壳会在运行时把解密后的 dex 交给 ART 加载；hook dex 加载入口，拿到内存里的 dex 基址+长度，dump 回传。base_arg/size_arg 是 dex 基址与长度所在的参数寄存器下标(x0..x7)，需按目标 Android 版本的 ART 符号确定——用 M2 的 ghidra_analyze 分析 /system/lib64/libart.so 找到 OpenMemory/DexFile 相关导出与其参数布局。下面给两种常见入口示例，符号名按实际 libart 调整（可能是重整后的 C++ 符号）。",
+
+  "_usage": "推荐用便捷接口：POST /dump_dex {\"package\":\"X\",\"lib\":\"libart.so\",\"symbol\":\"<sym>\",\"base_arg\":0,\"size_arg\":1,\"restart\":true}；或直接把下面某个 target 用 /hook 下发。命中后 GET /dumps 列出，/file?path= 取回 .dex，本地用 M2 的 dexkit/jadx 分析。",
+
+  "package": "<TARGET_PKG>",
+  "restart": true,
+  "targets": [
+    {
+      "id": "dexdump_openmemory",
+      "_hint": "ART DexFile::OpenMemory 早期签名常含 (const uint8_t* base, size_t size, ...)，base_arg/size_arg 视版本而定",
+      "lib": "libart.so",
+      "symbol": "_ZN3art7DexFile10OpenMemoryEPKhmRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPNS_6MemMapEPKNS_10OatDexFileEPS9_",
+      "capture": {
+        "args": [ {"index": 0, "type": "ptr"}, {"index": 1, "type": "int"} ],
+        "dump": { "base_arg": 0, "size_arg": 1, "max": 33554432, "ext": "dex" }
+      },
+      "action": { "type": "observe" }
+    },
+    {
+      "id": "dexdump_dexfileloader",
+      "_hint": "较新 ART 用 DexFileLoader::OpenCommon 等，参数布局不同；先 observe 抓 x0..x3 看哪个是 base、哪个是 size（dex 头 magic 'dex\\n035\\0' 可佐证）",
+      "lib": "libart.so",
+      "symbol": "<RESOLVE_VIA_GHIDRA>",
+      "capture": {
+        "args": [
+          {"index": 0, "type": "ptr"}, {"index": 1, "type": "ptr"},
+          {"index": 2, "type": "int"}, {"index": 3, "type": "int"}
+        ]
+      },
+      "action": { "type": "observe" }
+    }
+  ]
+}

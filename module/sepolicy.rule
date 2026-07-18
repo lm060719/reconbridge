@@ -1,0 +1,16 @@
+# ReconBridge SELinux 规则（KernelSU 在 post-fs-data 阶段合并生效）。
+#
+# 目的：允许被注入的目标进程（各 app 域）连接守护进程的注入 IPC 抽象 socket
+# @reconbridge_inject。守护进程运行在 u:r:ksu:s0，故 socket 对端标签为 ksu。
+# 否则注入层 connect() 会被 SELinux 拒绝：
+#   avc: denied { connectto } scontext=u:r:untrusted_app tcontext=u:r:ksu
+#        tclass=unix_stream_socket
+# 我们的动态 hook 靠这条链路取本包配置 + libshadowhook.so，并回传命中事件。
+
+allow appdomain ksu unix_stream_socket connectto
+allow untrusted_app ksu unix_stream_socket connectto
+allow untrusted_app_all ksu unix_stream_socket connectto
+allow priv_app ksu unix_stream_socket connectto
+allow platform_app ksu unix_stream_socket connectto
+allow isolated_app ksu unix_stream_socket connectto
+allow system_app ksu unix_stream_socket connectto

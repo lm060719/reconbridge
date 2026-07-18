@@ -1,0 +1,15 @@
+{
+  "_comment": "项目级 MCP 配置示例。多数人用 install.ps1 / install.sh 注册用户级即可，无需此文件。若想仅在本仓库目录内启用 reconbridge，把本文件复制为 .mcp.json 并将 <REPO> 替换为本仓库绝对路径。",
+  "mcpServers": {
+    "reconbridge": {
+      "command": "<REPO>/pc/.venv/Scripts/python.exe",
+      "args": ["-m", "reconbridge_mcp"],
+      "env": {
+        "PYTHONPATH": "<REPO>/pc",
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "RECONBRIDGE_TRANSPORT": "adb"
+      }
+    }
+  }
+}

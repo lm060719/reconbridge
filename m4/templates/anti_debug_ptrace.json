@@ -1,0 +1,14 @@
+{
+  "_comment": "反调试：让 ptrace 永远返回 0，挫败 PTRACE_TRACEME 自附加检测与部分 anti-debug。注意 replace_ret 是无条件的（每次调用都改返回值），仅在确认目标不依赖 ptrace 正常返回时使用。",
+  "package": "<TARGET_PKG>",
+  "restart": true,
+  "targets": [
+    {
+      "id": "ptrace_bypass",
+      "lib": "libc.so",
+      "symbol": "ptrace",
+      "capture": { "args": [ {"index": 0, "type": "int"} ], "ret": {"capture": true, "type": "int"} },
+      "action": { "type": "replace_ret", "ret_value": 0 }
+    }
+  ]
+}

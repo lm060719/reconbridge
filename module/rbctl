@@ -1,0 +1,60 @@
+#!/system/bin/sh
+# ReconBridge 控制脚本：供 WebUI 与命令行使用。
+# 用法：rbctl enable|disable|setport N|setbind IP|start|stop|info
+# 仅修改 config.conf；守护进程通过 inotify 感知变更即时生效（start 例外，用于手动拉起进程）。
+
+CONF=/data/adb/reconbridge/config.conf
+DAEMON_NAME=reconbridge_daemon
+DAEMON_BIN=/data/adb/modules/reconbridge/bin/reconbridge_daemon
+
+export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+
+mkdir -p /data/adb/reconbridge
+
+get() { [ -f "$CONF" ] && sed -n "s/^$1=//p" "$CONF" | head -1; }
+getd() { v=$(get "$1"); [ -z "$v" ] && v=$2; echo "$v"; }
+
+setk() {
+  key=$1; val=$2
+  [ -f "$CONF" ] || : > "$CONF"
+  if grep -q "^$key=" "$CONF"; then
+    sed -i "s#^$key=.*#$key=$val#" "$CONF"
+  else
+    echo "$key=$val" >> "$CONF"
+  fi
+}
+
+running() { pgrep -f "$DAEMON_NAME" >/dev/null 2>&1 && echo 1 || echo 0; }
+
+wlanip() {
+  ip=$(ip -4 addr show wlan0 2>/dev/null | grep -oE 'inet [0-9.]+' | head -1 | awk '{print $2}')
+  [ -z "$ip" ] && ip=$(ip -4 addr show 2>/dev/null | grep -oE 'inet [0-9.]+' | grep -v '127.0.0.1' | head -1 | awk '{print $2}')
+  echo "$ip"
+}
+
+start_daemon() {
+  if [ "$(running)" = "1" ]; then return 0; fi
+  if [ -x "$DAEMON_BIN" ]; then
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$DAEMON_BIN" "$CONF" >/dev/null 2>&1 &
+    else
+      nohup "$DAEMON_BIN" "$CONF" >/dev/null 2>&1 &
+    fi
+  fi
+}
+
+case "$1" in
+  enable)  setk enabled 1 ; start_daemon ;;
+  disable) setk enabled 0 ;;
+  setport) [ -n "$2" ] && setk port "$2" ;;
+  setbind) [ -n "$2" ] && setk bind "$2" ;;
+  start)   start_daemon ;;
+  stop)    pkill -f "$DAEMON_NAME" ;;
+  info)
+    printf '{"enabled":%s,"port":%s,"bind":"%s","token":"%s","running":%s,"ip":"%s"}\n' \
+      "$(getd enabled 0)" "$(getd port 8787)" "$(getd bind auto)" "$(get token)" "$(running)" "$(wlanip)"
+    ;;
+  *)
+    echo "usage: rbctl enable|disable|setport N|setbind IP|start|stop|info"
+    ;;
+esac

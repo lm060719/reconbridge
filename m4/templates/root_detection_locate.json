@@ -1,0 +1,29 @@
+{
+  "_comment": "root 检测【定位】：observe 模式挂 libc 的 access/stat/fopen，抓路径参数+调用栈，观察目标在检查哪些 su/root 特征路径。定位到具体检测点后，再用 M2 反编译找到 App 自身的检测函数，对那个函数下 replace_ret 才是精准绕过（避免无条件改 libc 返回值影响全局）。",
+  "package": "<TARGET_PKG>",
+  "restart": true,
+  "targets": [
+    {
+      "id": "access_watch",
+      "lib": "libc.so",
+      "symbol": "access",
+      "capture": {
+        "args": [ {"index": 0, "type": "string", "max": 256}, {"index": 1, "type": "int"} ],
+        "ret": {"capture": true, "type": "int"},
+        "backtrace": true
+      },
+      "action": { "type": "observe" }
+    },
+    {
+      "id": "fopen_watch",
+      "lib": "libc.so",
+      "symbol": "fopen",
+      "capture": {
+        "args": [ {"index": 0, "type": "string", "max": 256}, {"index": 1, "type": "string", "max": 8} ],
+        "ret": {"capture": true, "type": "ptr"},
+        "backtrace": true
+      },
+      "action": { "type": "observe" }
+    }
+  ]
+}

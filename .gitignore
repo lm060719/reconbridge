@@ -1,0 +1,36 @@
+# ---- Python (MCP server) ----
+pc/.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 第三方工具链（体积大，使用者自行安装，见 pc/README.md）----
+pc/tools/
+# Ghidra / JDK 等重型原生工具放在 ASCII 路径，不入库
+ReconBridgeTools/
+
+# ---- 运行期数据 / 拉取产物（含真实 APK、内存 dump，属隐私数据）----
+pc/work/
+work/
+
+# ---- 构建中间产物 ----
+m3/build/
+build/
+*.o
+*.obj
+
+# ---- 打包产物（通过 GitHub Releases 分发，不入库）----
+dist/
+
+# ---- 本机私有配置（含绝对路径/用户名/token，用 .mcp.json.example 代替）----
+.mcp.json
+**/config.conf
+*.token
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log

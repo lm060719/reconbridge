@@ -1,0 +1,5 @@
+# ReconBridge MCP Server (M2) 依赖
+mcp[cli]>=1.0
+httpx>=0.27
+androguard>=4.1      # dexkit_search 的 dex 搜索后端（DexKit 无 Windows/Python 预编译包）
+# 可选：hbctool         # Hermes .hbc 反编译（对 Hermes 版本敏感，按需装）

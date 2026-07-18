@@ -1,0 +1,18 @@
+# 默认按内容自动处理文本
+* text=auto
+
+# Shell / 设备端脚本必须是 LF —— CRLF 会让 Android/KernelSU 上的 sh 执行失败
+*.sh            text eol=lf
+module/rbctl        text eol=lf
+module/service.sh   text eol=lf
+module/customize.sh text eol=lf
+module/sepolicy.rule text eol=lf
+*.py            text eol=lf
+
+# Windows 脚本保持 CRLF
+*.ps1           text eol=crlf
+
+# 二进制产物：不做行尾转换
+*.so            binary
+*.zip           binary
+module/bin/reconbridge_daemon binary

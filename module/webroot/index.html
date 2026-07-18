@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ReconBridge</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --line: #262b36;
+    --fg: #e6e9ef; --muted: #8b93a5; --accent: #4f8cff;
+    --ok: #35c48a; --off: #6b7280; --danger: #ff5c6c;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 16px calc(16px + env(safe-area-inset-right)) calc(24px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Roboto", "Noto Sans SC", sans-serif;
+    max-width: 640px; margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .row + .row { margin-top: 12px; }
+  .label { color: var(--muted); font-size: 13px; }
+  .val { font-size: 14px; font-variant-numeric: tabular-nums; word-break: break-all; text-align: right; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; padding: 4px 10px; border-radius: 999px; }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .pill.on  { background: rgba(53,196,138,.14); color: var(--ok); }
+  .pill.on .dot  { background: var(--ok); }
+  .pill.off { background: rgba(107,114,128,.18); color: var(--off); }
+  .pill.off .dot { background: var(--off); }
+
+  .switch { position: relative; width: 52px; height: 30px; flex: none; }
+  .switch input { display: none; }
+  .slider { position: absolute; inset: 0; background: var(--off); border-radius: 999px; transition: .2s; }
+  .slider::before { content: ""; position: absolute; width: 24px; height: 24px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(22px); }
+  .switch.busy { opacity: .5; pointer-events: none; }
+
+  .mono { font-family: "SF Mono", "Roboto Mono", monospace; font-size: 12px; }
+  .token { display: flex; align-items: center; gap: 8px; }
+  .token code { background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; flex: 1; overflow-x: auto; white-space: nowrap; }
+  button { font: inherit; color: var(--fg); background: #222836; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+  button:active { transform: scale(.97); }
+  .inp { display: flex; gap: 8px; }
+  .inp input { flex: 1; background: #0b0d11; border: 1px solid var(--line); color: var(--fg); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 10px; line-height: 1.5; }
+  .url { color: var(--accent); }
+  .warn { color: var(--danger); font-size: 12px; }
+  .foot { color: var(--muted); font-size: 11px; text-align: center; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>ReconBridge <span class="mono" style="color:var(--muted);font-size:12px;">M1</span></h1>
+  <div class="sub">通用逆向传输层 · 端口默认关闭 · token 鉴权</div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="label">端口开关</div>
+        <div id="stateText" class="mono" style="font-size:12px;color:var(--muted);margin-top:4px;">加载中…</div>
+      </div>
+      <label class="switch" id="switchWrap">
+        <input type="checkbox" id="enableSwitch">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="row">
+      <span class="label">守护进程</span>
+      <span id="daemonPill" class="pill off"><span class="dot"></span>未知</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row"><span class="label">监听地址</span><span id="bindVal" class="val mono">—</span></div>
+    <div class="row"><span class="label">端口</span><span id="portVal" class="val mono">—</span></div>
+    <div class="row"><span class="label">访问 URL</span><span id="urlVal" class="val mono url">—</span></div>
+  </div>
+
+  <div class="card">
+    <div class="label" style="margin-bottom:8px;">访问 token</div>
+    <div class="token">
+      <code id="tokenVal" class="mono">—</code>
+      <button id="copyBtn">复制</button>
+    </div>
+    <div class="hint">
+      curl 示例（PC 与手机同一 Wi-Fi）：<br>
+      <span id="curlHint" class="mono url">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="label" style="margin-bottom:8px;">端口号设置</div>
+    <div class="inp">
+      <input id="portInput" type="number" inputmode="numeric" placeholder="8787" min="1" max="65535">
+      <button id="savePortBtn">保存</button>
+    </div>
+    <div class="hint">修改后若端口已开启会自动重启监听。默认绑定 wlan0 的局域网 IP（非 0.0.0.0）。</div>
+  </div>
+
+  <div id="errBox" class="warn" style="display:none;"></div>
+  <div class="foot">ReconBridge M1 · 静态传输层</div>
+
+<script>
+const RBCTL = "/data/adb/modules/reconbridge/rbctl";
+const $ = (id) => document.getElementById(id);
+
+// ---- KernelSU WebUI exec 桥接（回调式，包装成 Promise）----
+function ksuExec(command, options = {}) {
+  return new Promise((resolve, reject) => {
+    if (typeof ksu === "undefined" || !ksu.exec) {
+      reject(new Error("非 KernelSU WebUI 环境（缺少 ksu.exec）"));
+      return;
+    }
+    const cb = "rb_cb_" + Math.random().toString(36).slice(2) + Date.now();
+    window[cb] = (errno, stdout, stderr) => {
+      delete window[cb];
+      resolve({ errno, stdout: stdout || "", stderr: stderr || "" });
+    };
+    try {
+      ksu.exec(command, JSON.stringify(options), cb);
+    } catch (e) {
+      delete window[cb];
+      reject(e);
+    }
+  });
+}
+
+function showErr(msg) {
+  const b = $("errBox");
+  b.style.display = "block";
+  b.textContent = "⚠ " + msg;
+}
+function clearErr() { $("errBox").style.display = "none"; }
+
+let busy = false;
+
+async function refresh() {
+  try {
+    const r = await ksuExec(`sh ${RBCTL} info`);
+    const line = (r.stdout || "").trim().split("\n").pop();
+    const info = JSON.parse(line);
+    clearErr();
+    render(info);
+  } catch (e) {
+    showErr("读取状态失败：" + e.message);
+  }
+}
+
+function render(info) {
+  const on = String(info.enabled) === "1";
+  const running = String(info.running) === "1";
+
+  // 开关
+  if (!busy) $("enableSwitch").checked = on;
+  $("stateText").textContent = on ? "已开启（监听中）" : "已关闭";
+
+  // 守护进程
+  const pill = $("daemonPill");
+  pill.className = "pill " + (running ? "on" : "off");
+  pill.innerHTML = `<span class="dot"></span>${running ? "运行中" : "未运行"}`;
+
+  // 地址 / 端口
+  const ip = info.ip && info.ip !== "" ? info.ip : "(未获取到 wlan IP)";
+  const bind = info.bind === "auto" ? `auto → ${ip}` : info.bind;
+  $("bindVal").textContent = bind;
+  $("portVal").textContent = info.port;
+  if (!$("portInput").value) $("portInput").placeholder = info.port;
+
+  const base = `http://${ip}:${info.port}`;
+  $("urlVal").textContent = on ? base : "(端口关闭)";
+
+  // token
+  const tok = info.token && info.token !== "" ? info.token : "(守护进程尚未生成，请稍候)";
+  $("tokenVal").textContent = tok;
+  $("curlHint").textContent = `curl -H "X-Token: ${info.token || "<token>"}" ${base}/health`;
+}
+
+// 开关切换
+$("enableSwitch").addEventListener("change", async (e) => {
+  const want = e.target.checked;
+  busy = true;
+  $("switchWrap").classList.add("busy");
+  try {
+    await ksuExec(`sh ${RBCTL} ${want ? "enable" : "disable"}`);
+    // enable 时确保守护进程已拉起
+    await new Promise((r) => setTimeout(r, 400));
+  } catch (err) {
+    showErr("切换失败：" + err.message);
+    e.target.checked = !want;
+  } finally {
+    busy = false;
+    $("switchWrap").classList.remove("busy");
+    refresh();
+  }
+});
+
+// 保存端口
+$("savePortBtn").addEventListener("click", async () => {
+  const v = parseInt($("portInput").value, 10);
+  if (!v || v < 1 || v > 65535) { showErr("端口范围 1–65535"); return; }
+  try {
+    await ksuExec(`sh ${RBCTL} setport ${v}`);
+    $("portInput").value = "";
+    refresh();
+  } catch (e) { showErr("保存端口失败：" + e.message); }
+});
+
+// 复制 token
+$("copyBtn").addEventListener("click", async () => {
+  const t = $("tokenVal").textContent;
+  try {
+    await navigator.clipboard.writeText(t);
+    $("copyBtn").textContent = "已复制";
+    setTimeout(() => ($("copyBtn").textContent = "复制"), 1200);
+  } catch (e) {
+    showErr("复制失败，请长按手动选择");
+  }
+});
+
+refresh();
+setInterval(refresh, 4000);
+</script>
+</body>
+</html>
