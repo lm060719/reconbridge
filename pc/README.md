@@ -54,7 +54,7 @@ python -m venv .venv
 ```powershell
 irm https://github.com/lm060719/reconbridge/releases/latest/download/install.ps1 | iex
 ```
-下载打包好的 MCP exe 到 `%LOCALAPPDATA%\ReconBridge\` 并自注册到两个客户端：Claude Code（`~/.claude.json`）与 ChatGPT Codex（`~/.codex/config.toml`）。只装一个设 `$env:RB_TARGET="codex"`（或 `"claude"`）。构建该 exe：仓库根 `./build_exe.ps1`（PyInstaller onedir → `dist/reconbridge-mcp-win64.zip`）；exe 也能自注册：`reconbridge-mcp.exe --register [--target claude|codex|both] [--transport adb|wifi]`。
+下载打包好的 MCP exe 到 `%LOCALAPPDATA%\ReconBridge\` 并自注册。默认自动探测已安装的客户端：Claude Code（`~/.claude.json`）与 ChatGPT Codex（`~/.codex/config.toml`）——没装的那个跳过、不建目录。强制只装一个设 `$env:RB_TARGET="codex"`（或 `"claude"`）。构建该 exe：仓库根 `./build_exe.ps1`（PyInstaller onedir → `dist/reconbridge-mcp-win64.zip`）；exe 也能自注册：`reconbridge-mcp.exe --register [--target claude|codex|both] [--transport adb|wifi]`。
 
 **本地 Web 控制台**：`reconbridge-mcp --serve`（源码：`python -m reconbridge_mcp --serve`）起一个只绑 `127.0.0.1:9000` 的图形控制台——选 adb/wifi、一键连接、看 daemon 状态与只读监控（活动 hook / 事件流 / dumps）。`--port N` / `--host H` / `--no-open` 可调。
 

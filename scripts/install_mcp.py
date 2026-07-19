@@ -64,6 +64,36 @@ def codex_skill_dir() -> Path:
     return Path.home() / ".codex" / "skills" / "reconbridge"
 
 
+# ---------------------------------------------------------------- 客户端探测
+def claude_present() -> bool:
+    return claude_config_path().exists() or (Path.home() / ".claude").is_dir()
+
+
+def codex_present() -> bool:
+    return (Path.home() / ".codex").is_dir()
+
+
+_ABSENT_HINT = {
+    "claude": "未检测到 Claude Code（~/.claude.json 与 ~/.claude/ 均不存在）",
+    "codex": "未检测到 ChatGPT Codex（~/.codex/ 不存在）",
+}
+
+
+def resolve_targets(target: str) -> tuple[list[str], list[str]]:
+    """both：只装已检测到的客户端（未装的跳过、不建目录）；两者都没检测到回退只装 Claude。
+    显式 claude/codex：强制装该项。返回 (要装的, 跳过的)。"""
+    if target in ("claude", "codex"):
+        return [target], []
+    chosen: list[str] = []
+    skipped: list[str] = []
+    (chosen if claude_present() else skipped).append("claude")
+    (chosen if codex_present() else skipped).append("codex")
+    if not chosen:
+        chosen = ["claude"]
+        skipped = [s for s in skipped if s != "claude"]
+    return chosen, skipped
+
+
 # ---------------------------------------------------------------- skill
 def install_skill(dst: Path) -> None:
     """把 skills/reconbridge/ 铺到用户级 skills 目录，让新会话在逆向类任务上自动加载工作流。"""
@@ -96,7 +126,7 @@ def register_claude(entry: dict) -> int:
     cfg_path = claude_config_path()
     if cfg_path.exists():
         try:
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
         except Exception as e:
             print(f"[x] 无法解析 {cfg_path}: {e}", file=sys.stderr)
             print("    请手动检查该文件，或删除后重试。", file=sys.stderr)
@@ -171,7 +201,7 @@ def register_codex(entry: dict) -> int:
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if cfg.exists():
         try:
-            old = cfg.read_text(encoding="utf-8")
+            old = cfg.read_text(encoding="utf-8-sig")
         except Exception as e:
             print(f"[x] 无法读取 {cfg}: {e}", file=sys.stderr)
             return 1
@@ -214,13 +244,16 @@ def main() -> int:
             print(_entry_to_toml("reconbridge", entry), end="")
         return 0
 
+    chosen, skipped = resolve_targets(args.target)
+    for s in skipped:
+        print(f"[i] {_ABSENT_HINT[s]}，跳过（如需强制安装：--target {s}）。")
     rc = 0
-    if args.target in ("claude", "both"):
+    if "claude" in chosen:
         rc = register_claude(entry) or rc
-    if args.target in ("codex", "both"):
+    if "codex" in chosen:
         rc = register_codex(entry) or rc
     print(f"    command: {entry['command']}")
-    print(f"    transport: {args.transport}  |  target: {args.target}")
+    print(f"    transport: {args.transport}  |  target: {args.target} -> {'+'.join(chosen)}")
     return rc
 
 

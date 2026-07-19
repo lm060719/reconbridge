@@ -51,6 +51,41 @@ def codex_skill_dir() -> Path:
     return Path.home() / ".codex" / "skills" / "reconbridge"
 
 
+# ---------------------------------------------------------------- 客户端探测
+def claude_present() -> bool:
+    """Claude Code 是否已安装：~/.claude.json 或 ~/.claude/ 存在。"""
+    return claude_config_path().exists() or (Path.home() / ".claude").is_dir()
+
+
+def codex_present() -> bool:
+    """ChatGPT Codex 是否已安装：~/.codex/ 存在。"""
+    return (Path.home() / ".codex").is_dir()
+
+
+_ABSENT_HINT = {
+    "claude": "未检测到 Claude Code（~/.claude.json 与 ~/.claude/ 均不存在）",
+    "codex": "未检测到 ChatGPT Codex（~/.codex/ 不存在）",
+}
+
+
+def resolve_targets(target: str) -> tuple[list[str], list[str]]:
+    """把 target 解析成实际要装的客户端列表。
+    - 显式 claude / codex：强制装该项（即使目录还不存在，会创建）。
+    - both（默认）：只装**已检测到**的客户端，未装的那个跳过、不建目录；
+      两者都没检测到时回退为只装 Claude（保证安装不空转）。
+    返回 (要装的, 因未检测到而跳过的)。"""
+    if target in ("claude", "codex"):
+        return [target], []
+    chosen: list[str] = []
+    skipped: list[str] = []
+    (chosen if claude_present() else skipped).append("claude")
+    (chosen if codex_present() else skipped).append("codex")
+    if not chosen:
+        chosen = ["claude"]
+        skipped = [s for s in skipped if s != "claude"]
+    return chosen, skipped
+
+
 # ---------------------------------------------------------------- skill
 def _skill_source_dir() -> Path | None:
     """skill 源目录。冻结（exe）时在 PyInstaller 解包根 _MEIPASS/skills/reconbridge
@@ -120,7 +155,7 @@ def register_claude(entry: dict, print_only: bool) -> int:
     cfg_path = claude_config_path()
     if cfg_path.exists():
         try:
-            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+            data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
         except Exception as e:
             print(f"[x] 无法解析 {cfg_path}: {e}", file=sys.stderr)
             print("    请手动检查该文件，或删除后重试。", file=sys.stderr)
@@ -149,7 +184,7 @@ def unregister_claude(print_only: bool) -> int:
         print(f"[i] {cfg_path} 不存在，无需注销。")
         return 0
     try:
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     except Exception as e:
         print(f"[x] 无法解析 {cfg_path}: {e}", file=sys.stderr)
         return 1
@@ -236,7 +271,7 @@ def register_codex(entry: dict, print_only: bool) -> int:
     cfg.parent.mkdir(parents=True, exist_ok=True)
     if cfg.exists():
         try:
-            old = cfg.read_text(encoding="utf-8")
+            old = cfg.read_text(encoding="utf-8-sig")
         except Exception as e:
             print(f"[x] 无法读取 {cfg}: {e}", file=sys.stderr)
             return 1
@@ -264,7 +299,7 @@ def unregister_codex(print_only: bool) -> int:
         print(f"[i] {cfg} 不存在，无需注销。")
         return 0
     try:
-        old = cfg.read_text(encoding="utf-8")
+        old = cfg.read_text(encoding="utf-8-sig")
     except Exception as e:
         print(f"[x] 无法读取 {cfg}: {e}", file=sys.stderr)
         return 1
@@ -292,14 +327,17 @@ def unregister_codex(print_only: bool) -> int:
 def register(transport: str = "adb", print_only: bool = False,
              target: str = "both") -> int:
     entry = build_entry(transport)
+    chosen, skipped = resolve_targets(target)
+    for s in skipped:
+        print(f"[i] {_ABSENT_HINT[s]}，跳过（如需强制安装：--target {s}）。")
     rc = 0
-    if target in ("claude", "both"):
+    if "claude" in chosen:
         rc = register_claude(entry, print_only) or rc
-    if target in ("codex", "both"):
+    if "codex" in chosen:
         rc = register_codex(entry, print_only) or rc
     if not print_only:
         print(f"    command: {entry['command']}")
-        print(f"    transport: {transport}  |  target: {target}")
+        print(f"    transport: {transport}  |  target: {target} -> {'+'.join(chosen)}")
     return rc
 
 

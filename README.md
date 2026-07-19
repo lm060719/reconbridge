@@ -23,7 +23,7 @@
 
 ### PC 端（一键装 MCP 工具）
 
-支持两种 AI 客户端：**Claude Code**（写 `~/.claude.json`）与 **ChatGPT Codex**（写 `~/.codex/config.toml`）。默认两个都装（`both`）。另需 `adb`（Android platform-tools，连真机用）。
+支持两种 AI 客户端：**Claude Code**（写 `~/.claude.json`）与 **ChatGPT Codex**（写 `~/.codex/config.toml`）。默认 `both`＝**自动探测**：只注册进「已安装」的客户端（Claude 看 `~/.claude.json`/`~/.claude/`，Codex 看 `~/.codex/`），没装的那个自动跳过、不建目录。另需 `adb`（Android platform-tools，连真机用）。
 
 **推荐：一行在线安装（Windows，无需 clone 仓库、无需 Python）**
 
@@ -37,7 +37,7 @@ irm https://github.com/lm060719/reconbridge/releases/latest/download/install.ps1
 
 装完**重启对应客户端**即用。
 > exe 内含 MCP server 与核心依赖（含 androguard）；jadx / Ghidra 仍为可选反编译工具，解压到 `%LOCALAPPDATA%\ReconBridge\tools\` 即被自动探测（`toolchain_status` 查看）。
-> **只装一个客户端**：先设 `$env:RB_TARGET="codex"`（或 `"claude"`）再执行。**wifi 传输**：先设 `$env:RB_TRANSPORT="wifi"`。
+> **强制只装一个**（跳过探测）：先设 `$env:RB_TARGET="codex"`（或 `"claude"`）再执行——此时即使目录不存在也会创建。**wifi 传输**：先设 `$env:RB_TRANSPORT="wifi"`。
 
 **更新**：重跑上面那条安装命令即可——它会原地覆盖 exe 并重新注册，保留 `work\`（拉包/dump 数据）与 `tools\`。
 
