@@ -216,13 +216,23 @@ def unhook(package: str, hook_id: str = "") -> dict:
 
 
 @mcp.tool()
-def collect_events(seconds: float = 10.0, max_events: int = 200) -> dict:
-    """连 hook 事件流(SSE)收集 seconds 秒内的命中事件（参数/返回值/调用栈/dump 通知）。
+def collect_events(seconds: float = 10.0, max_events: int = 200,
+                   until_first_hit: bool = False, until_n_events: int = 0,
+                   fold_stack: bool = True) -> dict:
+    """连 hook 事件流(SSE)收集命中事件（参数/返回值/调用栈/dump 通知）。
 
     先 post_hook 下发配置并启动/重启目标，再调用本工具采集。
+
+    - seconds: 采集窗口上限（兜底）。
+    - until_first_hit=True: **命中即返回**，不空等满窗口（消除“掐点说话”，见 P0-1）；
+      until_n_events=N: 收满 N 条命中即返回。二者任一达标即刻返回（+短暂收拢同批事件）。
+    - fold_stack=True: 折叠调用栈顶部的 hook 框架帧，直接看到真实 caller（raw 传 False）。
     """
-    evts = client.collect_sse(seconds=seconds, max_events=max_events)
-    return {"count": len(evts), "seconds": seconds, "events": evts}
+    evts = client.collect_sse(seconds=seconds, max_events=max_events,
+                              until_first_hit=until_first_hit, until_n_events=until_n_events,
+                              fold_stack=fold_stack)
+    return {"count": len(evts), "seconds": seconds,
+            "early_return": bool(until_first_hit or until_n_events), "events": evts}
 
 
 @mcp.tool()
@@ -239,7 +249,10 @@ def trace_java(package: str, class_name: str, method: str,
                debug: bool = False,
                restart: bool = True,
                seconds: float = 12.0,
-               max_events: int = 200) -> dict:
+               max_events: int = 200,
+               until_first_hit: bool = False,
+               until_n_events: int = 0,
+               fold_stack: bool = True) -> dict:
     """一步下发一个 Java 方法 trace 并采集命中（M5）。
 
     需设备已装 **ReconBridge Tracer** LSPosed 模块并在 LSPosed 里启用 + 勾选目标 App 作用域。
@@ -254,6 +267,10 @@ def trace_java(package: str, class_name: str, method: str,
 
     注意：模块在进程启动时读配置，故对已运行的目标需 restart=True（force-stop 触发重载），
     之后在 seconds 窗口内手动触发目标行为（如唤起小爱问一句）即可收到命中。
+
+    - until_first_hit=True / until_n_events=N: **命中即返回**，不空等满窗口（P0-1）；
+      对“重启目标→手动触发一次→拿到命中”的迭代尤其省时，无需再和窗口掐点。
+    - fold_stack=True: 折叠调用栈顶部 hook 框架帧，直接看到真实 caller。
     """
     capture: dict[str, Any] = {"this": this, "when": when, "stack": stack}
     if capture_args is not None:
@@ -275,8 +292,11 @@ def trace_java(package: str, class_name: str, method: str,
         target["params"] = params
     config = {"package": package, "restart": restart, "debug": debug, "targets": [target]}
     posted = client.post_json("/hook", config)
-    evts = client.collect_sse(seconds=seconds, max_events=max_events)
-    return {"posted": posted, "count": len(evts), "seconds": seconds, "events": evts}
+    evts = client.collect_sse(seconds=seconds, max_events=max_events,
+                              until_first_hit=until_first_hit, until_n_events=until_n_events,
+                              fold_stack=fold_stack)
+    return {"posted": posted, "count": len(evts), "seconds": seconds,
+            "early_return": bool(until_first_hit or until_n_events), "events": evts}
 
 
 @mcp.tool()
@@ -365,6 +385,51 @@ def dump_dex(package: str, symbol: str = "", offset: str = "", base_arg: int = 0
 def list_dumps() -> dict:
     """列出已落盘的内存 dump（用 read_remote_file 或 pull 取回）。"""
     return client.get_json("/dumps")
+
+
+@mcp.tool()
+def list_artifacts(package_name: str = "") -> dict:
+    """列出 PC 工作目录里某包（或全部包）已产出的物件：已拉的 apk、已拉的 native so、
+    已反编译的 jadx 目录、已反编译的 Hermes 目录。免去“到底拉过/反编译过没有”的翻找（P1-6）。
+
+    package_name 为空则枚举工作目录下所有包。路径可直接喂给 decompile_apk / ghidra_analyze。
+    """
+    base = settings.workdir
+
+    def scan(pkg_dir: Path) -> dict:
+        apk_dir = pkg_dir / "apk"
+        libs_dir = pkg_dir / "libs"
+        apks = sorted(str(p) for p in apk_dir.glob("*.apk")) if apk_dir.is_dir() else []
+        libs = sorted(str(p) for p in libs_dir.glob("*.so")) if libs_dir.is_dir() else []
+        # jadx 输出默认在 apk 同级的 "<stem>-jadx/"；Hermes 在 "<stem>-hermes/"
+        jadx = sorted(str(p) for p in pkg_dir.rglob("*-jadx") if p.is_dir())
+        hermes = sorted(str(p) for p in pkg_dir.rglob("*-hermes") if p.is_dir())
+        return {
+            "package": pkg_dir.name,
+            "apks": apks,
+            "libs": libs,
+            "jadx_dirs": jadx,
+            "hermes_dirs": hermes,
+            "has_apk": bool(apks),
+            "has_decompiled": bool(jadx),
+        }
+
+    if package_name:
+        pkg_dir = base / package_name
+        if not pkg_dir.is_dir():
+            return {"package": package_name, "exists": False,
+                    "note": "工作目录下无该包产出物；用 pull_apk / pull_libs 先拉取"}
+        return {"exists": True, **scan(pkg_dir)}
+
+    pkgs = []
+    if base.is_dir():
+        for d in sorted(base.iterdir()):
+            if not d.is_dir() or d.name in ("files",):
+                continue
+            info = scan(d)
+            if info["apks"] or info["libs"] or info["jadx_dirs"] or info["hermes_dirs"]:
+                pkgs.append(info)
+    return {"workdir": str(base), "count": len(pkgs), "packages": pkgs}
 
 
 @mcp.tool()

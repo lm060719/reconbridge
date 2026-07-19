@@ -32,7 +32,7 @@
 > 已验证环境（仅供参考，不是硬性要求）：Xiaomi SM8750 / Android 16 / HyperOS / KernelSU + ZygiskNext + LSPosed。
 
 **连接**：默认走 **adb**（`RECONBRIDGE_TRANSPORT=adb`），MCP 自动 `adb forward` 到本地端口并自动从设备读 token（真实 base_url 见 `device_status`）。守护进程设备端口默认 **8787** 且**默认关闭**，需在 KernelSU WebUI 开关或 `rbctl enable` 打开。也支持 `wifi` 模式（局域网直连，需 `RECONBRIDGE_URL` + `RECONBRIDGE_TOKEN`）。
-**多设备**：adb 接了多台/多链路时 MCP 会报 `more than one device` → `adb devices` 后 `adb disconnect <多余链路>`，或设 `RECONBRIDGE_SERIAL=<序列号>`。
+**多设备**：MCP 会**自动挑唯一在线设备**并忽略 `offline`/`unauthorized` 残留链路（如残留的 tls-connect 链路），无需手动 `adb disconnect`。仅当**多台都在线**时才会报清单让你设 `RECONBRIDGE_SERIAL=<序列号>` 指定其一。
 
 ---
 
@@ -45,7 +45,7 @@
 
 ---
 
-## 3. 全部 MCP 工具（20 个）
+## 3. 全部 MCP 工具（21 个）
 
 ### 3.1 设备原子能力（M1，7 个）
 | 工具 | 签名 | 用途 |
@@ -71,20 +71,21 @@
 
 > **重型工具路径坑**：Ghidra 需 JDK21 且**必须装在 ASCII 路径**（安装路径含非 ASCII 字符会让 Ghidra 的 log4j 初始化崩溃）。若仓库本身在非 ASCII 路径下，把 Ghidra/JDK 放到 ASCII 目录并用 `RECONBRIDGE_NATIVE_TOOLS` 指定（Windows 默认回退到 `<盘符>:/ReconBridgeTools`）。
 
-### 3.3 动态 hook / 内存 dump（M3 native + M4，6 个）
+### 3.3 动态 hook / 内存 dump / 产出物（M3 native + M4，7 个）
 | 工具 | 签名 | 用途 |
 |---|---|---|
 | `post_hook` | `(config)` | 下发原始 hook 配置（native 或 java，见协议）。**通用入口** |
 | `list_hooks` | `()` | 列当前已下发配置 |
 | `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 hook 配置 |
-| `collect_events` | `(seconds=10, max_events=200)` | 连 SSE 收 N 秒内命中事件（参数/返回值/栈/dump 通知） |
+| `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**，不空等满窗口；`fold_stack` 折叠栈顶 hook 框架帧 |
 | `dump_dex` | `(package, symbol="", offset="", base_arg=0, size_arg=1, lib="libart.so", restart=True)` | hook dex 加载入口，把内存中已解密 dex 回传落盘（脱壳） |
 | `list_dumps` | `()` | 列已落盘 dump（用 `read_remote_file` 取回） |
+| `list_artifacts` | `(package_name="")` | 列 PC 已产出物：已拉 apk / native so / jadx 目录 / Hermes 目录，免翻找是否拉过/反编译过 |
 
 ### 3.4 Java trace / 实时篡改（M5，2 个）★ 面向 LSPosed 开发
 | 工具 | 签名 | 用途 |
 |---|---|---|
-| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序 |
+| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`until_first_hit=True` 命中即返回 |
 | `patch_java` | `(package, class_name, method, params=None, replace_args=None, replace_return=None, skip_original=False, trace=True, capture_args=None, this="class", when="after", hook_id="", debug=False, restart=True, seconds=0, max_events=100)` | **实时篡改**：改参数 / 改返回值 / 跳过原方法。篡改持久生效直到 `unhook` |
 
 ---
@@ -140,6 +141,11 @@ patch_java("com.target.app", "com.target.Security", "verify",
 unhook(package="com.target.app")   # + 用外部 adb: adb shell am force-stop <pkg> 清掉运行进程里的活 hook
 ```
 
+> **推荐套路：先验证，再固化。** 定位到候选方法后，别急着写模块 + 编译 + 安装 + 测试整轮。
+> 先用 `patch_java` **现场验证想法**——"skip 掉这个方法真能拦住跳转吗？""把返回值改成 true 有效吗？"
+> ——`skip_original` / `replace_return` / `replace_args` 秒级见效。验证通过后再把逻辑固化进 APK 模块，
+> 能省掉早期若干轮"改代码→编译→装→测"。
+
 **D. native 层 hook（M3，非 Java）** —— 见 `m3/HOOK_PROTOCOL.md`，用 `post_hook` 下发 `lib+symbol`/`offset` 目标，`collect_events` 收命中。
 
 ---
@@ -148,11 +154,11 @@ unhook(package="com.target.app")   # + 用外部 adb: adb shell am force-stop <p
 
 1. **adb + Git Bash（Windows）**：所有 adb 命令前 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`，否则 `/data/...` 被改写成 Windows 路径。
 2. **已运行的目标要 `restart:true`**：模块/native 层在**进程启动时**读一次配置；改配置后目标不重启不生效（`restart` 会 `am force-stop` 触发重注入）。
-3. **稀疏事件的采集时序**：`collect_sse` 靠 deadline 控窗口（`read=None`）；采集时**在窗口内触发**目标行为，广播器不回放历史。
+3. **稀疏事件的采集时序**：广播器**不回放历史**，命中必须在采集期间发生。**优先用 `until_first_hit=True`**（命中即返回，不必和窗口掐点）；把 `seconds` 设大些当兜底即可，触发晚也没关系。仅当就是要固定窗口批量收集时才用纯 `seconds`。
 4. **控制台中文可能显示成乱码**：多为终端编码问题（如 Windows Git Bash），数据本身是 UTF-8。验证时写 UTF-8 文件再用 Read 看，或设 `PYTHONUTF8=1 PYTHONIOENCODING=utf-8`。
 5. **改了 `pc/reconbridge_mcp/*.py` 要重启 MCP server** 才生效（新会话天然是新 server，不受影响）。
 6. **LSPosed 模块必须人工启用 + 勾作用域**；悬浮窗/自绘/Compose 类 UI 不一定走 `Activity.onResume`，验证挑必然会走的业务方法。
-7. **多设备/多链路** → `adb disconnect` 多余链路或设 `RECONBRIDGE_SERIAL`。
+7. **多设备/多链路** → MCP 自动挑唯一在线设备、忽略离线残链；仅**多台都在线**时才需设 `RECONBRIDGE_SERIAL`。
 8. **篡改用完要恢复**：`unhook` + `adb shell am force-stop <pkg>`，否则活 hook 留在运行进程里。
 9. **模块日志**：`XposedBridge.log` 不一定进 logcat；模块另有 `android.util.Log`（tag `ReconTracer`），`adb logcat -s ReconTracer` 可看装 hook/错误（逐命中日志需配置 `debug:true`）。
 
