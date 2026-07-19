@@ -58,6 +58,15 @@ Write-Host "[3/3] registering into Claude Code (transport=$transport) ..." -Fore
 & $exe --register --transport $transport
 if ($LASTEXITCODE -ne 0) { throw "register failed (exit $LASTEXITCODE)" }
 
+# add the install dir to the user PATH so `reconbridge-mcp --serve` works from any new terminal
+$pathCur = [Environment]::GetEnvironmentVariable("Path", "User")
+$pathParts = if ($pathCur) { $pathCur -split ';' } else { @() }
+if ($pathParts -notcontains $app) {
+    $newPath = if ($pathCur) { "$pathCur;$app" } else { $app }
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Write-Host "[PATH] added to user PATH (open a new terminal to use it): $app" -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "OK - install complete." -ForegroundColor Green
 Write-Host "  Restart Claude Code, then verify with 'claude mcp list' or /mcp (look for reconbridge)." -ForegroundColor Green
@@ -67,4 +76,4 @@ Write-Host "   - Needs adb on PATH (for a real device; not needed in wifi mode).
 Write-Host "   - jadx / Ghidra are optional; unzip into $dest\tools\ to be auto-detected (see toolchain_status)." -ForegroundColor DarkGray
 Write-Host "   - The device-side KernelSU module is flashed separately (see README)." -ForegroundColor DarkGray
 Write-Host "   - Update: re-run this command (overwrites in place, keeps work\). Uninstall: run uninstall.ps1." -ForegroundColor DarkGray
-Write-Host "   - GUI console: & `"$exe`" --serve  (pick transport / view status & monitors in a browser)." -ForegroundColor DarkGray
+Write-Host "   - GUI console: open a NEW terminal then 'reconbridge-mcp --serve' (or run & `"$exe`" --serve right now)." -ForegroundColor DarkGray

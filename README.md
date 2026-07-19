@@ -45,7 +45,10 @@ irm https://github.com/lm060719/reconbridge/releases/latest/download/uninstall.p
 **本地控制台（可选，图形化选连接方式 / 看状态）**
 
 ```powershell
-reconbridge-mcp.exe --serve        # 浏览器自动打开 127.0.0.1:9000（源码装法：python -m reconbridge_mcp --serve）
+reconbridge-mcp --serve            # 一键安装会把它加进 PATH——装完「新开一个终端」即可用；浏览器自动打开 127.0.0.1:9000
+# 若提示找不到命令（PATH 未生效或未加），用全路径：
+#   %LOCALAPPDATA%\ReconBridge\reconbridge-mcp\reconbridge-mcp.exe --serve
+# 源码装法：python -m reconbridge_mcp --serve
 ```
 
 网页里选 adb / wifi、一键连接、看 daemon 状态与只读监控（活动 hook / 近期事件流 / 落盘 dumps），省去命令行设环境变量、手抄 token。仅绑 `127.0.0.1`（本机）。`--port N` 改端口、`--no-open` 不自动开浏览器。

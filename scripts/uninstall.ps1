@@ -69,6 +69,14 @@ if ($purgeAll) {
     }
 }
 
+# remove the install dir from the user PATH (added by install.ps1)
+$pathCur = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($pathCur -and (($pathCur -split ';') -contains $app)) {
+    $newPath = (($pathCur -split ';') | Where-Object { $_ -ne $app }) -join ';'
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+    Write-Host "  removed from user PATH: $app"
+}
+
 Write-Host ""
 Write-Host "OK - uninstall complete. Restart Claude Code to take effect." -ForegroundColor Green
 Write-Host "  Note: remove the device-side KernelSU module (if flashed) in the KernelSU manager." -ForegroundColor DarkGray
