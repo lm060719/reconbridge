@@ -73,7 +73,7 @@ def register(transport: str = "adb", print_only: bool = False) -> int:
 
     cfg_path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                         encoding="utf-8")
-    print(f"[✓] 已把 reconbridge 写入 {cfg_path}（用户级，任意目录可用）")
+    print(f"[OK] 已把 reconbridge 写入 {cfg_path}（用户级，任意目录可用）")
     print(f"    command: {entry['command']}")
     print(f"    transport: {transport}")
     print("[i] 重启 Claude Code，然后 `claude mcp list` 或 /mcp 里应能看到 reconbridge。")
@@ -106,7 +106,7 @@ def unregister(print_only: bool = False) -> int:
     del servers["reconbridge"]
     cfg_path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                         encoding="utf-8")
-    print(f"[✓] 已从 {cfg_path} 移除 reconbridge。重启 Claude Code 生效。")
+    print(f"[OK] 已从 {cfg_path} 移除 reconbridge。重启 Claude Code 生效。")
     return 0
 
 
