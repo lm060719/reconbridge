@@ -19,13 +19,9 @@
             android:name="xposedscope"
             android:resource="@array/xposed_scope" />
 
+        <!-- 说明页保留但不在桌面/应用列表显示图标；LSPosed 仍通过 xposedmodule 元数据识别本模块。 -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="false" />
     </application>
 </manifest>
