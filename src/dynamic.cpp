@@ -103,6 +103,13 @@ class Broadcaster {
     std::mutex m_;
     std::set<std::shared_ptr<Subscriber>> subs_;
 
+    // 环形缓冲：保留最近 N 条事件，供 GET /recent 事后采集（P0-1）——
+    // 命中即便发生在 SSE 采集开始之前，也能事后补捞，不必"掐点"连着流。
+    std::mutex ring_m_;
+    std::deque<std::pair<uint64_t, std::string>> ring_;
+    uint64_t seq_ = 0;
+    static constexpr size_t kRingMax = 400;
+
 public:
     std::shared_ptr<Subscriber> subscribe() {
         auto s = std::make_shared<Subscriber>();
@@ -115,12 +122,31 @@ public:
         subs_.erase(s);
     }
     void broadcast(const std::string& line) {
+        {   // 先入环形缓冲（独立锁，不与订阅者分发互相阻塞）
+            std::lock_guard<std::mutex> lk(ring_m_);
+            ring_.push_back({++seq_, line});
+            while (ring_.size() > kRingMax) ring_.pop_front();
+        }
         std::lock_guard<std::mutex> lk(m_);
         for (auto& s : subs_) s->push(line);
     }
     size_t count() {
         std::lock_guard<std::mutex> lk(m_);
         return subs_.size();
+    }
+
+    // 取缓冲里 seq>since 的事件，最多保留最新 limit 条（limit=0 只用于取游标）。
+    std::vector<std::pair<uint64_t, std::string>> recent(uint64_t since, size_t limit) {
+        std::lock_guard<std::mutex> lk(ring_m_);
+        std::vector<std::pair<uint64_t, std::string>> out;
+        for (auto& e : ring_)
+            if (e.first > since) out.push_back(e);
+        if (out.size() > limit) out.erase(out.begin(), out.begin() + (out.size() - limit));
+        return out;
+    }
+    uint64_t latest_seq() {
+        std::lock_guard<std::mutex> lk(ring_m_);
+        return seq_;
     }
 };
 
@@ -440,6 +466,31 @@ static void handle_events_sse(const Request&, Response& res) {
         [sub](bool) { g_broadcaster.unsubscribe(sub); });
 }
 
+// GET /recent —— 事后采集：返回环形缓冲里最近的事件（P0-1）。
+// query: limit（默认 200，最多返回条数；0 只取游标）、since_seq（只返回该游标之后的）。
+// 返回 {latest_seq, count, events:[...]}；latest_seq 可作为下次的 since_seq 游标。
+static void handle_recent(const Request& req, Response& res) {
+    uint64_t since = 0;
+    size_t limit = 200;
+    if (req.has_param("since_seq"))
+        since = strtoull(req.get_param_value("since_seq").c_str(), nullptr, 10);
+    if (req.has_param("limit")) {
+        long l = strtol(req.get_param_value("limit").c_str(), nullptr, 10);
+        if (l >= 0) limit = (size_t)l;
+    }
+    auto items = g_broadcaster.recent(since, limit);
+    json arr = json::array();
+    for (auto& it : items) {
+        try {
+            arr.push_back(json::parse(it.second));  // 事件本是 JSON，尽量以对象返回
+        } catch (...) {
+            arr.push_back(it.second);               // 解析失败原样字符串
+        }
+    }
+    reply(res, 200, {{"latest_seq", g_broadcaster.latest_seq()},
+                     {"count", arr.size()}, {"events", arr}});
+}
+
 // POST /dump_dex —— 便捷封装：下发一个“命中即 dump 内存区”的 hook 配置。
 // body: {package, lib, symbol|offset, base_arg, size_arg, max?, ext?, restart?}
 // 语义：hook 到 dex 加载入口（如 libart 的 OpenMemory/DexFile 构造），命中时把
@@ -513,6 +564,7 @@ void register_routes(httplib::Server& svr) {
     svr.Post("/dump_dex", handle_dump_dex);
     svr.Get("/dumps", handle_dumps);
     svr.Get("/events", handle_events_sse);  // SSE
+    svr.Get("/recent", handle_recent);      // 事后采集环形缓冲
 }
 
 // ---------------------------------------------------------------------------

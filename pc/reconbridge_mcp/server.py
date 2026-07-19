@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from .client import ReconError, client
+from .client import ReconError, client, _fold_stack
 from .settings import settings
 from . import external
 
@@ -218,7 +218,8 @@ def unhook(package: str, hook_id: str = "") -> dict:
 @mcp.tool()
 def collect_events(seconds: float = 10.0, max_events: int = 200,
                    until_first_hit: bool = False, until_n_events: int = 0,
-                   fold_stack: bool = True) -> dict:
+                   fold_stack: bool = True,
+                   include_recent: bool = False, since_seq: int = 0) -> dict:
     """连 hook 事件流(SSE)收集命中事件（参数/返回值/调用栈/dump 通知）。
 
     先 post_hook 下发配置并启动/重启目标，再调用本工具采集。
@@ -226,13 +227,29 @@ def collect_events(seconds: float = 10.0, max_events: int = 200,
     - seconds: 采集窗口上限（兜底）。
     - until_first_hit=True: **命中即返回**，不空等满窗口（消除“掐点说话”，见 P0-1）；
       until_n_events=N: 收满 N 条命中即返回。二者任一达标即刻返回（+短暂收拢同批事件）。
+    - include_recent=True: **事后采集**——先从守护进程环形缓冲补捞历史命中（P0-1），命中即便
+      发生在本次采集开始之前也能拿到，并可立刻满足早返回；since_seq 只取该游标之后的增量。
     - fold_stack=True: 折叠调用栈顶部的 hook 框架帧，直接看到真实 caller（raw 传 False）。
     """
     evts = client.collect_sse(seconds=seconds, max_events=max_events,
                               until_first_hit=until_first_hit, until_n_events=until_n_events,
-                              fold_stack=fold_stack)
+                              fold_stack=fold_stack, include_recent=include_recent,
+                              since_seq=since_seq)
     return {"count": len(evts), "seconds": seconds,
             "early_return": bool(until_first_hit or until_n_events), "events": evts}
+
+
+@mcp.tool()
+def recent_events(limit: int = 50, since_seq: int = 0) -> dict:
+    """取守护进程环形缓冲里**最近的命中事件**（事后采集，P0-1）——无需正连着 SSE。
+
+    典型用法：post_hook 下发后先记下游标（recent_events(limit=0) 的 latest_seq），触发目标行为，
+    再 recent_events(since_seq=<游标>) 补捞这期间的所有命中；或忘了开采集时直接捞最近若干条。
+    返回 {latest_seq, count, events}；latest_seq 可作下次 since_seq 只取增量。
+    """
+    data = client.get_recent(limit=limit, since_seq=since_seq)
+    evts = [_fold_stack(e) for e in data.get("events", [])]
+    return {"latest_seq": data.get("latest_seq"), "count": len(evts), "events": evts}
 
 
 @mcp.tool()
@@ -253,7 +270,9 @@ def trace_java(package: str, class_name: str, method: str,
                max_events: int = 200,
                until_first_hit: bool = False,
                until_n_events: int = 0,
-               fold_stack: bool = True) -> dict:
+               fold_stack: bool = True,
+               include_recent: bool = False,
+               since_seq: int = 0) -> dict:
     """一步下发一个 Java 方法 trace 并采集命中（M5）。
 
     需设备已装 **ReconBridge Tracer** LSPosed 模块并在 LSPosed 里启用 + 勾选目标 App 作用域。
@@ -302,7 +321,8 @@ def trace_java(package: str, class_name: str, method: str,
     posted = client.post_json("/hook", config)
     evts = client.collect_sse(seconds=seconds, max_events=max_events,
                               until_first_hit=until_first_hit, until_n_events=until_n_events,
-                              fold_stack=fold_stack)
+                              fold_stack=fold_stack, include_recent=include_recent,
+                              since_seq=since_seq)
     return {"posted": posted, "count": len(evts), "seconds": seconds,
             "early_return": bool(until_first_hit or until_n_events), "events": evts}
 

@@ -45,7 +45,7 @@
 
 ---
 
-## 3. 全部 MCP 工具（21 个）
+## 3. 全部 MCP 工具（22 个）
 
 ### 3.1 设备原子能力（M1，7 个）
 | 工具 | 签名 | 用途 |
@@ -71,13 +71,14 @@
 
 > **重型工具路径坑**：Ghidra 需 JDK21 且**必须装在 ASCII 路径**（安装路径含非 ASCII 字符会让 Ghidra 的 log4j 初始化崩溃）。若仓库本身在非 ASCII 路径下，把 Ghidra/JDK 放到 ASCII 目录并用 `RECONBRIDGE_NATIVE_TOOLS` 指定（Windows 默认回退到 `<盘符>:/ReconBridgeTools`）。
 
-### 3.3 动态 hook / 内存 dump / 产出物（M3 native + M4，7 个）
+### 3.3 动态 hook / 内存 dump / 产出物（M3 native + M4，8 个）
 | 工具 | 签名 | 用途 |
 |---|---|---|
 | `post_hook` | `(config)` | 下发原始 hook 配置（native 或 java，见协议）。**通用入口** |
 | `list_hooks` | `()` | 列当前已下发配置 |
 | `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 hook 配置 |
-| `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**，不空等满窗口；`fold_stack` 折叠栈顶 hook 框架帧 |
+| `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**；**`include_recent=True` 事后补捞**环形缓冲历史命中（命中发生在采集开始前也能拿到）；`fold_stack` 折叠栈顶 hook 框架帧 |
+| `recent_events` | `(limit=50, since_seq=0)` | **事后采集**：直接取守护进程环形缓冲里最近的命中，无需正连着 SSE。返回 `latest_seq` 可作游标只取增量 |
 | `dump_dex` | `(package, symbol="", offset="", base_arg=0, size_arg=1, lib="libart.so", restart=True)` | hook dex 加载入口，把内存中已解密 dex 回传落盘（脱壳） |
 | `list_dumps` | `()` | 列已落盘 dump（用 `read_remote_file` 取回） |
 | `list_artifacts` | `(package_name="")` | 列 PC 已产出物：已拉 apk / native so / jadx 目录 / Hermes 目录，免翻找是否拉过/反编译过 |
@@ -85,7 +86,7 @@
 ### 3.4 Java trace / 实时篡改（M5，2 个）★ 面向 LSPosed 开发
 | 工具 | 签名 | 用途 |
 |---|---|---|
-| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`paths` 按路径取嵌套值、`render:"deep"` 深序列化、`until_first_hit=True` 命中即返回 |
+| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`paths` 按路径取嵌套值、`render:"deep"` 深序列化、`until_first_hit=True` 命中即返回 |
 | `patch_java` | `(package, class_name, method, params=None, replace_args=None, replace_return=None, skip_original=False, trace=True, capture_args=None, this="class", when="after", hook_id="", debug=False, restart=True, seconds=0, max_events=100)` | **实时篡改**：改参数 / 改返回值 / 跳过原方法。篡改持久生效直到 `unhook` |
 
 ---
@@ -155,7 +156,7 @@ unhook(package="com.target.app")   # + 用外部 adb: adb shell am force-stop <p
 
 1. **adb + Git Bash（Windows）**：所有 adb 命令前 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`，否则 `/data/...` 被改写成 Windows 路径。
 2. **已运行的目标要 `restart:true`**：模块/native 层在**进程启动时**读一次配置；改配置后目标不重启不生效（`restart` 会 `am force-stop` 触发重注入）。
-3. **稀疏事件的采集时序**：广播器**不回放历史**，命中必须在采集期间发生。**优先用 `until_first_hit=True`**（命中即返回，不必和窗口掐点）；把 `seconds` 设大些当兜底即可，触发晚也没关系。仅当就是要固定窗口批量收集时才用纯 `seconds`。
+3. **稀疏事件的采集时序**：**优先 `until_first_hit=True`**（命中即返回，不必和窗口掐点）。守护进程带**最近 ~400 条环形缓冲**，故命中即便发生在采集开始前也能捞回——用 `collect_events(include_recent=True)` 或直接 `recent_events()`（推荐流程：post_hook 后 `recent_events(limit=0)` 记游标 → 触发 → 事后 `recent_events(since_seq=游标)` 补捞）。`seconds` 只当兜底。
 4. **控制台中文可能显示成乱码**：多为终端编码问题（如 Windows Git Bash），数据本身是 UTF-8。验证时写 UTF-8 文件再用 Read 看，或设 `PYTHONUTF8=1 PYTHONIOENCODING=utf-8`。
 5. **改了 `pc/reconbridge_mcp/*.py` 要重启 MCP server** 才生效（新会话天然是新 server，不受影响）。
 6. **LSPosed 模块必须人工启用 + 勾作用域**；悬浮窗/自绘/Compose 类 UI 不一定走 `Activity.onResume`，验证挑必然会走的业务方法。

@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -49,6 +50,16 @@ def _fold_stack(evt: Any) -> Any:
     out["stack"] = [f"…（{i} 个 hook 框架帧已折叠）"] + st[i:]
     out["stack_folded"] = i
     return out
+
+
+def _evt_key(evt: Any) -> str:
+    """事件去重键：/recent 事后补捞与 SSE 实时流可能各带一份同一事件，按规范化 JSON 去重。"""
+    if isinstance(evt, dict):
+        try:
+            return json.dumps(evt, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            return repr(evt)
+    return str(evt)
 
 
 class ReconClient:
@@ -208,9 +219,21 @@ class ReconClient:
                         total += len(chunk)
         return total
 
+    def get_recent(self, limit: int = 200, since_seq: int = 0) -> dict:
+        """取守护进程环形缓冲里最近的事件（事后采集，P0-1）。
+
+        返回 {latest_seq, count, events}。latest_seq 可作下次 since_seq 游标，
+        只取增量。limit=0 只取游标不取事件。命中即便发生在采集开始前也能补捞。
+        """
+        params: dict[str, str] = {"limit": str(limit)}
+        if since_seq:
+            params["since_seq"] = str(since_seq)
+        return self.get_json("/recent", params)
+
     def collect_sse(self, seconds: float = 10.0, max_events: int = 200,
                     until_first_hit: bool = False, until_n_events: int = 0,
-                    linger_ms: int = 350, fold_stack: bool = True) -> list:
+                    linger_ms: int = 350, fold_stack: bool = True,
+                    include_recent: bool = False, since_seq: int = 0) -> list:
         """连 /events(SSE) 收集 hook 命中事件，返回事件（dict）列表。
 
         - seconds: 采集窗口上限（兜底）。
@@ -218,9 +241,12 @@ class ReconClient:
           “命中”= 带 hook_id 的事件（dump_saved 等通知不计）。达阈值后再等 linger_ms 收拢
           同批到达的事件（如同一次调用的 before+after、多目标齐发），避免只拿到半批。
         - fold_stack: 折叠调用栈顶部的 hook 框架帧（P1-5），raw 需求可传 False。
+        - include_recent: 先从环形缓冲补捞历史事件（P0-1 事后采集）——命中即便发生在本次
+          采集开始之前也能拿到，且能立刻满足早返回阈值。since_seq 只取该游标之后的增量。
 
         实现说明：SSE 阻塞读放到后台线程，主线程按 wall-clock 轮询阈值，达标即刻返回并
         强制关闭底层连接——这样“命中即返回”真正是秒级，而不必等下一个 ~15s 保活 ping 才醒。
+        /recent 补捞与 SSE 实时流按规范化 JSON 去重（同一事件可能两处各来一份）。
         """
         import json as _json
         import threading
@@ -228,10 +254,31 @@ class ReconClient:
 
         self.ensure()
         events: list = []
+        seen: set = set()
         hits = 0
         lock = threading.Lock()
         stop = threading.Event()
         holder: dict[str, Any] = {}
+
+        want_early = until_first_hit or until_n_events > 0
+        threshold = until_n_events if until_n_events > 0 else 1
+
+        # 事后补捞：先把环形缓冲里的历史事件塞进来，使早返回也能被"已发生的命中"满足
+        if include_recent:
+            try:
+                data = self.get_recent(limit=max_events, since_seq=since_seq)
+                for evt in data.get("events", []):
+                    if fold_stack:
+                        evt = _fold_stack(evt)
+                    key = _evt_key(evt)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    events.append(evt)
+                    if isinstance(evt, dict) and "hook_id" in evt:
+                        hits += 1
+            except Exception:
+                pass
 
         def reader() -> None:
             nonlocal hits
@@ -254,7 +301,11 @@ class ReconClient:
                             evt = payload
                         if fold_stack:
                             evt = _fold_stack(evt)
+                        key = _evt_key(evt)
                         with lock:
+                            if key in seen:
+                                continue  # 与 /recent 补捞去重
+                            seen.add(key)
                             events.append(evt)
                             if isinstance(evt, dict) and "hook_id" in evt:
                                 hits += 1
@@ -267,13 +318,15 @@ class ReconClient:
                 except Exception:
                     pass
 
+        # 补捞已满足早返回阈值（或已收满）→ 无需再连 SSE，直接返回
+        if (want_early and hits >= threshold) or len(events) >= max_events:
+            return list(events)
+
         t = threading.Thread(target=reader, daemon=True)
         t.start()
 
         deadline = time.time() + seconds
         stop_deadline: Optional[float] = None
-        want_early = until_first_hit or until_n_events > 0
-        threshold = until_n_events if until_n_events > 0 else 1
         while True:
             time.sleep(0.05)
             now = time.time()

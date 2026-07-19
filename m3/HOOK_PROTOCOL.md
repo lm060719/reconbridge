@@ -81,6 +81,9 @@ hook 命中实时推流。每条事件：
 ```
 - **SSE**：`GET /events`（`Accept: text/event-stream`），每条事件一行 `data: {json}\n\n`。curl 友好。
 - **WS**：`ws://host:port+1/events?token=...`（独立端口，见下）。二者内容一致。
+- **事后采集**：`GET /recent?limit=N&since_seq=S` 返回环形缓冲里最近事件 `{latest_seq,count,events}`。
+  SSE/WS 不回放历史，命中若发生在连流之前就漏了；`/recent` 补上——保留最近 ~400 条，命中即便在
+  采集开始前也能捞回（PC 侧 `recent_events` / `collect_events(include_recent=True)`）。`latest_seq` 作游标取增量。
 
 > 说明：M1 守护进程用 cpp-httplib（仅 HTTP）。SSE 走同一 HTTP 端口；WebSocket 用**独立端口 = HTTP 端口+1** 的极简 WS 服务实现，二选一即可，PC 侧推荐 SSE（更简单）。
 
