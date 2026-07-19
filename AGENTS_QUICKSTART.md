@@ -45,7 +45,7 @@
 
 ---
 
-## 3. 全部 MCP 工具（22 个）
+## 3. 全部 MCP 工具（25 个）
 
 ### 3.1 设备原子能力（M1，7 个）
 | 工具 | 签名 | 用途 |
@@ -88,6 +88,13 @@
 |---|---|---|
 | `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`paths` 按路径取嵌套值、`render:"deep"` 深序列化、`until_first_hit=True` 命中即返回 |
 | `patch_java` | `(package, class_name, method, params=None, replace_args=None, replace_return=None, skip_original=False, trace=True, capture_args=None, this="class", when="after", hook_id="", debug=False, restart=True, seconds=0, max_events=100)` | **实时篡改**：改参数 / 改返回值 / 跳过原方法。篡改持久生效直到 `unhook` |
+
+### 3.5 场景捕获 + 差分（P2，3 个）★ 回答"A 与 B 行为为何不同"
+| 工具 | 签名 | 用途 |
+|---|---|---|
+| `capture_scenario` | `(name, seconds=20, quiet_ms=1500, max_events=500, fold_stack=True)` | 先 arm 一组宽 hook，调用后**在窗口内做一次操作**，抓完这一波（静默 quiet_ms 即停）存盘为命名场景 |
+| `diff_scenarios` | `(a, b)` | 比对两场景：**只在A/只在B命中的方法**、两者都命中但**参数值不同**的方法 |
+| `list_scenarios` | `()` | 列已捕获场景 |
 
 ---
 
@@ -149,6 +156,18 @@ unhook(package="com.target.app")   # + 用外部 adb: adb shell am force-stop <p
 > 能省掉早期若干轮"改代码→编译→装→测"。
 
 **D. native 层 hook（M3，非 Java）** —— 见 `m3/HOOK_PROTOCOL.md`，用 `post_hook` 下发 `lib+symbol`/`offset` 目标，`collect_events` 收命中。
+
+**E. "A 与 B 行为为何不同"（场景差分，P2）** —— 逆向里最常见的一类问题（如「查看X」跳转而「打开X」不跳、App 对话渲染答案卡而悬浮窗不渲染）。
+```
+# 1) 先 arm 一组【较宽】的 trace（可疑的跳转/渲染/编排方法都挂上）
+trace_java(...)  # 或多次 post_hook；目标进程带上这些 hook 运行
+# 2) 分别捕两个场景，各在窗口内做一次对应操作
+capture_scenario("查看")   # ← 做「查看X」
+capture_scenario("打开")   # ← 做「打开X」
+# 3) 直接看差异：只在某一侧命中的方法 / 同方法参数不同
+diff_scenarios("查看", "打开")
+# → only_in_a=[..跳转相关方法..]、differing_args=[..同方法不同参数..]，一眼定位分歧点
+```
 
 ---
 

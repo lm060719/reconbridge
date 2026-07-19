@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -219,7 +221,8 @@ def unhook(package: str, hook_id: str = "") -> dict:
 def collect_events(seconds: float = 10.0, max_events: int = 200,
                    until_first_hit: bool = False, until_n_events: int = 0,
                    fold_stack: bool = True,
-                   include_recent: bool = False, since_seq: int = 0) -> dict:
+                   include_recent: bool = False, since_seq: int = 0,
+                   quiet_ms: int = 0) -> dict:
     """连 hook 事件流(SSE)收集命中事件（参数/返回值/调用栈/dump 通知）。
 
     先 post_hook 下发配置并启动/重启目标，再调用本工具采集。
@@ -234,9 +237,147 @@ def collect_events(seconds: float = 10.0, max_events: int = 200,
     evts = client.collect_sse(seconds=seconds, max_events=max_events,
                               until_first_hit=until_first_hit, until_n_events=until_n_events,
                               fold_stack=fold_stack, include_recent=include_recent,
-                              since_seq=since_seq)
+                              since_seq=since_seq, quiet_ms=quiet_ms)
     return {"count": len(evts), "seconds": seconds,
             "early_return": bool(until_first_hit or until_n_events), "events": evts}
+
+
+# =====================================================================
+# 场景捕获 + 差分（P2）—— 把"A 与 B 行为为何不同"做成一等公民
+# =====================================================================
+
+_SCEN_DIR = settings.workdir / "scenarios"
+
+
+def _scenario_path(name: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.\-]", "_", name)[:64] or "scenario"
+    _SCEN_DIR.mkdir(parents=True, exist_ok=True)
+    return _SCEN_DIR / f"{safe}.json"
+
+
+def _sig(e: Any) -> Optional[str]:
+    """方法签名（用于分组/比对）：优先 hook_id（稳定，一目标一 id），否则 class.method。"""
+    if not isinstance(e, dict):
+        return None
+    return e.get("hook_id") or f"{e.get('class', '?')}.{e.get('method', '?')}"
+
+
+def _display(e: Any) -> str:
+    return f"{e.get('class', '?')}.{e.get('method', '?')}" if isinstance(e, dict) else "?"
+
+
+def _fp(e: Any) -> str:
+    """事件的"值指纹"：拼参数/返回值/路径/字段的值，用于判断两场景同一方法参数是否不同。"""
+    if not isinstance(e, dict):
+        return ""
+    parts = []
+    for a in (e.get("args") or []):
+        parts.append(f"a{a.get('index')}={a.get('value')}")
+    if "ret" in e:
+        parts.append(f"ret={e.get('ret')}")
+    for p in (e.get("paths") or []):
+        parts.append(f"{p.get('path')}={p.get('value')}")
+    for f in (e.get("fields") or []):
+        parts.append(f"{f.get('name')}={f.get('value')}")
+    return " | ".join(parts)
+
+
+@mcp.tool()
+def capture_scenario(name: str, seconds: float = 20.0, quiet_ms: int = 1500,
+                     max_events: int = 500, fold_stack: bool = True) -> dict:
+    """记录一个「场景」的命中时间线，存盘供 diff_scenarios 比对（P2）。
+
+    前提：先用 post_hook / trace_java arm 好一组（通常较宽的）hook，目标进程已带这些 hook 运行。
+    调用本工具后**在窗口内做一次目标操作**（如「查看X」）；抓完这一波（连续 quiet_ms 无新事件即停）
+    后存盘到 work/scenarios/<name>.json。
+
+    典型流程：arm 宽 trace → capture_scenario("A") 做操作A → capture_scenario("B") 做操作B
+              → diff_scenarios("A","B") 直接看出两者方法/参数差异。
+    - quiet_ms: 命中后静默这么久即认为本波结束返回（0=不早停，跑满 seconds）。
+    """
+    cursor = client.get_recent(limit=0).get("latest_seq", 0)
+    evts = client.collect_sse(seconds=seconds, max_events=max_events, fold_stack=fold_stack,
+                              include_recent=True, since_seq=cursor, quiet_ms=quiet_ms)
+    store = {"name": name, "captured_at": int(time.time() * 1000),
+             "since_seq": cursor, "count": len(evts), "events": evts}
+    path = _scenario_path(name)
+    path.write_text(json.dumps(store, ensure_ascii=False, indent=1), encoding="utf-8")
+    methods: dict[str, int] = {}
+    for e in evts:
+        s = _sig(e)
+        if s:
+            methods[s] = methods.get(s, 0) + 1
+    return {"name": name, "count": len(evts), "distinct_methods": len(methods),
+            "methods": methods, "saved": str(path),
+            "note": ("空命中——确认已 arm hook 且窗口内确实触发了操作" if not evts else "")}
+
+
+@mcp.tool()
+def list_scenarios() -> dict:
+    """列出已捕获的场景（work/scenarios/ 下）及各自命中数。"""
+    out = []
+    if _SCEN_DIR.is_dir():
+        for p in sorted(_SCEN_DIR.glob("*.json")):
+            try:
+                s = json.loads(p.read_text(encoding="utf-8"))
+                out.append({"name": s.get("name", p.stem), "count": s.get("count"),
+                            "captured_at": s.get("captured_at"), "path": str(p)})
+            except Exception:
+                continue
+    return {"count": len(out), "scenarios": out}
+
+
+@mcp.tool()
+def diff_scenarios(a: str, b: str) -> dict:
+    """比对两个已捕获场景，给出**方法级差异**（P2）——直接回答"A 与 B 行为为何不同"。
+
+    返回：只在 A 命中的方法 / 只在 B 命中的方法 / 两者都命中但**参数值不同**的方法。
+    命中最常见的一类逆向：如「查看X」跳转而「打开X」不跳、App 对话渲染答案卡而悬浮窗不渲染。
+    """
+    pa, pb = _scenario_path(a), _scenario_path(b)
+    if not pa.exists():
+        raise ReconError(f"场景 {a} 不存在（先 capture_scenario('{a}')）")
+    if not pb.exists():
+        raise ReconError(f"场景 {b} 不存在（先 capture_scenario('{b}')）")
+    sa = json.loads(pa.read_text(encoding="utf-8"))
+    sb = json.loads(pb.read_text(encoding="utf-8"))
+
+    def index(scn: dict) -> dict:
+        d: dict[str, dict] = {}
+        for e in scn.get("events", []):
+            s = _sig(e)
+            if not s:
+                continue
+            slot = d.setdefault(s, {"display": _display(e), "count": 0, "fps": set()})
+            slot["count"] += 1
+            fp = _fp(e)
+            if fp:
+                slot["fps"].add(fp)
+        return d
+
+    ia, ib = index(sa), index(sb)
+    only_a = [{"method": ia[s]["display"], "sig": s, "hits": ia[s]["count"]}
+              for s in ia if s not in ib]
+    only_b = [{"method": ib[s]["display"], "sig": s, "hits": ib[s]["count"]}
+              for s in ib if s not in ia]
+    both, differing = [], []
+    for s in ia:
+        if s not in ib:
+            continue
+        both.append({"method": ia[s]["display"], "sig": s,
+                     "a_hits": ia[s]["count"], "b_hits": ib[s]["count"]})
+        if ia[s]["fps"] != ib[s]["fps"]:
+            av = sorted(ia[s]["fps"] - ib[s]["fps"])[:8]
+            bv = sorted(ib[s]["fps"] - ia[s]["fps"])[:8]
+            if av or bv:
+                differing.append({"method": ia[s]["display"], "sig": s,
+                                  "only_in_a_values": av, "only_in_b_values": bv})
+    return {"a": a, "b": b, "a_count": sa.get("count"), "b_count": sb.get("count"),
+            "only_in_a": sorted(only_a, key=lambda x: -x["hits"]),
+            "only_in_b": sorted(only_b, key=lambda x: -x["hits"]),
+            "in_both": both, "differing_args": differing,
+            "summary": (f"{len(only_a)} 个方法只在 A 命中、{len(only_b)} 个只在 B 命中、"
+                        f"{len(differing)} 个两者都命中但参数不同")}
 
 
 @mcp.tool()

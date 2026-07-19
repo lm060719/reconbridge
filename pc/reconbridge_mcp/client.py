@@ -233,7 +233,8 @@ class ReconClient:
     def collect_sse(self, seconds: float = 10.0, max_events: int = 200,
                     until_first_hit: bool = False, until_n_events: int = 0,
                     linger_ms: int = 350, fold_stack: bool = True,
-                    include_recent: bool = False, since_seq: int = 0) -> list:
+                    include_recent: bool = False, since_seq: int = 0,
+                    quiet_ms: int = 0) -> list:
         """连 /events(SSE) 收集 hook 命中事件，返回事件（dict）列表。
 
         - seconds: 采集窗口上限（兜底）。
@@ -243,6 +244,8 @@ class ReconClient:
         - fold_stack: 折叠调用栈顶部的 hook 框架帧（P1-5），raw 需求可传 False。
         - include_recent: 先从环形缓冲补捞历史事件（P0-1 事后采集）——命中即便发生在本次
           采集开始之前也能拿到，且能立刻满足早返回阈值。since_seq 只取该游标之后的增量。
+        - quiet_ms: 静默期早停（>0 生效）——至少命中一条后，若连续 quiet_ms 毫秒无新事件就返回。
+          适合"用户操作一次→抓完这一波→停"（场景捕获），不必等满 seconds。
 
         实现说明：SSE 阻塞读放到后台线程，主线程按 wall-clock 轮询阈值，达标即刻返回并
         强制关闭底层连接——这样“命中即返回”真正是秒级，而不必等下一个 ~15s 保活 ping 才醒。
@@ -327,16 +330,24 @@ class ReconClient:
 
         deadline = time.time() + seconds
         stop_deadline: Optional[float] = None
+        prev_n = len(events)
+        last_change = time.time()
         while True:
             time.sleep(0.05)
             now = time.time()
             with lock:
                 n_ev, n_hit = len(events), hits
+            if n_ev != prev_n:
+                prev_n = n_ev
+                last_change = now
             if want_early and n_hit >= threshold and stop_deadline is None:
                 stop_deadline = now + linger_ms / 1000.0
             if now > deadline or n_ev >= max_events:
                 break
             if stop_deadline is not None and now >= stop_deadline:
+                break
+            # 静默期早停：已有命中且连续 quiet_ms 无新事件 → 这一波结束了
+            if quiet_ms > 0 and n_hit >= 1 and (now - last_change) * 1000 >= quiet_ms:
                 break
 
         # 令后台线程尽快退出：关连接以打断阻塞的 iter_lines
