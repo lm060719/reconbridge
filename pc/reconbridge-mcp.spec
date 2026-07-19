@@ -49,6 +49,17 @@ hiddenimports += ["reconbridge_mcp", "reconbridge_mcp.server",
 # 打进 PC 控制台单页 HTML（webconsole.py 用 importlib.resources 读包内 webconsole.html）
 datas += collect_data_files("reconbridge_mcp", includes=["*.html"])
 
+# 打进 Claude Code skill：register.py --register 时会把它铺到 ~/.claude/skills/reconbridge/。
+# spec 工作目录是 pc/（build_exe.ps1 Push-Location 到此），故源在 ../skills/reconbridge。
+# 目的地 skills/reconbridge/ 对应运行期的 _MEIPASS/skills/reconbridge（见 register._skill_source_dir）。
+import os
+_skill_src = os.path.join(SPECPATH, "..", "skills", "reconbridge")
+if os.path.isdir(_skill_src):
+    for _f in os.listdir(_skill_src):
+        _fp = os.path.join(_skill_src, _f)
+        if os.path.isfile(_fp):
+            datas.append((_fp, "skills/reconbridge"))
+
 block_cipher = None
 
 a = Analysis(

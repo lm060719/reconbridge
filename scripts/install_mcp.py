@@ -6,7 +6,8 @@
   1. 计算出本机绝对路径（venv 里的 python、pc 目录）；
   2. 读入 ~/.claude.json（不存在则新建），确保顶层有 mcpServers；
   3. 写入/更新 mcpServers.reconbridge；
-  4. 写回前先备份为 ~/.claude.json.bak。
+  4. 写回前先备份为 ~/.claude.json.bak；
+  5. 把 skills/reconbridge/ 铺到 ~/.claude/skills/reconbridge/（新会话逆向任务自动加载）。
 
 用法（一般由 install.ps1 / install.sh 调用，也可单独跑）：
     python scripts/install_mcp.py
@@ -41,6 +42,21 @@ def venv_python() -> Path:
 
 def claude_config_path() -> Path:
     return Path.home() / ".claude.json"
+
+
+def install_skill() -> None:
+    """把 skills/reconbridge/ 铺到用户级 ~/.claude/skills/reconbridge/，
+    让任意新会话在逆向类任务上自动加载这套工作流（与 MCP 用户级注册对齐）。"""
+    src = REPO_ROOT / "skills" / "reconbridge"
+    if not src.is_dir():
+        print("[!] 未找到 skills/reconbridge/，跳过 skill 安装。", file=sys.stderr)
+        return
+    dst = Path.home() / ".claude" / "skills" / "reconbridge"
+    dst.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        if f.is_file():
+            shutil.copy2(f, dst / f.name)
+    print(f"[✓] 已安装 skill 到 {dst}（用户级，新会话自动可用）")
 
 
 def build_entry(transport: str) -> dict:
@@ -92,6 +108,9 @@ def main() -> int:
     print(f"[✓] 已把 reconbridge 写入 {cfg_path}（用户级，任意目录可用）")
     print(f"    command: {entry['command']}")
     print(f"    transport: {args.transport}")
+
+    install_skill()
+
     print("[i] 重启 Claude Code，然后 `claude mcp list` 或 /mcp 里应能看到 reconbridge。")
     return 0
 

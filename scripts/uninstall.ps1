@@ -48,6 +48,14 @@ if (Test-Path $exe) {
     }
 }
 
+# 1b) remove the Claude Code skill (exe --unregister already does this; this is a
+#     safety net for the PS fallback path where the exe was already gone).
+$skill = Join-Path $HOME ".claude\skills\reconbridge"
+if (Test-Path $skill) {
+    Remove-Item $skill -Recurse -Force
+    Write-Host "  removed skill $skill"
+}
+
 # 2) delete files
 Write-Host "[2/2] deleting install files ..." -ForegroundColor Yellow
 if ($purgeAll) {

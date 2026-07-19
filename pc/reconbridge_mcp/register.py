@@ -22,6 +22,43 @@ def claude_config_path() -> Path:
     return Path.home() / ".claude.json"
 
 
+def claude_skill_dir() -> Path:
+    return Path.home() / ".claude" / "skills" / "reconbridge"
+
+
+def _skill_source_dir() -> Path | None:
+    """skill 源目录。冻结（exe）时在 PyInstaller 解包根 _MEIPASS/skills/reconbridge
+    （见 spec 的 datas）；源码时在仓库 skills/reconbridge。找不到返回 None。"""
+    if FROZEN:
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        cand = base / "skills" / "reconbridge"
+    else:
+        cand = PC_DIR.parent / "skills" / "reconbridge"
+    return cand if cand.is_dir() else None
+
+
+def install_skill() -> None:
+    """把 skill 铺到用户级 ~/.claude/skills/reconbridge/，与 MCP 注册对齐，
+    让新会话在逆向类任务上自动加载工作流。找不到源就安静跳过。"""
+    src = _skill_source_dir()
+    if src is None:
+        print("[i] 未找到 skill 源，跳过 skill 安装。")
+        return
+    dst = claude_skill_dir()
+    dst.mkdir(parents=True, exist_ok=True)
+    for f in src.iterdir():
+        if f.is_file():
+            shutil.copy2(f, dst / f.name)
+    print(f"[OK] 已安装 skill 到 {dst}（新会话自动可用）")
+
+
+def uninstall_skill() -> None:
+    dst = claude_skill_dir()
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+        print(f"[OK] 已移除 skill {dst}")
+
+
 def build_entry(transport: str) -> dict:
     """构造 mcpServers.reconbridge 配置项。
 
@@ -76,6 +113,9 @@ def register(transport: str = "adb", print_only: bool = False) -> int:
     print(f"[OK] 已把 reconbridge 写入 {cfg_path}（用户级，任意目录可用）")
     print(f"    command: {entry['command']}")
     print(f"    transport: {transport}")
+
+    install_skill()
+
     print("[i] 重启 Claude Code，然后 `claude mcp list` 或 /mcp 里应能看到 reconbridge。")
     return 0
 
@@ -95,6 +135,8 @@ def unregister(print_only: bool = False) -> int:
     servers = data.get("mcpServers")
     if not (isinstance(servers, dict) and "reconbridge" in servers):
         print(f"[i] {cfg_path} 里没有 reconbridge，跳过。")
+        if not print_only:
+            uninstall_skill()  # 配置已无，但 skill 目录可能残留，一并清掉
         return 0
 
     if print_only:
@@ -107,6 +149,7 @@ def unregister(print_only: bool = False) -> int:
     cfg_path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                         encoding="utf-8")
     print(f"[OK] 已从 {cfg_path} 移除 reconbridge。重启 Claude Code 生效。")
+    uninstall_skill()
     return 0
 
 
