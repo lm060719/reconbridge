@@ -75,7 +75,7 @@ cd reconbridge
 ./install.sh
 ```
 
-装完**重启 Claude Code**，任意目录下 `claude mcp list` 或 `/mcp` 都能看到 `reconbridge`（18 个工具）。
+装完**重启 Claude Code**，任意目录下 `claude mcp list` 或 `/mcp` 都能看到 `reconbridge`（25 个工具）。
 > 脚本直接写 `~/.claude.json`（用户级作用域），比 `claude mcp add` 更稳（后者在 Windows / 非 ASCII 路径下对 JSON 引号处理有坑）。如只想在本仓库目录内启用，见 [`.mcp.json.example`](.mcp.json.example)。自己构建 exe：`./build_exe.ps1`（产出 `dist/reconbridge-mcp-win64.zip`）。
 
 ### 设备端（刷入 KernelSU 模块）

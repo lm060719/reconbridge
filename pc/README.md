@@ -2,7 +2,9 @@
 
 把 M1 的手机静态接口 + PC 本地反编译工具链，封装成 Claude Code 可直接调用的 MCP 工具。
 
-## 能力总览（12 个工具）
+## 能力总览（共 25 个工具）
+
+> 下表列 M2 的 12 个原子 / 反编译能力；另有 M3/M5 的动态 hook、Java trace、场景捕获、落盘等，完整清单见仓库根 [`AGENTS_QUICKSTART.md`](../AGENTS_QUICKSTART.md)。
 
 **设备原子能力（封装 M1 HTTP 接口）**
 | 工具 | 作用 |
