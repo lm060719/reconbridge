@@ -50,10 +50,42 @@
   .url { color: var(--accent); }
   .warn { color: var(--danger); font-size: 12px; }
   .foot { color: var(--muted); font-size: 11px; text-align: center; margin-top: 8px; }
+
+  /* --- M3 动态卡片 --- */
+  .cardhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .cardhead .label { margin: 0; }
+  .cardhead .tools { display: flex; align-items: center; gap: 8px; }
+  .count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  button.mini { padding: 5px 9px; font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 6px 0; }
+
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .item { background: #0b0d11; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .item .top { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .item .pkg { font-size: 13px; font-weight: 600; word-break: break-all; }
+  .item .meta { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-all; }
+
+  .evwrap { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; -webkit-overflow-scrolling: touch; }
+  .ev { background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .ev summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ev summary::-webkit-details-marker { display: none; }
+  .ev .t { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; flex: none; }
+  .ev .sig { font-size: 12px; word-break: break-all; flex: 1; min-width: 0; }
+  .ev pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--muted); max-height: 260px; overflow-y: auto; }
+  .tag { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; flex: none; }
+  .tag.before { background: rgba(79,140,255,.16); color: var(--accent); }
+  .tag.after  { background: rgba(53,196,138,.16); color: var(--ok); }
+  .tag.dump   { background: rgba(255,92,108,.16); color: var(--danger); }
+
+  details.fold > summary { list-style: none; cursor: pointer; color: var(--muted); font-size: 13px; padding: 2px 0; }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary::before { content: "▸ "; }
+  details.fold[open] > summary::before { content: "▾ "; }
+  pre.logbox { margin: 8px 0 0; background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 10px; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; max-height: 300px; overflow-y: auto; color: var(--muted); }
 </style>
 </head>
 <body>
-  <h1>ReconBridge <span class="mono" style="color:var(--muted);font-size:12px;">M1</span></h1>
+  <h1>ReconBridge <span class="mono" style="color:var(--muted);font-size:12px;">M3</span></h1>
   <div class="sub">通用逆向传输层 · 端口默认关闭 · token 鉴权</div>
 
   <div class="card">
@@ -100,8 +132,52 @@
     <div class="hint">修改后若端口已开启会自动重启监听。默认绑定 wlan0 的局域网 IP（非 0.0.0.0）。</div>
   </div>
 
+  <div class="card">
+    <div class="cardhead">
+      <span class="label">活动 Hook</span>
+      <div class="tools">
+        <span id="hooksCount" class="count">—</span>
+        <button id="hooksRefresh" class="mini">刷新</button>
+      </div>
+    </div>
+    <div id="hooksList" class="list"><div class="empty">加载中…</div></div>
+  </div>
+
+  <div class="card">
+    <div class="cardhead">
+      <span class="label">近期事件流</span>
+      <div class="tools">
+        <span id="evCount" class="count">—</span>
+        <button id="evPause" class="mini">暂停</button>
+        <button id="evClear" class="mini">清空</button>
+      </div>
+    </div>
+    <div id="evWrap" class="evwrap"><div class="empty">加载中…</div></div>
+    <div class="hint">来自注入伴生进程写入的 <span class="mono">events.log</span>，命中即追加。</div>
+  </div>
+
+  <div class="card">
+    <details class="fold" id="logFold">
+      <summary>守护进程日志 <span id="logRefreshHint" class="count"></span></summary>
+      <div class="cardhead" style="margin-top:10px;">
+        <span class="label">daemon.log 最近 40 行</span>
+        <button id="logRefresh" class="mini">刷新</button>
+      </div>
+      <pre id="logBox" class="logbox">加载中…</pre>
+    </details>
+    <div class="cardhead" style="margin-top:14px;">
+      <span class="label">落盘产物</span>
+      <div class="tools">
+        <span id="dumpsCount" class="count">—</span>
+        <button id="dumpsRefresh" class="mini">刷新</button>
+      </div>
+    </div>
+    <div id="dumpsList" class="list evwrap"><div class="empty">加载中…</div></div>
+    <div class="hint">文件在设备 <span class="mono">dumps/</span> 目录；经 PC 端 <span class="mono url">/file?path=</span> 或 <span class="mono">adb pull</span> 取回。</div>
+  </div>
+
   <div id="errBox" class="warn" style="display:none;"></div>
-  <div class="foot">ReconBridge M1 · 静态传输层</div>
+  <div class="foot">ReconBridge M3 · 静态传输层 + 动态 hook</div>
 
 <script>
 const RBCTL = "/data/adb/modules/reconbridge/rbctl";
@@ -220,8 +296,175 @@ $("copyBtn").addEventListener("click", async () => {
   }
 });
 
+// ---- M3 动态卡片 ----
+function rbctl(args) { return ksuExec(`sh ${RBCTL} ${args}`); }
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+function fmtTs(ts) {
+  if (ts == null || ts === "") return "";
+  let n = Number(ts);
+  if (!isFinite(n)) return String(ts);
+  if (n < 1e12) n *= 1000;            // 秒 → 毫秒
+  const d = new Date(n);
+  if (isNaN(d.getTime())) return String(ts);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function toast(msg) { try { if (typeof ksu !== "undefined" && ksu.toast) ksu.toast(msg); } catch (e) {} }
+
+// 活动 Hook
+async function refreshHooks() {
+  try {
+    const r = await rbctl("hooks");
+    const arr = JSON.parse((r.stdout || "[]").trim() || "[]");
+    $("hooksCount").textContent = arr.length ? `${arr.length} 个包` : "";
+    const box = $("hooksList");
+    if (!arr.length) { box.innerHTML = '<div class="empty">暂无活动 hook</div>'; return; }
+    box.innerHTML = arr.map((h) => {
+      const pkg = h.package || "(未知包)";
+      const targets = Array.isArray(h.targets) ? h.targets : [];
+      const lines = targets.map((t) => {
+        const at = t.symbol ? t.symbol : (t.offset != null ? "+" + t.offset : "?");
+        return esc(`${t.id || "?"} · ${t.lib || "?"} · ${at}`);
+      }).join("<br>");
+      return `<div class="item">
+        <div class="top">
+          <span class="pkg">${esc(pkg)}</span>
+          <button class="mini unhookBtn" data-pkg="${esc(pkg)}">取消</button>
+        </div>
+        <div class="meta">${targets.length} 个 target${lines ? "<br>" + lines : ""}</div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    $("hooksList").innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`;
+  }
+}
+
+async function unhookPkg(pkg) {
+  if (!pkg) return;
+  try {
+    await rbctl(`unhook ${pkg}`);
+    toast("已取消 " + pkg);
+    refreshHooks();
+  } catch (e) { showErr("取消 hook 失败：" + e.message); }
+}
+
+$("hooksList").addEventListener("click", (e) => {
+  const btn = e.target.closest(".unhookBtn");
+  if (btn) unhookPkg(btn.dataset.pkg);
+});
+$("hooksRefresh").addEventListener("click", refreshHooks);
+
+// 近期事件流
+let evPaused = false;
+function renderEvents(lines) {
+  const wrap = $("evWrap");
+  const items = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    let ev = null;
+    try { ev = JSON.parse(line); } catch (e) { ev = null; }
+    if (!ev) { items.push(`<div class="ev"><div class="sig mono">${esc(line)}</div></div>`); continue; }
+    if (ev.event === "dump_saved") {
+      items.push(`<div class="ev"><div class="sig"><span class="tag dump">DUMP</span> ${esc(ev.name || "")} · ${fmtBytes(ev.bytes)}</div></div>`);
+      continue;
+    }
+    const phase = ev.phase === "after" ? "after" : "before";
+    const sig = `${ev.class || ""}${ev.class ? "." : ""}${ev.method || ev.hook_id || "?"}`;
+    const argc = Array.isArray(ev.args) ? ev.args.length : 0;
+    items.push(`<details class="ev">
+      <summary>
+        <span class="t">${esc(fmtTs(ev.ts))}</span>
+        <span class="tag ${phase}">${phase}</span>
+        <span class="sig mono">${esc(sig)}${argc ? ` <span style="color:var(--muted)">(${argc} 参)</span>` : ""}</span>
+      </summary>
+      <pre>${esc(JSON.stringify(ev, null, 2))}</pre>
+    </details>`);
+  }
+  $("evCount").textContent = items.length ? `${items.length} 条` : "";
+  wrap.innerHTML = items.length ? items.reverse().join("") : '<div class="empty">暂无事件</div>';
+}
+
+async function refreshEvents() {
+  if (evPaused) return;
+  try {
+    const r = await rbctl("events 60");
+    renderEvents((r.stdout || "").split("\n"));
+  } catch (e) {
+    $("evWrap").innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`;
+  }
+}
+
+$("evPause").addEventListener("click", () => {
+  evPaused = !evPaused;
+  $("evPause").textContent = evPaused ? "继续" : "暂停";
+  if (!evPaused) refreshEvents();
+});
+$("evClear").addEventListener("click", () => {
+  $("evWrap").innerHTML = '<div class="empty">已清空视图（下次刷新重新拉取）</div>';
+  $("evCount").textContent = "";
+});
+
+// 日志
+async function refreshLog() {
+  try {
+    const r = await rbctl("log 40");
+    $("logBox").textContent = (r.stdout || "").trim() || "(空)";
+  } catch (e) { $("logBox").textContent = "读取失败：" + e.message; }
+}
+$("logRefresh").addEventListener("click", refreshLog);
+$("logFold").addEventListener("toggle", (e) => { if (e.target.open) refreshLog(); });
+
+// 落盘产物
+async function refreshDumps() {
+  try {
+    const r = await rbctl("dumps");
+    let rows = (r.stdout || "").split("\n").map((l) => l.trim()).filter(Boolean);
+    let total = null;
+    if (rows.length && rows[0].startsWith("#total\t")) {
+      total = parseInt(rows[0].split("\t")[1], 10) || 0;
+      rows = rows.slice(1);
+    }
+    const shown = rows.length;
+    const totalN = total == null ? shown : total;
+    $("dumpsCount").textContent = totalN ? (totalN > shown ? `${totalN} 个（显示最新 ${shown}）` : `${totalN} 个`) : "";
+    const box = $("dumpsList");
+    if (!shown) { box.innerHTML = '<div class="empty">暂无落盘文件</div>'; return; }
+    box.innerHTML = rows.map((l) => {
+      const i = l.indexOf("\t");
+      const size = i >= 0 ? l.slice(0, i) : "";
+      const name = i >= 0 ? l.slice(i + 1) : l;
+      return `<div class="item"><div class="top">
+        <span class="pkg mono" style="font-weight:500;">${esc(name)}</span>
+        <span class="count">${fmtBytes(size)}</span>
+      </div></div>`;
+    }).join("");
+  } catch (e) {
+    $("dumpsList").innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`;
+  }
+}
+$("dumpsRefresh").addEventListener("click", refreshDumps);
+
+function refreshDynamic() {
+  refreshHooks();
+  refreshDumps();
+}
+
 refresh();
+refreshDynamic();
+refreshEvents();
 setInterval(refresh, 4000);
+setInterval(refreshDynamic, 6000);
+setInterval(refreshEvents, 2000);
 </script>
 </body>
 </html>

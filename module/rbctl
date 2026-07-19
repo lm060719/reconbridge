@@ -1,8 +1,10 @@
 #!/system/bin/sh
 # ReconBridge 控制脚本：供 WebUI 与命令行使用。
 # 用法：rbctl enable|disable|setport N|setbind IP|start|stop|info
+#       rbctl log [N]|events [N]|hooks|dumps|unhook PKG   （只读/维护辅助）
 # 仅修改 config.conf；守护进程通过 inotify 感知变更即时生效（start 例外，用于手动拉起进程）。
 
+BASE=/data/adb/reconbridge
 CONF=/data/adb/reconbridge/config.conf
 DAEMON_NAME=reconbridge_daemon
 DAEMON_BIN=/data/adb/modules/reconbridge/bin/reconbridge_daemon
@@ -50,11 +52,44 @@ case "$1" in
   setbind) [ -n "$2" ] && setk bind "$2" ;;
   start)   start_daemon ;;
   stop)    pkill -f "$DAEMON_NAME" ;;
+  log)     tail -n "${2:-40}" "$BASE/daemon.log" 2>/dev/null ;;
+  events)  tail -n "${2:-60}" "$BASE/events.log" 2>/dev/null ;;
+  hooks)
+    printf '['
+    first=1
+    for f in "$BASE"/hooks/*.json; do
+      [ -f "$f" ] || continue
+      [ "$first" = 1 ] || printf ','
+      cat "$f"
+      first=0
+    done
+    printf ']\n'
+    ;;
+  dumps)
+    # 最新在前，最多 ${2:-80} 条；首行汇总总数。
+    total=$(ls "$BASE/dumps" 2>/dev/null | wc -l)
+    printf '#total\t%s\n' "$total"
+    n=0; lim=${2:-80}
+    for f in $(ls -t "$BASE/dumps" 2>/dev/null); do
+      p="$BASE/dumps/$f"
+      [ -f "$p" ] || continue
+      printf '%s\t%s\n' "$(wc -c < "$p" 2>/dev/null)" "$f"
+      n=$((n+1)); [ "$n" -ge "$lim" ] && break
+    done
+    ;;
+  unhook)
+    pkg=$2
+    case "$pkg" in
+      ""|*[!a-zA-Z0-9._]*) echo "usage: rbctl unhook <package>"; exit 1 ;;
+      *) rm -f "$BASE/hooks/$pkg.json" && echo "removed $pkg" ;;
+    esac
+    ;;
   info)
     printf '{"enabled":%s,"port":%s,"bind":"%s","token":"%s","running":%s,"ip":"%s"}\n' \
       "$(getd enabled 0)" "$(getd port 8787)" "$(getd bind auto)" "$(get token)" "$(running)" "$(wlanip)"
     ;;
   *)
     echo "usage: rbctl enable|disable|setport N|setbind IP|start|stop|info"
+    echo "       rbctl log [N]|events [N]|hooks|dumps|unhook PKG"
     ;;
 esac
