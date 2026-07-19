@@ -1,14 +1,16 @@
-﻿# ReconBridge —— 卸载 PC 侧 MCP 工具（Windows / PowerShell）。
+# ReconBridge - uninstall the PC-side MCP tool (Windows / PowerShell).
 #
-# 可直接 `irm <url> | iex` 执行，也可本地 `./uninstall.ps1 [-Purge]`：
+# Run via `irm <url> | iex`, or locally `./uninstall.ps1 [-Purge]`:
 #   irm https://github.com/lm060719/reconbridge/releases/latest/download/uninstall.ps1 | iex
 #
-# 做两件事：
-#   1. 从 Claude Code 用户级配置 ~/.claude.json 移除 reconbridge（优先用 exe 自身 --unregister，稳）
-#   2. 删除安装目录 %LOCALAPPDATA%\ReconBridge\reconbridge-mcp
+# Does two things:
+#   1. remove reconbridge from the Claude Code config ~/.claude.json (prefer exe --unregister)
+#   2. delete the install dir %LOCALAPPDATA%\ReconBridge\reconbridge-mcp
 #
-# 默认保留 work\（拉包 / dump 等数据）与 tools\（jadx/Ghidra）。要连数据一起删：
-#   -Purge 或 `irm|iex` 前设 $env:RB_PURGE="1"
+# Keeps work\ (pulled apks / dumps) and tools\ (jadx/Ghidra) by default.
+# To wipe those too: -Purge, or set $env:RB_PURGE="1" before piping to iex.
+#
+# NOTE: keep this script pure ASCII (see install.ps1 for why: irm|iex encoding).
 
 param([switch]$Purge)
 $ErrorActionPreference = "Stop"
@@ -18,14 +20,14 @@ $dest = Join-Path $env:LOCALAPPDATA "ReconBridge"
 $app  = Join-Path $dest "reconbridge-mcp"
 $exe  = Join-Path $app  "reconbridge-mcp.exe"
 
-Write-Host "== ReconBridge MCP 卸载 ==" -ForegroundColor Cyan
+Write-Host "== ReconBridge MCP uninstall ==" -ForegroundColor Cyan
 
-# 1) 注销 Claude Code 配置
-Write-Host "[1/2] 从 Claude Code 注销 ..." -ForegroundColor Yellow
+# 1) unregister from Claude Code
+Write-Host "[1/2] unregistering from Claude Code ..." -ForegroundColor Yellow
 if (Test-Path $exe) {
     & $exe --unregister
 } else {
-    # exe 不在（已被删过）——PS 兜底：从 ~/.claude.json 移除 reconbridge 键
+    # exe already gone - PS fallback: remove the reconbridge key from ~/.claude.json
     $cfg = Join-Path $HOME ".claude.json"
     if (Test-Path $cfg) {
         try {
@@ -34,39 +36,39 @@ if (Test-Path $exe) {
                 Copy-Item $cfg "$cfg.bak" -Force
                 $j.mcpServers.PSObject.Properties.Remove("reconbridge")
                 ($j | ConvertTo-Json -Depth 30) | Set-Content $cfg -Encoding UTF8
-                Write-Host "  已从 $cfg 移除 reconbridge（PS 兜底）。"
+                Write-Host "  removed reconbridge from $cfg (PS fallback)."
             } else {
-                Write-Host "  $cfg 里没有 reconbridge，跳过。"
+                Write-Host "  no reconbridge in $cfg, skipped."
             }
         } catch {
-            Write-Warning "  无法自动清理 $cfg，请手动删除其中的 reconbridge 项。"
+            Write-Warning "  could not auto-clean $cfg; please remove the reconbridge entry manually."
         }
     } else {
-        Write-Host "  $cfg 不存在，跳过。"
+        Write-Host "  $cfg not found, skipped."
     }
 }
 
-# 2) 删文件
-Write-Host "[2/2] 删除安装文件 ..." -ForegroundColor Yellow
+# 2) delete files
+Write-Host "[2/2] deleting install files ..." -ForegroundColor Yellow
 if ($purgeAll) {
     if (Test-Path $dest) {
         Remove-Item $dest -Recurse -Force
-        Write-Host "  已删除 $dest（含 work\ 与 tools\ 数据）。"
+        Write-Host "  deleted $dest (including work\ and tools\ data)."
     } else {
-        Write-Host "  $dest 不存在。"
+        Write-Host "  $dest not found."
     }
 } else {
     if (Test-Path $app) {
         Remove-Item $app -Recurse -Force
-        Write-Host "  已删除 $app。"
+        Write-Host "  deleted $app."
     } else {
-        Write-Host "  $app 不存在。"
+        Write-Host "  $app not found."
     }
     if (Test-Path $dest) {
-        Write-Host "  保留了 $dest 下的 work\（拉包/dump 数据）与 tools\。要一并删除：-Purge 或 `$env:RB_PURGE=`"1`"。" -ForegroundColor DarkGray
+        Write-Host "  kept work\ and tools\ under $dest. To wipe too: -Purge or `$env:RB_PURGE=`"1`"." -ForegroundColor DarkGray
     }
 }
 
 Write-Host ""
-Write-Host "✓ 卸载完成。重启 Claude Code 生效。" -ForegroundColor Green
-Write-Host "  注：设备端 KernelSU 模块（若刷过）请在 KernelSU 管理器里单独移除。" -ForegroundColor DarkGray
+Write-Host "OK - uninstall complete. Restart Claude Code to take effect." -ForegroundColor Green
+Write-Host "  Note: remove the device-side KernelSU module (if flashed) in the KernelSU manager." -ForegroundColor DarkGray

@@ -1,17 +1,21 @@
-﻿# ReconBridge —— 一行在线安装 PC 侧 MCP 工具（Windows / PowerShell）。
+# ReconBridge - one-line online installer for the PC-side MCP tool (Windows / PowerShell).
 #
-# 设计成可直接 `irm <url> | iex` 执行，无需 clone 仓库：
+# Run directly via `irm <url> | iex` (no repo clone needed):
 #   irm https://github.com/lm060719/reconbridge/releases/latest/download/install.ps1 | iex
 #
-# 步骤：
-#   1. 从 GitHub Release 下载 reconbridge-mcp-win64.zip（onedir 打包的 exe）
-#   2. 解压到 %LOCALAPPDATA%\ReconBridge\
-#   3. 调 reconbridge-mcp.exe --register 写入 Claude Code 用户级配置 ~/.claude.json
+# Steps:
+#   1. download reconbridge-mcp-win64.zip from the GitHub Release (onedir-packaged exe)
+#   2. extract to %LOCALAPPDATA%\ReconBridge\
+#   3. run reconbridge-mcp.exe --register to write the Claude Code config ~/.claude.json
 #
-# 环境变量（可选，`iex` 前先 `$env:...` 设）：
-#   RB_TRANSPORT  = adb（默认）| wifi
-#   RB_REPO       = 覆盖仓库（默认 lm060719/reconbridge）
-#   RB_ASSET_URL  = 直接指定 zip 下载地址（跳过 Release 推断；也可指向本地文件做联调）
+# Optional env vars (set before piping to iex):
+#   RB_TRANSPORT = adb (default) | wifi
+#   RB_REPO      = override repo (default lm060719/reconbridge)
+#   RB_ASSET_URL = direct zip URL (skip Release lookup; may be a local file for testing)
+#
+# NOTE: keep this script pure ASCII. `irm | iex` decodes the downloaded text with the
+# PS 5.1 default encoding (no charset from GitHub), so non-ASCII would render as mojibake,
+# and a UTF-8 BOM would make the first line fail under iex. ASCII avoids both.
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -26,42 +30,41 @@ $dest = Join-Path $env:LOCALAPPDATA "ReconBridge"
 $app  = Join-Path $dest "reconbridge-mcp"
 $exe  = Join-Path $app  "reconbridge-mcp.exe"
 
-Write-Host "== ReconBridge MCP 在线安装 ==" -ForegroundColor Cyan
-Write-Host "  来源: $assetUrl"
-Write-Host "  目标: $dest"
+Write-Host "== ReconBridge MCP online install ==" -ForegroundColor Cyan
+Write-Host "  source: $assetUrl"
+Write-Host "  target: $dest"
 
-# 1) 下载到临时 zip
+# 1) download to a temp zip
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("reconbridge-mcp-" + [Guid]::NewGuid().ToString("N") + ".zip")
-Write-Host "[1/3] 下载 ..." -ForegroundColor Yellow
+Write-Host "[1/3] downloading ..." -ForegroundColor Yellow
 if ($assetUrl -match '^https?://') {
     Invoke-WebRequest -Uri $assetUrl -OutFile $tmp -UseBasicParsing
 } else {
-    # 联调：RB_ASSET_URL 指向本地已构建的 zip（普通路径或 file:// URI）
+    # local testing: RB_ASSET_URL points at a built zip (plain path or file:// URI)
     Copy-Item ($assetUrl -replace '^file:///?','') $tmp -Force
 }
 
-# 2) 清旧 + 解压。只删 reconbridge-mcp 子目录，保留同级 work/ 等用户数据。
-Write-Host "[2/3] 解压到 $app ..." -ForegroundColor Yellow
+# 2) clean old + extract (only the reconbridge-mcp subdir; keeps sibling work\ etc.)
+Write-Host "[2/3] extracting to $app ..." -ForegroundColor Yellow
 if (Test-Path $app) { Remove-Item $app -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
-# zip 顶层即 reconbridge-mcp\，解到 $dest 后正好落成 $app
 Expand-Archive -Path $tmp -DestinationPath $dest -Force
 Remove-Item $tmp -Force -ErrorAction SilentlyContinue
 
-if (-not (Test-Path $exe)) { throw "解压后未找到 $exe，zip 结构异常。" }
+if (-not (Test-Path $exe)) { throw "exe not found after extract: $exe" }
 
-# 3) 自注册进 Claude Code
-Write-Host "[3/3] 注册到 Claude Code（transport=$transport）..." -ForegroundColor Yellow
+# 3) self-register into Claude Code
+Write-Host "[3/3] registering into Claude Code (transport=$transport) ..." -ForegroundColor Yellow
 & $exe --register --transport $transport
-if ($LASTEXITCODE -ne 0) { throw "注册失败（exit $LASTEXITCODE）" }
+if ($LASTEXITCODE -ne 0) { throw "register failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
-Write-Host "✓ 安装完成。" -ForegroundColor Green
-Write-Host "  重启 Claude Code 后用 ``claude mcp list`` 或 /mcp 验证 reconbridge。" -ForegroundColor Green
+Write-Host "OK - install complete." -ForegroundColor Green
+Write-Host "  Restart Claude Code, then verify with 'claude mcp list' or /mcp (look for reconbridge)." -ForegroundColor Green
 Write-Host ""
-Write-Host "  提示：" -ForegroundColor DarkGray
-Write-Host "   · 需要 adb 在 PATH（连真机；wifi 模式除外）。" -ForegroundColor DarkGray
-Write-Host "   · jadx / Ghidra 为可选反编译工具，解压到 $dest\tools\ 即被自动探测（toolchain_status 查看）。" -ForegroundColor DarkGray
-Write-Host "   · 设备端仍需在 KernelSU 管理器刷入 ReconBridge 模块（见 README 设备端章节）。" -ForegroundColor DarkGray
-Write-Host "   · 更新：重跑本命令即原地覆盖（保留 work\ 数据）。卸载：跑 uninstall.ps1。" -ForegroundColor DarkGray
-Write-Host "   · 图形控制台：& `"$exe`" --serve （浏览器里选连接方式 / 看状态与监控）。" -ForegroundColor DarkGray
+Write-Host "  Notes:" -ForegroundColor DarkGray
+Write-Host "   - Needs adb on PATH (for a real device; not needed in wifi mode)." -ForegroundColor DarkGray
+Write-Host "   - jadx / Ghidra are optional; unzip into $dest\tools\ to be auto-detected (see toolchain_status)." -ForegroundColor DarkGray
+Write-Host "   - The device-side KernelSU module is flashed separately (see README)." -ForegroundColor DarkGray
+Write-Host "   - Update: re-run this command (overwrites in place, keeps work\). Uninstall: run uninstall.ps1." -ForegroundColor DarkGray
+Write-Host "   - GUI console: & `"$exe`" --serve  (pick transport / view status & monitors in a browser)." -ForegroundColor DarkGray
