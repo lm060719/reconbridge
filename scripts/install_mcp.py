@@ -80,17 +80,14 @@ _ABSENT_HINT = {
 
 
 def resolve_targets(target: str) -> tuple[list[str], list[str]]:
-    """both：只装已检测到的客户端（未装的跳过、不建目录）；两者都没检测到回退只装 Claude。
-    显式 claude/codex：强制装该项。返回 (要装的, 跳过的)。"""
+    """both：只装已检测到的客户端（未装的跳过、不建目录）；两者都没检测到则谁都不写
+    （chosen 为空，不凭空造配置）。显式 claude/codex：强制装该项。返回 (要装的, 跳过的)。"""
     if target in ("claude", "codex"):
         return [target], []
     chosen: list[str] = []
     skipped: list[str] = []
     (chosen if claude_present() else skipped).append("claude")
     (chosen if codex_present() else skipped).append("codex")
-    if not chosen:
-        chosen = ["claude"]
-        skipped = [s for s in skipped if s != "claude"]
     return chosen, skipped
 
 
@@ -245,6 +242,11 @@ def main() -> int:
         return 0
 
     chosen, skipped = resolve_targets(args.target)
+    if not chosen:
+        print("[i] 未检测到 Claude Code（~/.claude.json / ~/.claude/）与 "
+              "ChatGPT Codex（~/.codex/）——工具已就位，但未写入任何客户端配置。")
+        print("    装好客户端后重跑注册，或用 --target claude|codex 强制写入。")
+        return 0
     for s in skipped:
         print(f"[i] {_ABSENT_HINT[s]}，跳过（如需强制安装：--target {s}）。")
     rc = 0

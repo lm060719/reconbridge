@@ -72,7 +72,8 @@ def resolve_targets(target: str) -> tuple[list[str], list[str]]:
     """把 target 解析成实际要装的客户端列表。
     - 显式 claude / codex：强制装该项（即使目录还不存在，会创建）。
     - both（默认）：只装**已检测到**的客户端，未装的那个跳过、不建目录；
-      两者都没检测到时回退为只装 Claude（保证安装不空转）。
+      两者都没检测到时**谁都不写**（chosen 为空）——工具照装，但不凭空造配置文件，
+      等用户装好客户端再重跑注册（或用 --target 强制）。
     返回 (要装的, 因未检测到而跳过的)。"""
     if target in ("claude", "codex"):
         return [target], []
@@ -80,9 +81,6 @@ def resolve_targets(target: str) -> tuple[list[str], list[str]]:
     skipped: list[str] = []
     (chosen if claude_present() else skipped).append("claude")
     (chosen if codex_present() else skipped).append("codex")
-    if not chosen:
-        chosen = ["claude"]
-        skipped = [s for s in skipped if s != "claude"]
     return chosen, skipped
 
 
@@ -328,6 +326,11 @@ def register(transport: str = "adb", print_only: bool = False,
              target: str = "both") -> int:
     entry = build_entry(transport)
     chosen, skipped = resolve_targets(target)
+    if not chosen:
+        print("[i] 未检测到 Claude Code（~/.claude.json / ~/.claude/）与 "
+              "ChatGPT Codex（~/.codex/）——工具已就位，但未写入任何客户端配置。")
+        print("    装好客户端后重跑注册，或用 --target claude|codex 强制写入。")
+        return 0
     for s in skipped:
         print(f"[i] {_ABSENT_HINT[s]}，跳过（如需强制安装：--target {s}）。")
     rc = 0

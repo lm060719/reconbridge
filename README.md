@@ -23,7 +23,7 @@
 
 ### PC 端（一键装 MCP 工具）
 
-支持两种 AI 客户端：**Claude Code**（写 `~/.claude.json`）与 **ChatGPT Codex**（写 `~/.codex/config.toml`）。默认 `both`＝**自动探测**：只注册进「已安装」的客户端（Claude 看 `~/.claude.json`/`~/.claude/`，Codex 看 `~/.codex/`），没装的那个自动跳过、不建目录。另需 `adb`（Android platform-tools，连真机用）。
+支持两种 AI 客户端：**Claude Code**（写 `~/.claude.json`）与 **ChatGPT Codex**（写 `~/.codex/config.toml`）。默认 `both`＝**自动探测**：只注册进「已安装」的客户端（Claude 看 `~/.claude.json`/`~/.claude/`，Codex 看 `~/.codex/`），没装的那个自动跳过、不建目录；**两个都没检测到就只装工具本体、不写任何配置**（等你装好客户端再重跑注册，或用 `--target` 强制写入）。另需 `adb`（Android platform-tools，连真机用）。
 
 **推荐：一行在线安装（Windows，无需 clone 仓库、无需 Python）**
 
