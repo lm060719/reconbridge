@@ -124,12 +124,16 @@
   </div>
 
   <div class="card">
-    <div class="label" style="margin-bottom:8px;">端口号设置</div>
+    <div class="label" style="margin-bottom:8px;">网络设置</div>
     <div class="inp">
       <input id="portInput" type="number" inputmode="numeric" placeholder="8787" min="1" max="65535">
-      <button id="savePortBtn">保存</button>
+      <button id="savePortBtn">保存端口</button>
     </div>
-    <div class="hint">修改后若端口已开启会自动重启监听。默认绑定 wlan0 的局域网 IP（非 0.0.0.0）。</div>
+    <div class="inp" style="margin-top:8px;">
+      <input id="bindInput" type="text" placeholder="auto" autocapitalize="off" autocomplete="off" spellcheck="false">
+      <button id="saveBindBtn">保存地址</button>
+    </div>
+    <div class="hint">监听地址：<b>auto</b>=自动绑 wlan0 局域网 IP（电脑同 Wi-Fi 可连，推荐）；<b>0.0.0.0</b>=所有网卡；也可填具体 IP。<b>127.0.0.1</b>=仅本机（adb 模式会自动设成这个，故用完 adb 想让电脑 Wi-Fi 直连，改回 auto 即可）。端口/地址改后若端口开着会自动重启监听。</div>
   </div>
 
   <div class="card">
@@ -244,6 +248,7 @@ function render(info) {
   $("bindVal").textContent = bind;
   $("portVal").textContent = info.port;
   if (!$("portInput").value) $("portInput").placeholder = info.port;
+  if (!$("bindInput").value) $("bindInput").placeholder = info.bind;
 
   const base = `http://${ip}:${info.port}`;
   $("urlVal").textContent = on ? base : "(端口关闭)";
@@ -282,6 +287,18 @@ $("savePortBtn").addEventListener("click", async () => {
     $("portInput").value = "";
     refresh();
   } catch (e) { showErr("保存端口失败：" + e.message); }
+});
+
+// 保存监听地址
+$("saveBindBtn").addEventListener("click", async () => {
+  const v = $("bindInput").value.trim();
+  if (!v) { showErr("填 auto / 0.0.0.0 / 具体 IP"); return; }
+  if (!/^(auto|[0-9.]+)$/.test(v)) { showErr("只能填 auto 或 IP（数字和点）"); return; }
+  try {
+    await ksuExec(`sh ${RBCTL} setbind ${v}`);
+    $("bindInput").value = "";
+    refresh();
+  } catch (e) { showErr("保存地址失败：" + e.message); }
 });
 
 // 复制 token
