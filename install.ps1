@@ -2,17 +2,21 @@
 #
 #   1. 在 pc/.venv 建虚拟环境
 #   2. 安装 Python 依赖（requirements.txt）
-#   3. 把 reconbridge 注册进 Claude Code 用户级配置（~/.claude.json）
+#   3. 把 reconbridge 注册进 AI 客户端用户级配置：
+#      Claude Code（~/.claude.json）与/或 ChatGPT Codex（~/.codex/config.toml）
 #
 # 用法：
-#   ./install.ps1                # 默认 adb 传输
+#   ./install.ps1                        # 默认 adb 传输，both（Claude + Codex）
 #   ./install.ps1 -Transport wifi
+#   ./install.ps1 -Target codex          # 只装 Codex
 #
-# 装完重启 Claude Code，任意目录下都能用 reconbridge（无需 cd 到本仓库）。
+# 装完重启对应客户端，任意目录下都能用 reconbridge（无需 cd 到本仓库）。
 
 param(
     [ValidateSet("adb", "wifi")]
-    [string]$Transport = "adb"
+    [string]$Transport = "adb",
+    [ValidateSet("claude", "codex", "both")]
+    [string]$Target = "both"
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,9 +51,11 @@ Write-Host "[2/3] 安装依赖 ..." -ForegroundColor Yellow
 & $venvPy -m pip install -r (Join-Path $Pc "requirements.txt")
 
 # 4) 注册 MCP
-Write-Host "[3/3] 注册 MCP 到 Claude Code ..." -ForegroundColor Yellow
-& $venvPy (Join-Path $Root "scripts\install_mcp.py") --transport $Transport
+Write-Host "[3/3] 注册 MCP（target=$Target）..." -ForegroundColor Yellow
+& $venvPy (Join-Path $Root "scripts\install_mcp.py") --transport $Transport --target $Target
 
 Write-Host ""
-Write-Host "✓ 完成。重启 Claude Code 后用 ``claude mcp list`` 或 /mcp 验证。" -ForegroundColor Green
+Write-Host "✓ 完成。重启对应客户端后验证：" -ForegroundColor Green
+Write-Host "  · Claude Code: ``claude mcp list`` 或 /mcp（找 reconbridge）" -ForegroundColor Green
+Write-Host "  · ChatGPT Codex: ~/.codex/config.toml 里 [mcp_servers.reconbridge] 已就绪" -ForegroundColor Green
 Write-Host "  设备端还需刷入 KernelSU 模块（见 README 的「设备端」章节）。" -ForegroundColor Green

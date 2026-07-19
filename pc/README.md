@@ -48,13 +48,13 @@ python -m venv .venv
   默认放在同盘 `<盘符>:\ReconBridgeTools\`（如 `E:\ReconBridgeTools\ghidra_12.1.2_PUBLIC` 与 `jdk-21.x`）。
   可用 `RECONBRIDGE_NATIVE_TOOLS` 覆盖。
 
-## 注册到 Claude Code
+## 注册到 Claude Code / ChatGPT Codex
 
 **推荐：一行在线安装（打包 exe，无需 clone / venv）**
 ```powershell
 irm https://github.com/lm060719/reconbridge/releases/latest/download/install.ps1 | iex
 ```
-下载打包好的 MCP exe 到 `%LOCALAPPDATA%\ReconBridge\` 并自注册。构建该 exe：仓库根 `./build_exe.ps1`（PyInstaller onedir → `dist/reconbridge-mcp-win64.zip`）；exe 也能自注册：`reconbridge-mcp.exe --register [--transport adb|wifi]`。
+下载打包好的 MCP exe 到 `%LOCALAPPDATA%\ReconBridge\` 并自注册到两个客户端：Claude Code（`~/.claude.json`）与 ChatGPT Codex（`~/.codex/config.toml`）。只装一个设 `$env:RB_TARGET="codex"`（或 `"claude"`）。构建该 exe：仓库根 `./build_exe.ps1`（PyInstaller onedir → `dist/reconbridge-mcp-win64.zip`）；exe 也能自注册：`reconbridge-mcp.exe --register [--target claude|codex|both] [--transport adb|wifi]`。
 
 **本地 Web 控制台**：`reconbridge-mcp --serve`（源码：`python -m reconbridge_mcp --serve`）起一个只绑 `127.0.0.1:9000` 的图形控制台——选 adb/wifi、一键连接、看 daemon 状态与只读监控（活动 hook / 事件流 / dumps）。`--port N` / `--host H` / `--no-open` 可调。
 
