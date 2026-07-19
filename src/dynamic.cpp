@@ -233,6 +233,50 @@ static std::string read_whole_file(const std::string& path) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// 免重启热加（P0-2）：注入连接注册表 + 控制帧下发。
+// 每个注入连接注册进来（按主包名）；tracer 握手后发 'H' 帧声明"可热加"。
+// /hook 时若目标进程在跑且可热加，向其下发 'R'(reload) 控制帧（payload=新配置），
+// tracer 增量装新 target（只加不删），免 force-stop。native 层不发 'H'，不受影响。
+// ---------------------------------------------------------------------------
+struct InjectConn {
+    int fd;
+    std::string base_pkg;
+    bool reload_capable = false;
+};
+static std::mutex g_conn_mutex;
+static std::vector<std::shared_ptr<InjectConn>> g_conns;
+
+static void reg_add(const std::shared_ptr<InjectConn>& c) {
+    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    g_conns.push_back(c);
+}
+static void reg_remove(const std::shared_ptr<InjectConn>& c) {
+    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    for (auto it = g_conns.begin(); it != g_conns.end(); ++it)
+        if (*it == c) { g_conns.erase(it); break; }
+}
+static void reg_mark_reloadable(const std::shared_ptr<InjectConn>& c) {
+    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    c->reload_capable = true;
+}
+// 向某包所有"可热加"连接下发 'R'(reload) 帧，payload=新配置 JSON。返回下发到的进程数。
+static int hot_reload(const std::string& base_pkg, const std::string& cfg) {
+    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    int n = 0;
+    char hdr[5];
+    uint32_t l = (uint32_t)cfg.size();
+    hdr[0] = 'R';
+    memcpy(hdr + 1, &l, 4);
+    for (auto& c : g_conns) {
+        if (c->base_pkg == base_pkg && c->reload_capable) {
+            if (sock_write_full(c->fd, hdr, 5) && (l == 0 || sock_write_full(c->fd, cfg.data(), l)))
+                n++;
+        }
+    }
+    return n;
+}
+
 static void inject_client(int fd) {
     uint32_t plen = 0;
     if (!sock_read_full(fd, &plen, 4) || plen == 0 || plen > 1024) { close(fd); return; }
@@ -261,7 +305,12 @@ static void inject_client(int fd) {
     if (!sock_write_full(fd, &clen, 4) || !sock_write_full(fd, cfg.data(), clen)) { close(fd); return; }
 
     log_line("注入层已连接：" + pkg + "（配置 " + std::to_string(clen) + " 字节）");
-    // 回传通道：分帧 [type:1][len:4][payload]。'E'=事件JSON(广播)，'D'=内存 dump(落盘)
+    // 注册进连接表，供 /hook 热加下发 'R' 帧定位（按主包名）
+    auto conn = std::make_shared<InjectConn>();
+    conn->fd = fd;
+    conn->base_pkg = base_pkg;
+    reg_add(conn);
+    // 回传通道：分帧 [type:1][len:4][payload]。'E'=事件JSON(广播)，'D'=内存 dump(落盘)，'H'=声明可热加
     while (true) {
         char type = 0;
         if (!sock_read_full(fd, &type, 1)) break;
@@ -269,7 +318,10 @@ static void inject_client(int fd) {
         if (!sock_read_full(fd, &len, 4) || len > (64u << 20)) break;
         std::string payload(len, 0);
         if (len && !sock_read_full(fd, &payload[0], len)) break;
-        if (type == 'E') {
+        if (type == 'H') {
+            reg_mark_reloadable(conn);  // tracer 声明支持热加（native 层不发，故不受影响）
+            log_line("注入层声明可热加：" + pkg);
+        } else if (type == 'E') {
             g_broadcaster.broadcast(payload);
         } else if (type == 'D') {
             // payload = [namelen:2][name][data]
@@ -295,6 +347,7 @@ static void inject_client(int fd) {
             }
         }
     }
+    reg_remove(conn);  // 断开：移出连接表（在 close 前，避免热加写已关闭 fd）
     close(fd);
 }
 
@@ -361,20 +414,54 @@ static void handle_hook(const Request& req, Response& res) {
             t["id"] = "h" + std::to_string(idx);
         idx++;
     }
+
+    // mode:"append" —— 按 id 合并进现有配置（新的替换同 id，追加新 id），用于热加增量追加
+    json to_write = body;
+    std::string mode = body.value("mode", std::string("replace"));
+    if (mode == "append") {
+        std::ifstream in(hook_path(pkg));
+        if (in.good()) {
+            try {
+                json existing;
+                in >> existing;
+                json merged = existing.value("targets", json::array());
+                for (auto& nt : body["targets"]) {
+                    std::string nid = nt.value("id", "");
+                    bool replaced = false;
+                    for (auto& et : merged)
+                        if (et.value("id", "") == nid) { et = nt; replaced = true; break; }
+                    if (!replaced) merged.push_back(nt);
+                }
+                to_write = existing;
+                to_write["package"] = pkg;
+                to_write["targets"] = merged;
+                if (body.contains("debug")) to_write["debug"] = body["debug"];
+            } catch (...) { /* 现有配置损坏则退回直接写 body */ }
+        }
+    }
+
     // 落盘
     ::mkdir(g_hooks_dir.c_str(), 0755);
-    {
-        std::ofstream f(hook_path(pkg), std::ios::trunc);
-        f << body.dump(2);
-    }
-    std::string note = "配置已写入，注入将在目标下次启动时生效";
+    std::string written = to_write.dump(2);
+    { std::ofstream f(hook_path(pkg), std::ios::trunc); f << written; }
+
+    std::string note;
+    int hot = 0;
     if (body.value("restart", false)) {
         run_detached({"am", "force-stop", pkg});
         note = "配置已写入，并已 force-stop 目标以触发重新注入";
+    } else {
+        // 免重启：向运行中的可热加进程下发 reload（native 层不响应，仍需下次启动）
+        hot = hot_reload(pkg, written);
+        if (hot > 0)
+            note = "配置已写入，并已热注入到 " + std::to_string(hot) + " 个运行中进程（免重启）";
+        else
+            note = "配置已写入；无运行中的可热加进程，将在目标下次启动时生效";
     }
     json installed = json::array();
     for (auto& t : body["targets"]) installed.push_back({{"id", t["id"]}});
-    reply(res, 200, {{"ok", true}, {"package", pkg}, {"installed", installed}, {"note", note}});
+    reply(res, 200, {{"ok", true}, {"package", pkg}, {"installed", installed},
+                     {"hot_injected", hot}, {"note", note}});
 }
 
 static void handle_unhook(const Request& req, Response& res) {

@@ -22,20 +22,66 @@ internal var traceVerbose = false
  * （u:r:ksu:s0，sepolicy.rule 已放行 appdomain->ksu connectto）的抽象 socket
  * @reconbridge_inject，取本包 hook 配置，并把命中事件回传（守护进程再广播给 SSE/WS）。
  *
- * 线路：
+ * 线路（握手后转为双向分帧）：
  *   client -> [plen:4 LE][pkg]
  *   server -> [has:1]                （0 = 本包无配置）
  *   server -> [clen:4 LE][cfg]        （has=1 时）
  *   client -> [type:1='E'][len:4 LE][json]  （每次命中，反复）
+ *   client -> [type:1='H'][len:4 LE=0]      （声明可热加，P0-2；native 层不发）
+ *   server -> [type:1='R'][len:4 LE][cfg]   （免重启热加：下发新配置，tracer 增量装新 target）
  *
  * 所有整数为小端（守护进程按原生内存布局收发，arm64 = LE）。
  */
 class InjectSocket private constructor(
     private val socket: LocalSocket,
     private val output: OutputStream,
+    private val input: InputStream,
 ) {
     private val writeLock = Any()
     @Volatile private var alive = true
+
+    /**
+     * 免重启热加（P0-2）：向守护进程声明"可热加"（发 'H' 帧），并起读线程监听 daemon 下发的
+     * 'R'(reload) 控制帧——收到时把新配置文本交给 onReload（HookEntry 增量装新 target）。
+     * 只有 tracer 调用本方法，故 native 层不会被 daemon 下发 'R'。
+     */
+    fun enableHotReload(onReload: (String) -> Unit) {
+        synchronized(writeLock) {
+            if (!alive) return
+            try {
+                output.write('H'.code)
+                output.write(le32(0))
+                output.flush()
+            } catch (t: Throwable) {
+                alive = false
+                Log.w("ReconTracer", "声明可热加失败: $t")
+                return
+            }
+        }
+        Thread({
+            try {
+                while (alive) {
+                    val type = input.read()
+                    if (type < 0) break
+                    val len = readLe32(input)
+                    if (len < 0 || len > MAX_CFG) break
+                    val buf = ByteArray(len)
+                    if (len > 0) readFully(input, buf)
+                    if (type == 'R'.code) {
+                        val cfg = String(buf, Charsets.UTF_8)
+                        try {
+                            onReload(cfg)
+                        } catch (t: Throwable) {
+                            Log.w("ReconTracer", "热加处理异常: $t")
+                        }
+                    }
+                    // 其它类型忽略（前向兼容）
+                }
+            } catch (_: Throwable) {
+                // 通道断开，静默
+            }
+        }, "ReconTracer-reload").apply { isDaemon = true; start() }
+    }
 
     /** 回传一条事件 JSON，分帧 ['E'][len:4 LE][payload]。线程安全；断开后静默丢弃。 */
     fun sendEvent(json: String) {
@@ -89,7 +135,7 @@ class InjectSocket private constructor(
                 val cfg = ByteArray(clen)
                 readFully(input, cfg)
 
-                return InjectSocket(sock, output) to String(cfg, Charsets.UTF_8)
+                return InjectSocket(sock, output, input) to String(cfg, Charsets.UTF_8)
             } catch (t: Throwable) {
                 try { sock.close() } catch (_: Throwable) {}
                 return null

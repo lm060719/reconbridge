@@ -66,17 +66,48 @@ class HookEntry : IXposedHookLoadPackage {
         vlog("[$pkg] 取到配置 ${cfgText.length} 字节 debug=$traceVerbose")
         val targets = cfg.optJSONArray("targets") ?: return
 
+        // 已装 target id 集合（免重启热加时去重，只加不删）；线程安全供热加读线程用
+        val installedIds = java.util.Collections.synchronizedSet(HashSet<String>())
+        val installed = installTargets(lpparam, io, targets, installedIds)
+        if (installed > 0) log("[$pkg] 装上 $installed 个 java hook") else vlog("[$pkg] 无 java 目标")
+
+        // 免重启热加（P0-2）：声明可热加并监听 daemon 下发的新配置，收到时增量装新 target。
+        // classLoader/lpparam 随闭包持久化，进程活着就能随时追加 hook，无需 force-stop 重启。
+        io.enableHotReload { cfgText ->
+            try {
+                val newTargets = JSONObject(cfgText).optJSONArray("targets") ?: return@enableHotReload
+                val added = installTargets(lpparam, io, newTargets, installedIds)
+                if (added > 0) log("[$pkg] 热加装上 $added 个新 java hook")
+            } catch (t: Throwable) {
+                log("[$pkg] 热加解析/安装失败: $t")
+            }
+        }
+    }
+
+    /** 安装一批 java 目标，按 id 去重（已装的跳过——热加只加不删）。返回本次实际新装的方法数。 */
+    private fun installTargets(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        io: InjectSocket,
+        targets: JSONArray,
+        installedIds: MutableSet<String>,
+    ): Int {
         var installed = 0
         for (i in 0 until targets.length()) {
             val t = targets.optJSONObject(i) ?: continue
             if (t.optString("kind", "native") != "java") continue  // native 目标由 M3 执行器负责
+            val id = t.optString("id", "j$i")
+            if (installedIds.contains(id)) continue                // 已装，去重
             try {
-                installed += installJavaHook(lpparam, io, t)
+                val c = installJavaHook(lpparam, io, t)
+                if (c > 0) {
+                    installedIds.add(id)
+                    installed += c
+                }
             } catch (th: Throwable) {
-                log("[$pkg] 目标#$i (${t.optString("class")}.${t.optString("method")}) 安装失败: $th")
+                log("[${lpparam.packageName}] 目标 ${t.optString("class")}.${t.optString("method")} 安装失败: $th")
             }
         }
-        if (installed > 0) log("[$pkg] 装上 $installed 个 java hook") else vlog("[$pkg] 无 java 目标")
+        return installed
     }
 
     /** 按一个 java 目标解析类/方法/重载并挂 trace 回调，返回实际挂上的方法数。 */

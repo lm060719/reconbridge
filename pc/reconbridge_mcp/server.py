@@ -413,7 +413,8 @@ def trace_java(package: str, class_name: str, method: str,
                until_n_events: int = 0,
                fold_stack: bool = True,
                include_recent: bool = False,
-               since_seq: int = 0) -> dict:
+               since_seq: int = 0,
+               hot: bool = False) -> dict:
     """一步下发一个 Java 方法 trace 并采集命中（M5）。
 
     需设备已装 **ReconBridge Tracer** LSPosed 模块并在 LSPosed 里启用 + 勾选目标 App 作用域。
@@ -437,6 +438,10 @@ def trace_java(package: str, class_name: str, method: str,
     - until_first_hit=True / until_n_events=N: **命中即返回**，不空等满窗口（P0-1）；
       对“重启目标→手动触发一次→拿到命中”的迭代尤其省时，无需再和窗口掐点。
     - fold_stack=True: 折叠调用栈顶部 hook 框架帧，直接看到真实 caller。
+    - hot=True: **免重启热加**（P0-2）——若目标进程在跑，直接往运行中的进程增量追加这个 hook
+      （restart 强制置 False + mode:append），**不 force-stop、不用重新唤醒/重说**。返回的 posted.note /
+      hot_injected 会告诉你热注入了几个进程；为 0 说明目标没在跑（配置会在下次启动生效）。
+      需设备装的是**支持热加的 tracer**（新版 APK）；旧版或 native 目标不响应热加，仍需 restart。
     """
     capture: dict[str, Any] = {"this": this, "when": when, "stack": stack}
     if capture_args is not None:
@@ -458,7 +463,11 @@ def trace_java(package: str, class_name: str, method: str,
     }
     if params is not None:
         target["params"] = params
-    config = {"package": package, "restart": restart, "debug": debug, "targets": [target]}
+    config: dict[str, Any] = {"package": package, "restart": restart, "debug": debug,
+                              "targets": [target]}
+    if hot:
+        config["restart"] = False   # 热加：不 force-stop
+        config["mode"] = "append"   # 增量合并进现有配置
     posted = client.post_json("/hook", config)
     evts = client.collect_sse(seconds=seconds, max_events=max_events,
                               until_first_hit=until_first_hit, until_n_events=until_n_events,

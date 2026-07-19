@@ -107,8 +107,10 @@ trace_java(package, class_name, method,
            params=None, capture_args=None, fields=None, paths=None,
            this="class", ret=True, when="after", stack=False,
            args_render="tostring", restart=True, seconds=12, max_events=200,
-           until_first_hit=False, until_n_events=0, fold_stack=True)
+           until_first_hit=False, until_n_events=0, fold_stack=True,
+           include_recent=False, since_seq=0, hot=False)
 ```
+`hot=True`：免重启热加——目标进程在跑时直接增量追加这个 hook（不 force-stop）。
 一步：拼 java target → `POST /hook` → `collect_sse` 采集并返回命中。等价于「hook 一个 Java 方法看它跑」。
 底层就是上面的 `/hook` + `/events`，也可以直接用 `post_hook` + `collect_events` 手工组合。
 
@@ -129,7 +131,11 @@ patch_java(package, class_name, method,
 
 - **trace（观测）+ 实时篡改（action）** 均支持。篡改在 Xposed before（改参数/skip）/after（改返回值）阶段生效。
 - 类解析用目标进程主 classloader（`lpparam.classLoader`）；动态加载进独立 classloader 的类暂不覆盖。
-- 模块进程启动时一次性读配置；改配置后要让目标重启（`restart:true`）才生效。
+- 模块进程启动时读配置装 hook。**首个 hook 需 `restart:true`**（force-stop 让目标带配置起来）；
+  此后目标进程活着时支持**免重启热加**（`restart:false` + `mode:"append"`）：daemon 向运行中的 tracer
+  下发 `'R'`(reload) 控制帧，tracer 按 id 去重**增量装新 target（只加不删）**——迭代加 hook 不再反复 force-stop。
+  PC 侧 `trace_java(hot=True)` 即走此路；`hot_injected` 返回热注入到的进程数（0=目标没在跑，退回 restart）。
+  （注入 socket 因此变双向：tracer 握手后发 `'H'` 声明可热加；native 层不发 `'H'`，故 native 目标仍需 restart。）
 - 复杂对象默认只 `toString()` + 类名；要看内部状态用 `fields`（点名反射某字段）、`paths`（按路径取深埋值）
   或 `render:"deep"`（整棵对象图序列化，有深度/环/节点预算防爆）。
 - 篡改值类型要与目标 Java 签名匹配（显式 `type`）；类型不符会在命中时抛异常并打日志（不影响原方法）。

@@ -86,7 +86,7 @@
 ### 3.4 Java trace / 实时篡改（M5，2 个）★ 面向 LSPosed 开发
 | 工具 | 签名 | 用途 |
 |---|---|---|
-| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`paths` 按路径取嵌套值、`render:"deep"` 深序列化、`until_first_hit=True` 命中即返回 |
+| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0, hot=False)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`paths` 取嵌套值、`render:"deep"` 深序列化、`until_first_hit=True` 命中即返回、**`hot=True` 免重启热加**（往运行中进程增量追加，不 force-stop） |
 | `patch_java` | `(package, class_name, method, params=None, replace_args=None, replace_return=None, skip_original=False, trace=True, capture_args=None, this="class", when="after", hook_id="", debug=False, restart=True, seconds=0, max_events=100)` | **实时篡改**：改参数 / 改返回值 / 跳过原方法。篡改持久生效直到 `unhook` |
 
 ### 3.5 场景捕获 + 差分（P2，3 个）★ 回答"A 与 B 行为为何不同"
@@ -174,7 +174,7 @@ diff_scenarios("查看", "打开")
 ## 6. 高频坑（务必记住）
 
 1. **adb + Git Bash（Windows）**：所有 adb 命令前 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`，否则 `/data/...` 被改写成 Windows 路径。
-2. **已运行的目标要 `restart:true`**：模块/native 层在**进程启动时**读一次配置；改配置后目标不重启不生效（`restart` 会 `am force-stop` 触发重注入）。
+2. **首个 hook 要 `restart:true`，之后可 `hot`**：模块/native 层在**进程启动时**读一次配置。第一个 hook 需 `restart`（`am force-stop` 触发重注入）让目标带配置起来；此后目标进程活着时，**Java trace 可用 `trace_java(hot=True)` 免重启热加**（`restart:false`+`mode:append`，往运行中进程增量追加，daemon 下发 reload 帧）——迭代加 hook 不再反复强退/重唤醒。`hot_injected` 为 0 说明目标没在跑（或非 tracer 作用域/旧版 APK/native 目标），退回 `restart`。native 目标目前仍需 `restart`。
 3. **稀疏事件的采集时序**：**优先 `until_first_hit=True`**（命中即返回，不必和窗口掐点）。守护进程带**最近 ~400 条环形缓冲**，故命中即便发生在采集开始前也能捞回——用 `collect_events(include_recent=True)` 或直接 `recent_events()`（推荐流程：post_hook 后 `recent_events(limit=0)` 记游标 → 触发 → 事后 `recent_events(since_seq=游标)` 补捞）。`seconds` 只当兜底。
 4. **控制台中文可能显示成乱码**：多为终端编码问题（如 Windows Git Bash），数据本身是 UTF-8。验证时写 UTF-8 文件再用 Read 看，或设 `PYTHONUTF8=1 PYTHONIOENCODING=utf-8`。
 5. **改了 `pc/reconbridge_mcp/*.py` 要重启 MCP server** 才生效（新会话天然是新 server，不受影响）。
