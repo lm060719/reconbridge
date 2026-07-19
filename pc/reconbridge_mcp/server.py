@@ -617,6 +617,15 @@ def toolchain_status() -> dict:
 
 
 def main() -> None:
+    # 冻结成 exe 后没有 `-m reconbridge_mcp` 入口，故把「自注册 / 注销」也做进同一个可执行文件：
+    #   reconbridge-mcp.exe --register   [--transport adb|wifi] [--print-only]
+    #   reconbridge-mcp.exe --unregister [--print-only]
+    # 其余情况照常起 stdio MCP server。
+    import sys
+    args = sys.argv[1:]
+    if "--register" in args or "--unregister" in args:
+        from . import register
+        raise SystemExit(register.main(args))
     mcp.run()
 
 

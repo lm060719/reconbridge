@@ -23,7 +23,26 @@
 
 ### PC 端（一键装 MCP 工具）
 
-需要 Python 3.10+、Claude Code、`adb`（Android platform-tools）。
+需要 Claude Code 与 `adb`（Android platform-tools，连真机用）。
+
+**推荐：一行在线安装（Windows，无需 clone 仓库、无需 Python）**
+
+```powershell
+irm https://github.com/lm060719/reconbridge/releases/latest/download/install.ps1 | iex
+```
+
+自动下载打包好的 MCP exe、解压到 `%LOCALAPPDATA%\ReconBridge\`、注册进 Claude Code 用户级配置。装完**重启 Claude Code** 即用。
+> exe 内含 MCP server 与核心依赖（含 androguard）；jadx / Ghidra 仍为可选反编译工具，解压到 `%LOCALAPPDATA%\ReconBridge\tools\` 即被自动探测（`toolchain_status` 查看）。默认 adb 传输；wifi 传输先设 `$env:RB_TRANSPORT="wifi"` 再执行。
+
+**更新**：重跑上面那条安装命令即可——它会原地覆盖 exe 并重新注册，保留 `work\`（拉包/dump 数据）与 `tools\`。
+
+**卸载**：
+```powershell
+irm https://github.com/lm060719/reconbridge/releases/latest/download/uninstall.ps1 | iex
+```
+从 Claude Code 注销 reconbridge 并删除安装目录（默认保留 `work\`/`tools\` 数据；连数据一起删设 `$env:RB_PURGE="1"` 再执行）。等价地，exe 也能自注销：`reconbridge-mcp.exe --unregister`。
+
+**从源码运行（开发者 / Linux / macOS，需 Python 3.10+）**
 
 ```powershell
 # Windows
@@ -40,7 +59,7 @@ cd reconbridge
 ```
 
 装完**重启 Claude Code**，任意目录下 `claude mcp list` 或 `/mcp` 都能看到 `reconbridge`（18 个工具）。
-> 脚本直接写 `~/.claude.json`（用户级作用域），比 `claude mcp add` 更稳（后者在 Windows / 非 ASCII 路径下对 JSON 引号处理有坑）。如只想在本仓库目录内启用，见 [`.mcp.json.example`](.mcp.json.example)。
+> 脚本直接写 `~/.claude.json`（用户级作用域），比 `claude mcp add` 更稳（后者在 Windows / 非 ASCII 路径下对 JSON 引号处理有坑）。如只想在本仓库目录内启用，见 [`.mcp.json.example`](.mcp.json.example)。自己构建 exe：`./build_exe.ps1`（产出 `dist/reconbridge-mcp-win64.zip`）。
 
 ### 设备端（刷入 KernelSU 模块）
 

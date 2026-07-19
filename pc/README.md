@@ -48,7 +48,13 @@ python -m venv .venv
 
 ## 注册到 Claude Code
 
-项目根已有 `.mcp.json`（项目级配置）。在该目录启动 Claude Code 会提示批准 `reconbridge` MCP server，批准后即可用。
+**推荐：一行在线安装（打包 exe，无需 clone / venv）**
+```powershell
+irm https://github.com/lm060719/reconbridge/releases/latest/download/install.ps1 | iex
+```
+下载打包好的 MCP exe 到 `%LOCALAPPDATA%\ReconBridge\` 并自注册。构建该 exe：仓库根 `./build_exe.ps1`（PyInstaller onedir → `dist/reconbridge-mcp-win64.zip`）；exe 也能自注册：`reconbridge-mcp.exe --register [--transport adb|wifi]`。
+
+**源码方式**：项目根已有 `.mcp.json`（项目级配置）。在该目录启动 Claude Code 会提示批准 `reconbridge` MCP server，批准后即可用。
 
 手动方式：
 ```powershell
