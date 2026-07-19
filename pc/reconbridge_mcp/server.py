@@ -241,6 +241,7 @@ def trace_java(package: str, class_name: str, method: str,
                args_render: str = "tostring",
                capture_args: Optional[list] = None,
                fields: Optional[list] = None,
+               paths: Optional[list] = None,
                this: str = "class",
                ret: bool = True,
                when: str = "after",
@@ -263,7 +264,12 @@ def trace_java(package: str, class_name: str, method: str,
       省略=hook 所有同名重载；method="<init>" 则 hook 构造函数。
     - capture_args: 逐参数抓取 [{"index":0,"render":"tostring","max":2000}]；省略=按 tostring 抓全部参数。
     - fields: 反射读取的（私有）字段 [{"target":"this","name":"Z3","render":"tostring"}]。
-    - this: this 渲染 class|tostring|none；when: before|after|both；render: tostring|class|json。
+    - paths: **嵌套字段路径捕获**（P0-3），直接拿深埋在 payload 对象里的值，不靠 toString 撞运气：
+      [{"path":"args[1].payload.load_url","render":"tostring","max":2000}]。
+      路径语法 args[N]/this/ret 起头，`.name` 逐层（反射字段→getter→Map key），`[n]` 索引数组/List；
+      裸字段名等价 this.<name>。解析不到的段返回 {"unresolved":true}。
+    - this: this 渲染 class|tostring|none；when: before|after|both。
+    - render: tostring|class|json|**deep**（deep=反射把对象图深度序列化成 JSON，带深度/环/节点预算防爆）。
 
     注意：模块在进程启动时读配置，故对已运行的目标需 restart=True（force-stop 触发重载），
     之后在 seconds 窗口内手动触发目标行为（如唤起小爱问一句）即可收到命中。
@@ -281,6 +287,8 @@ def trace_java(package: str, class_name: str, method: str,
         capture["ret"] = {"capture": True, "render": args_render}
     if fields:
         capture["fields"] = fields
+    if paths:
+        capture["paths"] = paths
     target: dict[str, Any] = {
         "kind": "java",
         "id": hook_id or f"{class_name.rsplit('.', 1)[-1]}_{method}",

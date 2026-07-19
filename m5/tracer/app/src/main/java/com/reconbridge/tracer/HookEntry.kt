@@ -309,6 +309,34 @@ private class TraceCallback(
                 o.put("fields", farr)
             }
 
+            // paths（嵌套字段路径捕获：直接拿深埋在 payload 对象里的值，P0-3）
+            val pathSpec = capture.optJSONArray("paths")
+            if (pathSpec != null && pathSpec.length() > 0) {
+                val parr = JSONArray()
+                for (k in 0 until pathSpec.length()) {
+                    val p = pathSpec.optJSONObject(k) ?: continue
+                    val expr = p.optString("path")
+                    if (expr.isEmpty()) continue
+                    val rend = p.optString("render", "tostring")
+                    val max = p.optInt("max", 2000)
+                    val entry = JSONObject().put("path", expr).put("render", rend)
+                    try {
+                        val resolved = resolvePath(param, expr)
+                        if (resolved === MISSING) {
+                            entry.put("value", JSONObject.NULL)
+                            entry.put("unresolved", true)
+                        } else {
+                            entry.put("value", render(resolved, rend, max))
+                        }
+                    } catch (t: Throwable) {
+                        entry.put("value", JSONObject.NULL)
+                        entry.put("error", t.toString())
+                    }
+                    parr.put(entry)
+                }
+                o.put("paths", parr)
+            }
+
             // stack
             if (capture.optBoolean("stack", false)) {
                 val st = JSONArray()
@@ -322,17 +350,200 @@ private class TraceCallback(
         }
     }
 
-    /** 渲染一个值：tostring（数值/布尔原样，其余 toString 截断）/ class（类名）/ json（原样字符串，交 PC 解析）。 */
+    /** 渲染一个值：tostring（数值/布尔原样，其余 toString 截断）/ class（类名）/
+     *  json（原样字符串，交 PC 解析）/ deep（反射把对象图深度序列化成 JSON）。 */
     private fun render(v: Any?, mode: String, max: Int): Any {
         if (v == null) return JSONObject.NULL
         return when (mode) {
             "class" -> v.javaClass.name
             "json" -> truncate(v.toString(), max)
+            "deep" -> try {
+                deepToJson(v, DEEP_MAX_DEPTH, intArrayOf(DEEP_MAX_NODES),
+                           java.util.IdentityHashMap(), max)
+            } catch (t: Throwable) {
+                "<deep err: $t>"
+            }
             else -> when (v) {
                 is Number, is Boolean -> v
                 is CharSequence -> truncate(v.toString(), max)
                 else -> truncate(v.toString(), max)
             }
+        }
+    }
+
+    /**
+     * 反射深度序列化对象图为 JSON（render:"deep"）。带三重防爆：
+     *   - depth：最大递归深度（超出退化为 toString）
+     *   - budget：全局节点预算（IntArray 单元素，跨递归共享，防止宽对象爆炸）
+     *   - seen：IdentityHashMap 环检测
+     * 容器（Map/Collection/数组）展开为 JSON object/array；枚举取 name；
+     * 普通对象枚举其（含私有、跨父类）非静态字段。
+     */
+    private fun deepToJson(
+        v: Any?, depth: Int, budget: IntArray,
+        seen: java.util.IdentityHashMap<Any, Boolean>, leafMax: Int,
+    ): Any {
+        if (v == null) return JSONObject.NULL
+        when (v) {
+            is Number, is Boolean -> return v
+            is CharSequence -> return truncate(v.toString(), leafMax)
+        }
+        if (budget[0] <= 0) return "…(达节点预算)"
+        budget[0] = budget[0] - 1
+        if (v is Enum<*>) return v.name
+        if (depth <= 0) return truncate(v.toString(), leafMax)
+        if (seen.containsKey(v)) return "<cycle>"
+
+        when (v) {
+            is Map<*, *> -> {
+                seen[v] = true
+                val o = JSONObject()
+                for ((k, vv) in v) {
+                    if (budget[0] <= 0) break
+                    o.put(k?.toString() ?: "null", deepToJson(vv, depth - 1, budget, seen, leafMax))
+                }
+                return o
+            }
+            is Collection<*> -> {
+                seen[v] = true
+                val a = JSONArray()
+                for (e in v) {
+                    if (budget[0] <= 0) break
+                    a.put(deepToJson(e, depth - 1, budget, seen, leafMax))
+                }
+                return a
+            }
+        }
+        if (v.javaClass.isArray) {
+            seen[v] = true
+            val a = JSONArray()
+            val n = java.lang.reflect.Array.getLength(v)
+            for (i in 0 until n) {
+                if (budget[0] <= 0) break
+                a.put(deepToJson(java.lang.reflect.Array.get(v, i), depth - 1, budget, seen, leafMax))
+            }
+            return a
+        }
+        // 系统类（java.*/android.*）不下钻字段，避免踩到懒加载/巨型内部状态；只 toString
+        val cn = v.javaClass.name
+        if (cn.startsWith("java.") || cn.startsWith("javax.") || cn.startsWith("android.") ||
+            cn.startsWith("kotlin.")) {
+            return truncate(v.toString(), leafMax)
+        }
+        seen[v] = true
+        val o = JSONObject()
+        o.put("_class", cn)
+        var c: Class<*>? = v.javaClass
+        var levels = 0
+        while (c != null && c != Any::class.java && levels < 6) {
+            for (f in c.declaredFields) {
+                if (budget[0] <= 0) break
+                val mod = f.modifiers
+                if (java.lang.reflect.Modifier.isStatic(mod) || f.isSynthetic) continue
+                try {
+                    f.isAccessible = true
+                    o.put(f.name, deepToJson(f.get(v), depth - 1, budget, seen, leafMax))
+                } catch (_: Throwable) {
+                }
+            }
+            c = c.superclass
+            levels++
+        }
+        return o
+    }
+
+    /**
+     * 解析嵌套字段路径（capture.paths），直接拿深埋在 payload 对象里的值（P0-3）。
+     * 语法：`args[1].payload.load_url` / `this.mState.list[0].name` / `ret.body` / 裸字段名(=this.<name>)。
+     * 每段先试反射字段（含私有、跨父类），再试 getter（getX/x/isX），Map 则按 key 取；`[n]` 索引数组/List。
+     * @return 解析到的原始对象（可能为 null=字段本就是 null）；无法解析返回哨兵 MISSING。
+     */
+    private fun resolvePath(param: MethodHookParam, expr0: String): Any? {
+        val expr = expr0.trim()
+        var cur: Any?
+        var s: String
+        when {
+            expr == "this" || expr.startsWith("this.") || expr.startsWith("this[") -> {
+                cur = param.thisObject; s = expr.substring(4)
+            }
+            expr == "ret" || expr.startsWith("ret.") || expr.startsWith("ret[") -> {
+                cur = param.result; s = expr.substring(3)
+            }
+            expr.startsWith("args[") -> {
+                val close = expr.indexOf(']')
+                if (close < 0) return MISSING
+                val idx = expr.substring(5, close).toIntOrNull() ?: return MISSING
+                val args = param.args
+                if (args == null || idx !in args.indices) return MISSING
+                cur = args[idx]; s = expr.substring(close + 1)
+            }
+            else -> { cur = param.thisObject; s = ".$expr" }  // 裸字段名 → this.<name>
+        }
+        while (s.isNotEmpty()) {
+            if (cur == null) return MISSING  // 中间节点为 null，无法继续下钻
+            if (s.startsWith(".")) { s = s.substring(1); continue }
+            if (s.startsWith("[")) {
+                val close = s.indexOf(']')
+                if (close < 0) return MISSING
+                val idx = s.substring(1, close).toIntOrNull() ?: return MISSING
+                cur = indexInto(cur, idx)
+                if (cur === MISSING) return MISSING
+                s = s.substring(close + 1)
+            } else {
+                val cut = s.indexOfFirst { it == '.' || it == '[' }
+                val name = if (cut < 0) s else s.substring(0, cut)
+                s = if (cut < 0) "" else s.substring(cut)
+                cur = memberOf(cur, name)
+                if (cur === MISSING) return MISSING
+            }
+        }
+        return cur
+    }
+
+    /** 取对象成员：Map.key → 反射字段（含私有/父类）→ getter（getX/x/isX）。找不到返回 MISSING。 */
+    private fun memberOf(obj: Any, name: String): Any? {
+        if (obj is Map<*, *>) {
+            if (obj.containsKey(name)) return obj[name]
+        }
+        var c: Class<*>? = obj.javaClass
+        while (c != null) {
+            try {
+                val f = c.getDeclaredField(name)
+                f.isAccessible = true
+                return f.get(obj)
+            } catch (_: NoSuchFieldException) {
+                c = c.superclass
+            } catch (_: Throwable) {
+                return MISSING
+            }
+        }
+        val cap = name.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        for (mName in listOf("get$cap", name, "is$cap")) {
+            try {
+                val m = obj.javaClass.getMethod(mName)
+                m.isAccessible = true
+                return m.invoke(obj)
+            } catch (_: NoSuchMethodException) {
+            } catch (_: Throwable) {
+                return MISSING
+            }
+        }
+        return MISSING
+    }
+
+    /** 索引进数组/List；越界或不可索引返回 MISSING。 */
+    private fun indexInto(obj: Any, idx: Int): Any? {
+        return try {
+            when {
+                obj is List<*> -> if (idx in obj.indices) obj[idx] else MISSING
+                obj.javaClass.isArray -> {
+                    val n = java.lang.reflect.Array.getLength(obj)
+                    if (idx in 0 until n) java.lang.reflect.Array.get(obj, idx) else MISSING
+                }
+                else -> MISSING
+            }
+        } catch (_: Throwable) {
+            MISSING
         }
     }
 
@@ -355,4 +566,11 @@ private class TraceCallback(
 
     private fun truncate(s: String, max: Int): String =
         if (max > 0 && s.length > max) s.substring(0, max) + "…(len=${s.length})" else s
+
+    companion object {
+        /** 无法解析路径/成员时的哨兵，与“字段值本就是 null”区分开。 */
+        private val MISSING = Any()
+        private const val DEEP_MAX_DEPTH = 5      // deep 序列化最大递归深度
+        private const val DEEP_MAX_NODES = 2000   // deep 序列化全局节点预算
+    }
 }

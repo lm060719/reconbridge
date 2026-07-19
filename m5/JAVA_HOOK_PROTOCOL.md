@@ -38,6 +38,9 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
         "fields": [                   // 反射读（私有）字段：复刻手写 Xposed 里 getDeclaredField 的做法
           {"target": "this", "name": "Z3", "render": "tostring"}
         ],
+        "paths": [                    // 嵌套字段路径捕获（直接拿深埋在 payload 里的值）
+          {"path": "args[1].payload.load_url", "render": "tostring", "max": 2000}
+        ],
         "stack": false                // 抓 Java 调用栈（前 24 帧）
       },
       "action": {                     // 可选（M5 v2）：实时篡改。不给=纯观测
@@ -57,7 +60,18 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
 命中事件里会多一个 `"tampered": true` 标记。想**静默篡改**（不产生事件）设 `capture.when = "none"`。
 
 **render 取值**：`tostring`（数值/布尔原样，其余 `String.valueOf` 截断到 `max`）、`class`（对象类名）、
-`json`（原样字符串，交 PC 侧解析——适合参数本身就是 JSON 文本的场景，如 `sendStreamData` 的 content）。
+`json`（原样字符串，交 PC 侧解析——适合参数本身就是 JSON 文本的场景，如 `sendStreamData` 的 content）、
+`deep`（反射把对象图**深度序列化**成 JSON，带深度=5 / 环检测 / 节点预算=2000 三重防爆；
+容器 Map/Collection/数组展开，`java./android./kotlin.` 等系统类只 `toString` 不下钻，普通对象枚举含私有字段）。
+
+**`paths`（嵌套字段路径捕获）**：不靠整对象 `toString()` 撞运气，直接按路径把深埋在 payload 对象里的值取出来。
+每条 `{path, render?, max?}`，路径语法：
+- 起头：`args[N]`（第 N 个参数）/ `this` / `ret`（仅 after 阶段有值）/ 裸字段名（=`this.<name>`）。
+- 逐段 `.name`：依次尝试 **反射字段**（含私有、跨父类）→ **getter**（`getName`/`name`/`isName`）→ **Map key**。
+- `[n]`：索引数组 / `List`。
+- 例：`args[1].payload.load_url`、`this.mState.items[0].title`、`ret.body`。
+- 解析不到的段：该条返回 `{"path":…, "value":null, "unresolved":true}`（与“字段本就是 null”区分）。
+每条 `path` 的值再按其 `render`（可为 `deep`）渲染。事件里以 `"paths":[{path,render,value,...}]` 回传。
 
 `params` 里的类型名：Java 全名（`java.lang.String`、`android.os.Bundle`），基本类型用 `int/long/boolean/…`。
 
@@ -81,6 +95,7 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
   ],
   "ret": "…",                          // 若 capture.ret.capture
   "fields": [{"target": "this", "name": "Z3", "value": "true"}],
+  "paths": [{"path": "args[1].payload.load_url", "render": "tostring", "value": "https://…"}],
   "stack": ["…"]                       // 若 capture.stack
 }
 ```
@@ -89,9 +104,10 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
 
 ```
 trace_java(package, class_name, method,
-           params=None, capture_args=None, fields=None,
+           params=None, capture_args=None, fields=None, paths=None,
            this="class", ret=True, when="after", stack=False,
-           args_render="tostring", restart=True, seconds=12, max_events=200)
+           args_render="tostring", restart=True, seconds=12, max_events=200,
+           until_first_hit=False, until_n_events=0, fold_stack=True)
 ```
 一步：拼 java target → `POST /hook` → `collect_sse` 采集并返回命中。等价于「hook 一个 Java 方法看它跑」。
 底层就是上面的 `/hook` + `/events`，也可以直接用 `post_hook` + `collect_events` 手工组合。
@@ -114,7 +130,8 @@ patch_java(package, class_name, method,
 - **trace（观测）+ 实时篡改（action）** 均支持。篡改在 Xposed before（改参数/skip）/after（改返回值）阶段生效。
 - 类解析用目标进程主 classloader（`lpparam.classLoader`）；动态加载进独立 classloader 的类暂不覆盖。
 - 模块进程启动时一次性读配置；改配置后要让目标重启（`restart:true`）才生效。
-- 复杂对象默认只 `toString()` + 类名，不做深度序列化（避免递归/卡顿）；要看内部状态用 `fields` 反射。
+- 复杂对象默认只 `toString()` + 类名；要看内部状态用 `fields`（点名反射某字段）、`paths`（按路径取深埋值）
+  或 `render:"deep"`（整棵对象图序列化，有深度/环/节点预算防爆）。
 - 篡改值类型要与目标 Java 签名匹配（显式 `type`）；类型不符会在命中时抛异常并打日志（不影响原方法）。
 - 日志默认安静（只在装 hook / 出错时打）；配置 `debug:true` 才逐命中打 logcat。
 - 需要 LSPosed；模块作用域需手动勾选目标 App（这正是给 LSPosed 模块开发者用的工具，环境本就具备）。

@@ -85,7 +85,7 @@
 ### 3.4 Java trace / 实时篡改（M5，2 个）★ 面向 LSPosed 开发
 | 工具 | 签名 | 用途 |
 |---|---|---|
-| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`until_first_hit=True` 命中即返回 |
+| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`paths` 按路径取嵌套值、`render:"deep"` 深序列化、`until_first_hit=True` 命中即返回 |
 | `patch_java` | `(package, class_name, method, params=None, replace_args=None, replace_return=None, skip_original=False, trace=True, capture_args=None, this="class", when="after", hook_id="", debug=False, restart=True, seconds=0, max_events=100)` | **实时篡改**：改参数 / 改返回值 / 跳过原方法。篡改持久生效直到 `unhook` |
 
 ---
@@ -103,7 +103,8 @@
 - 配置 = `{package, restart, debug?, targets:[{kind:"java", class, method, params?, capture{...}, action?}]}`。
 - `params` 省略 = hook 所有同名重载；`method:"<init>"` = 构造函数。
 - `capture`：`this`(class/tostring/none)、`when`(before/after/both/**none**=只篡改不出事件)、`args`/`all_args`、`ret`、`fields`(反射读私有字段)、`stack`。
-- `render`：`tostring`(数值/布尔原样，其余 toString 截断) / `class`(类名) / `json`(原样字符串交 PC 解析，适合参数本身是 JSON)。
+- `render`：`tostring`(数值/布尔原样，其余 toString 截断) / `class`(类名) / `json`(原样字符串交 PC 解析，适合参数本身是 JSON) / `deep`(反射深度序列化对象图，带深度/环/节点预算防爆)。
+- `paths`(嵌套字段路径捕获)：`[{"path":"args[1].payload.load_url","render":"tostring"}]`——直接拿深埋在 payload 对象里的值，不靠整对象 toString 撞运气。路径 `args[N]`/`this`/`ret` 起头，`.name` 逐层(反射字段→getter→Map key)，`[n]` 索引数组/List；裸字段名=`this.<name>`；解析不到标 `unresolved:true`。
 - `action`(v2 篡改)：`replace_args:[{index,value,type}]`、`replace_return:{value,type}`、`skip_original`。`type ∈ string|int|long|boolean|double|float|short|byte|char`，**类型要与 Java 签名匹配**。命中事件带 `tampered:true`。
 - `debug:true` 才逐命中打 logcat（默认安静）。
 
