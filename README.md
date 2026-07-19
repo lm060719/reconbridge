@@ -42,6 +42,14 @@ irm https://github.com/lm060719/reconbridge/releases/latest/download/uninstall.p
 ```
 从 Claude Code 注销 reconbridge 并删除安装目录（默认保留 `work\`/`tools\` 数据；连数据一起删设 `$env:RB_PURGE="1"` 再执行）。等价地，exe 也能自注销：`reconbridge-mcp.exe --unregister`。
 
+**本地控制台（可选，图形化选连接方式 / 看状态）**
+
+```powershell
+reconbridge-mcp.exe --serve        # 浏览器自动打开 127.0.0.1:9000（源码装法：python -m reconbridge_mcp --serve）
+```
+
+网页里选 adb / wifi、一键连接、看 daemon 状态与只读监控（活动 hook / 近期事件流 / 落盘 dumps），省去命令行设环境变量、手抄 token。仅绑 `127.0.0.1`（本机）。`--port N` 改端口、`--no-open` 不自动开浏览器。
+
 **从源码运行（开发者 / Linux / macOS，需 Python 3.10+）**
 
 ```powershell

@@ -64,3 +64,4 @@ Write-Host "   · 需要 adb 在 PATH（连真机；wifi 模式除外）。" -Fo
 Write-Host "   · jadx / Ghidra 为可选反编译工具，解压到 $dest\tools\ 即被自动探测（toolchain_status 查看）。" -ForegroundColor DarkGray
 Write-Host "   · 设备端仍需在 KernelSU 管理器刷入 ReconBridge 模块（见 README 设备端章节）。" -ForegroundColor DarkGray
 Write-Host "   · 更新：重跑本命令即原地覆盖（保留 work\ 数据）。卸载：跑 uninstall.ps1。" -ForegroundColor DarkGray
+Write-Host "   · 图形控制台：& `"$exe`" --serve （浏览器里选连接方式 / 看状态与监控）。" -ForegroundColor DarkGray

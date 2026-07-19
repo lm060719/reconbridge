@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReconBridge 控制台</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #171a21; --line: #262b36; --fg: #e6e9ef;
+    --muted: #8b93a4; --accent: #4f8cff; --ok: #35c48a; --off: #6b7280; --danger: #ff5c6c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--fg); line-height: 1.5; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 19px; margin: 6px 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+  .cardhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 8px; }
+  .cardhead h2 { font-size: 14px; margin: 0; }
+  .count { color: var(--muted); font-size: 12px; }
+  .mono { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+  label.fld { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  select, input[type=text] { width: 100%; background: #0b0d11; border: 1px solid var(--line); color: var(--fg);
+    border-radius: 8px; padding: 8px 10px; font: inherit; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .row > select, .row > input { flex: 1; min-width: 120px; }
+  button { font: inherit; color: var(--fg); background: #222836; border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.mini { padding: 3px 9px; font-size: 12px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .pill.on { background: rgba(53,196,138,.14); color: var(--ok); } .pill.on .dot { background: var(--ok); }
+  .pill.off { background: rgba(107,114,128,.18); color: var(--off); } .pill.off .dot { background: var(--off); }
+  .statusline { margin-top: 12px; font-size: 12px; color: var(--muted); word-break: break-all; }
+  .statusline b { color: var(--fg); font-weight: 600; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .item { background: #0b0d11; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .item .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .item .pkg { font-size: 13px; word-break: break-all; }
+  .item .meta { color: var(--muted); font-size: 12px; margin-top: 4px; word-break: break-all; }
+  .empty { color: var(--muted); font-size: 12px; padding: 6px 2px; }
+  .evwrap { max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+  .ev { background: #0b0d11; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .ev summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ev summary::-webkit-details-marker { display: none; }
+  .ev .t { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; flex: none; }
+  .ev .sig { font-size: 12px; word-break: break-all; flex: 1; min-width: 0; }
+  .ev pre { margin: 8px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; color: var(--muted); max-height: 260px; overflow-y: auto; }
+  .tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; flex: none; }
+  .tag.before { background: rgba(79,140,255,.16); color: var(--accent); }
+  .tag.after { background: rgba(53,196,138,.16); color: var(--ok); }
+  .tag.dump { background: rgba(255,92,108,.16); color: var(--danger); }
+  .hide { display: none !important; }
+  #errBox { color: var(--danger); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ReconBridge 控制台</h1>
+  <div class="sub">本机控制台（127.0.0.1）· 选连接方式、看状态与监控</div>
+
+  <!-- 连接 -->
+  <div class="card">
+    <div class="cardhead"><h2>连接</h2>
+      <span id="connPill" class="pill off"><span class="dot"></span><span id="connText">未连接</span></span>
+    </div>
+    <label class="fld">传输方式</label>
+    <select id="transport">
+      <option value="adb">adb（USB 数据线，自动读 token；不在同网也能连）</option>
+      <option value="wifi">wifi（同局域网直连，需填 IP 和 token）</option>
+    </select>
+
+    <div id="adbBox">
+      <label class="fld">设备（留空自动选唯一在线设备）</label>
+      <div class="row">
+        <select id="serial"><option value="">（自动）</option></select>
+        <button id="btnDevices" class="mini">刷新设备</button>
+      </div>
+    </div>
+
+    <div id="wifiBox" class="hide">
+      <label class="fld">设备地址 URL</label>
+      <input id="url" type="text" placeholder="http://192.168.1.23:8787">
+      <label class="fld">Token（手机 WebUI 里那个）</label>
+      <input id="token" type="text" placeholder="设备上显示的 token">
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button id="btnConnect" class="primary">连接</button>
+      <button id="btnDisconnect">断开</button>
+    </div>
+    <div id="statusLine" class="statusline"></div>
+    <div id="errBox"></div>
+  </div>
+
+  <!-- 活动 hook -->
+  <div class="card">
+    <div class="cardhead"><h2>活动 hook</h2><span id="hooksCount" class="count"></span></div>
+    <div id="hooksList" class="list"><div class="empty">未连接</div></div>
+  </div>
+
+  <!-- 近期事件流 -->
+  <div class="card">
+    <div class="cardhead"><h2>近期事件流</h2>
+      <span class="row">
+        <span id="evCount" class="count"></span>
+        <button id="evPause" class="mini">暂停</button>
+        <button id="evClear" class="mini">清空</button>
+      </span>
+    </div>
+    <div id="evWrap" class="evwrap"><div class="empty">未连接</div></div>
+  </div>
+
+  <!-- 落盘 dumps -->
+  <div class="card">
+    <div class="cardhead"><h2>落盘 dumps</h2><span id="dumpsCount" class="count"></span></div>
+    <div id="dumpsList" class="list evwrap"><div class="empty">未连接</div></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+function fmtTs(ts) {
+  if (ts == null || ts === "") return "";
+  let n = Number(ts);
+  if (!isFinite(n)) return String(ts);
+  if (n < 1e12) n *= 1000;
+  const d = new Date(n);
+  if (isNaN(d.getTime())) return String(ts);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  return await r.json();
+}
+function showErr(msg) { $("errBox").textContent = msg || ""; }
+
+let connected = false;
+let evList = [];       // 累积事件对象
+let lastSeq = 0;       // /api/recent 增量游标
+let evPaused = false;
+
+// ---- 连接卡 ----
+function syncTransportUI() {
+  const t = $("transport").value;
+  $("adbBox").classList.toggle("hide", t !== "adb");
+  $("wifiBox").classList.toggle("hide", t !== "wifi");
+}
+$("transport").addEventListener("change", syncTransportUI);
+
+async function refreshDevices() {
+  try {
+    const r = await api("/api/devices");
+    const sel = $("serial");
+    const cur = sel.value;
+    const devs = (r.devices || []);
+    sel.innerHTML = '<option value="">（自动）</option>' +
+      devs.map((d) => `<option value="${esc(d.serial)}">${esc(d.serial)} · ${esc(d.state)}</option>`).join("");
+    sel.value = cur;
+  } catch (e) {}
+}
+$("btnDevices").addEventListener("click", refreshDevices);
+
+async function doConnect() {
+  showErr("");
+  $("btnConnect").disabled = true; $("btnConnect").textContent = "连接中…";
+  const body = {
+    transport: $("transport").value,
+    serial: $("serial").value,
+    url: $("url").value.trim(),
+    token: $("token").value.trim(),
+  };
+  try {
+    const r = await api("/api/connect", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body) });
+    if (!r.ok || !r.connected) { showErr("连接失败：" + (r.error || "未知错误")); }
+    evList = []; lastSeq = 0;
+    applyStatus(r);
+    refreshMonitors();
+  } catch (e) { showErr("连接失败：" + e.message); }
+  finally { $("btnConnect").disabled = false; $("btnConnect").textContent = "连接"; }
+}
+$("btnConnect").addEventListener("click", doConnect);
+
+async function doDisconnect() {
+  try { const r = await api("/api/disconnect", { method: "POST" }); applyStatus(r); } catch (e) {}
+  evList = []; lastSeq = 0; renderEvents();
+}
+$("btnDisconnect").addEventListener("click", doDisconnect);
+
+function applyStatus(st) {
+  connected = !!(st && st.connected);
+  $("connPill").className = "pill " + (connected ? "on" : "off");
+  $("connText").textContent = connected ? "已连接" : "未连接";
+  const parts = [];
+  if (st) {
+    parts.push(`传输：<b>${esc(st.transport || "-")}</b>`);
+    if (st.serial) parts.push(`设备：<b>${esc(st.serial)}</b>`);
+    if (st.base_url) parts.push(`地址：<b>${esc(st.base_url)}</b>`);
+    const h = st.health;
+    if (h && typeof h === "object") {
+      if (h.version != null) parts.push(`daemon：<b>${esc(h.version)}</b>`);
+      if (h.pid != null) parts.push(`pid <b>${esc(h.pid)}</b>`);
+    }
+  }
+  $("statusLine").innerHTML = parts.join(" · ");
+}
+
+async function refreshStatus() {
+  try { applyStatus(await api("/api/status")); } catch (e) {}
+}
+
+// ---- 活动 hook ----
+async function refreshHooks() {
+  if (!connected) { $("hooksList").innerHTML = '<div class="empty">未连接</div>'; $("hooksCount").textContent = ""; return; }
+  try {
+    const r = await api("/api/hooks");
+    if (!r.ok) throw new Error(r.error || "读取失败");
+    const d = r.data;
+    const arr = Array.isArray(d) ? d : (d && Array.isArray(d.hooks) ? d.hooks : []);
+    $("hooksCount").textContent = arr.length ? `${arr.length} 个包` : "";
+    if (!arr.length) { $("hooksList").innerHTML = '<div class="empty">暂无活动 hook</div>'; return; }
+    $("hooksList").innerHTML = arr.map((h) => {
+      const pkg = h.package || h.pkg || "(未知包)";
+      const targets = Array.isArray(h.targets) ? h.targets : [];
+      const lines = targets.map((t) => {
+        const at = t.symbol ? t.symbol : (t.offset != null ? "+" + t.offset : (t.method || "?"));
+        return esc(`${t.id || t.class || "?"} · ${t.lib || t.class || "?"} · ${at}`);
+      }).join("<br>");
+      return `<div class="item"><div class="top">
+        <span class="pkg">${esc(pkg)}</span>
+        <button class="mini unhookBtn" data-pkg="${esc(pkg)}">取消</button></div>
+        <div class="meta">${targets.length} 个 target${lines ? "<br>" + lines : ""}</div></div>`;
+    }).join("");
+  } catch (e) { $("hooksList").innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+$("hooksList").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".unhookBtn");
+  if (!btn) return;
+  try {
+    await api("/api/unhook", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ package: btn.dataset.pkg }) });
+    refreshHooks();
+  } catch (err) { showErr("取消 hook 失败：" + err.message); }
+});
+
+// ---- 近期事件流 ----
+function renderEvents() {
+  const wrap = $("evWrap");
+  if (!connected) { wrap.innerHTML = '<div class="empty">未连接</div>'; $("evCount").textContent = ""; return; }
+  const items = evList.map((ev) => {
+    if (ev && ev.event === "dump_saved") {
+      return `<div class="ev"><div class="sig"><span class="tag dump">DUMP</span> ${esc(ev.name || "")} · ${fmtBytes(ev.bytes)}</div></div>`;
+    }
+    const phase = ev.phase === "after" ? "after" : "before";
+    const sig = `${ev.class || ""}${ev.class ? "." : ""}${ev.method || ev.hook_id || "?"}`;
+    const argc = Array.isArray(ev.args) ? ev.args.length : 0;
+    return `<details class="ev"><summary>
+      <span class="t">${esc(fmtTs(ev.ts))}</span>
+      <span class="tag ${phase}">${phase}</span>
+      <span class="sig mono">${esc(sig)}${argc ? ` <span style="color:var(--muted)">(${argc} 参)</span>` : ""}</span>
+      </summary><pre>${esc(JSON.stringify(ev, null, 2))}</pre></details>`;
+  });
+  $("evCount").textContent = items.length ? `${items.length} 条` : "";
+  wrap.innerHTML = items.length ? items.slice().reverse().join("") : '<div class="empty">暂无事件</div>';
+}
+async function refreshEvents() {
+  if (!connected || evPaused) return;
+  try {
+    const r = await api(`/api/recent?limit=60&since_seq=${lastSeq}`);
+    if (!r.ok) return;
+    if (typeof r.latest_seq === "number") lastSeq = r.latest_seq;
+    if (r.events && r.events.length) {
+      evList = evList.concat(r.events);
+      if (evList.length > 400) evList = evList.slice(evList.length - 400);
+      renderEvents();
+    }
+  } catch (e) {}
+}
+$("evPause").addEventListener("click", () => {
+  evPaused = !evPaused;
+  $("evPause").textContent = evPaused ? "继续" : "暂停";
+});
+$("evClear").addEventListener("click", () => { evList = []; renderEvents(); });
+
+// ---- 落盘 dumps ----
+async function refreshDumps() {
+  if (!connected) { $("dumpsList").innerHTML = '<div class="empty">未连接</div>'; $("dumpsCount").textContent = ""; return; }
+  try {
+    const r = await api("/api/dumps");
+    if (!r.ok) throw new Error(r.error || "读取失败");
+    const d = r.data;
+    const arr = Array.isArray(d) ? d : (d && Array.isArray(d.dumps) ? d.dumps : []);
+    $("dumpsCount").textContent = arr.length ? `${arr.length} 个` : "";
+    if (!arr.length) { $("dumpsList").innerHTML = '<div class="empty">暂无 dump</div>'; return; }
+    $("dumpsList").innerHTML = arr.map((x) => {
+      const name = x.name || x.file || String(x);
+      const size = x.bytes != null ? x.bytes : (x.size != null ? x.size : null);
+      return `<div class="item"><span class="pkg mono">${esc(name)}</span>${
+        size != null ? `<span class="meta">${fmtBytes(size)}</span>` : ""}</div>`;
+    }).join("");
+  } catch (e) { $("dumpsList").innerHTML = `<div class="empty">读取失败：${esc(e.message)}</div>`; }
+}
+
+// ---- 轮询 ----
+function refreshMonitors() { refreshHooks(); refreshDumps(); renderEvents(); }
+syncTransportUI();
+refreshDevices();
+refreshStatus().then(() => { if (connected) refreshMonitors(); });
+setInterval(refreshStatus, 3000);
+setInterval(refreshEvents, 2000);
+setInterval(() => { refreshHooks(); refreshDumps(); }, 5000);
+</script>
+</body>
+</html>

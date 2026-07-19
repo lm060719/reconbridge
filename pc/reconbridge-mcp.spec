@@ -42,8 +42,12 @@ datas += copy_metadata("androguard")
 hiddenimports += collect_submodules("httpx")
 hiddenimports += collect_submodules("anyio")
 hiddenimports += ["reconbridge_mcp", "reconbridge_mcp.server",
-                  "reconbridge_mcp.register", "reconbridge_mcp.client",
-                  "reconbridge_mcp.external", "reconbridge_mcp.settings"]
+                  "reconbridge_mcp.register", "reconbridge_mcp.webconsole",
+                  "reconbridge_mcp.client", "reconbridge_mcp.external",
+                  "reconbridge_mcp.settings"]
+
+# 打进 PC 控制台单页 HTML（webconsole.py 用 importlib.resources 读包内 webconsole.html）
+datas += collect_data_files("reconbridge_mcp", includes=["*.html"])
 
 block_cipher = None
 

@@ -370,5 +370,51 @@ class ReconClient:
             except Exception:
                 pass
 
+    # ---------------- 运行时切换（供 PC Web 控制台 --serve） ----------------
+    def status(self) -> dict:
+        """当前连接快照（不触发建连）。"""
+        return {
+            "transport": settings.transport,
+            "connected": self._ready,
+            "base_url": self._base,
+            "serial": self._serial,
+        }
+
+    def list_devices(self) -> list:
+        """列出 adb devices（含状态），供控制台选择。adb 不可用时返回空列表。"""
+        try:
+            out = subprocess.run([settings.adb, "devices"], capture_output=True, text=True,
+                                 timeout=15, encoding="utf-8", errors="replace").stdout
+        except Exception:
+            return []
+        devs = []
+        for line in out.splitlines()[1:]:
+            line = line.rstrip()
+            if not line or "\t" not in line:
+                continue
+            serial, state = line.split("\t", 1)
+            devs.append({"serial": serial, "state": state.strip()})
+        return devs
+
+    def reconnect(self, transport: str = "adb", serial: str = "",
+                  url: str = "", token: str = "") -> None:
+        """运行时切换传输并重连（幂等重置后 ensure）。失败抛 ReconError。"""
+        settings.transport = (transport or "adb").strip().lower()
+        settings.serial = (serial or "").strip()
+        settings.url = (url or "").strip()
+        settings.token = (token or "").strip()
+        # 重置内部状态，让 ensure() 用新参数重新建连
+        self._ready = False
+        self._base = ""
+        self._serial = settings.serial
+        self._token = settings.token
+        self.ensure()
+
+    def disconnect(self) -> None:
+        """断开本进程的连接（adb 模式顺手关设备端口），不影响其它进程。"""
+        self.disable_port()
+        self._ready = False
+        self._base = ""
+
 
 client = ReconClient()

@@ -54,6 +54,8 @@ irm https://github.com/lm060719/reconbridge/releases/latest/download/install.ps1
 ```
 下载打包好的 MCP exe 到 `%LOCALAPPDATA%\ReconBridge\` 并自注册。构建该 exe：仓库根 `./build_exe.ps1`（PyInstaller onedir → `dist/reconbridge-mcp-win64.zip`）；exe 也能自注册：`reconbridge-mcp.exe --register [--transport adb|wifi]`。
 
+**本地 Web 控制台**：`reconbridge-mcp --serve`（源码：`python -m reconbridge_mcp --serve`）起一个只绑 `127.0.0.1:9000` 的图形控制台——选 adb/wifi、一键连接、看 daemon 状态与只读监控（活动 hook / 事件流 / dumps）。`--port N` / `--host H` / `--no-open` 可调。
+
 **源码方式**：项目根已有 `.mcp.json`（项目级配置）。在该目录启动 Claude Code 会提示批准 `reconbridge` MCP server，批准后即可用。
 
 手动方式：
