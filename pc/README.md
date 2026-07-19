@@ -1,3 +1,5 @@
+**中文** | [English](README_en.md)
+
 # ReconBridge MCP Server（M2）
 
 把 M1 的手机静态接口 + PC 本地反编译工具链，封装成 Claude Code 可直接调用的 MCP 工具。

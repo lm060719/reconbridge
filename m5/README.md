@@ -1,3 +1,5 @@
+**中文** | [English](README_en.md)
+
 # ReconBridge M5 —— 通用 Java trace 执行器（LSPosed）
 
 给 **LSPosed 模块开发者**用的实时侦察器：PC 端下发「hook 某个 Java 类的方法」，秒级看到每次调用的

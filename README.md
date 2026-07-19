@@ -1,3 +1,5 @@
+**中文** | [English](README_en.md)
+
 # ReconBridge —— 通用逆向分析 KernelSU 模块
 
 在 Android（KernelSU root）设备上运行的**通用逆向能力后端**。手机侧只做原子能力（拉包 / 读文件 / 列 so / 注入 hook），所有智能（定位函数、生成 hook、分析结果）都在 PC 侧（Claude Code + MCP）完成。

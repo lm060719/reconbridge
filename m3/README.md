@@ -1,3 +1,5 @@
+**中文** | [English](README_en.md)
+
 # ReconBridge M3 —— 通用动态 Hook 执行器
 
 Zygisk 注入 + 数据驱动 ShadowHook 执行器 + 命中事件实时推流（SSE / WS）。

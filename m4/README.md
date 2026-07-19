@@ -1,3 +1,5 @@
+**中文** | [English](README_en.md)
+
 # ReconBridge M4 —— 加固 / 反调试增强
 
 在 M3 通用执行器之上，用**数据驱动 hook 配置**应对整体加固与动态分析对抗。
