@@ -62,6 +62,35 @@ function Install-Jadx([string]$toolsDir) {
     Write-Host "  OK - jadx installed to $jadxDir" -ForegroundColor Green
 }
 
+function Stop-RunningReconbridgeMcp() {
+    # an in-place update/reinstall fails to delete files while the exe (e.g. the MCP
+    # subprocess a running Claude Code / Codex session already spawned) is loaded -
+    # Windows keeps its .pyd/.dll files locked. Stop it first so extraction can proceed;
+    # the client just needs restarting afterwards to relaunch the new build anyway.
+    $running = Get-Process -Name "reconbridge-mcp" -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Host "  stopping running reconbridge-mcp.exe (PID $($running.Id -join ', ')) to release file locks ..." -ForegroundColor Yellow
+        Write-Host "  (this is the MCP subprocess of an already-open Claude Code / Codex session; restart it after install)" -ForegroundColor DarkGray
+        $running | Stop-Process -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 800
+    }
+}
+
+function Remove-DirWithRetry([string]$path, [int]$retries = 6) {
+    for ($i = 0; $i -lt $retries; $i++) {
+        try {
+            Remove-Item $path -Recurse -Force -ErrorAction Stop
+            return
+        } catch {
+            if ($i -eq $retries - 1) {
+                throw "could not remove old install dir $path (still locked). " +
+                      "Close Claude Code / ChatGPT Codex (or any terminal using reconbridge-mcp) and re-run this installer. Original error: $_"
+            }
+            Start-Sleep -Milliseconds 700
+        }
+    }
+}
+
 function Install-GhidraAndJdk([string]$nativeDir) {
     New-Item -ItemType Directory -Force -Path $nativeDir | Out-Null
 
@@ -110,7 +139,10 @@ if ($assetUrl -match '^https?://') {
 
 # 2) clean old + extract (only the reconbridge-mcp subdir; keeps sibling work\ etc.)
 Write-Host "[2/4] extracting to $app ..." -ForegroundColor Yellow
-if (Test-Path $app) { Remove-Item $app -Recurse -Force }
+if (Test-Path $app) {
+    Stop-RunningReconbridgeMcp
+    Remove-DirWithRetry $app
+}
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 Expand-Archive -Path $tmp -DestinationPath $dest -Force
 Remove-Item $tmp -Force -ErrorAction SilentlyContinue
