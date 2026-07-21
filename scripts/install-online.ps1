@@ -20,6 +20,8 @@
 # jadx and Ghidra+JDK21 are optional local decompilers (dexkit_search already works out of
 # the box via bundled androguard). The installer asks [y/N] whether to auto-download each;
 # default is no if you just press Enter. Set the env vars above to answer non-interactively.
+# On upgrades, an already-installed jadx / Ghidra+JDK21 (detected the same way the exe's
+# toolchain_status does) is left alone and the prompt is skipped entirely.
 #
 # NOTE: keep this script pure ASCII. `irm | iex` decodes the downloaded text with the
 # PS 5.1 default encoding (no charset from GitHub), so non-ASCII would render as mojibake,
@@ -46,6 +48,46 @@ function Get-LatestReleaseAssetUrl([string]$repo, [string]$namePattern) {
     $a = $rel.assets | Where-Object { $_.name -match $namePattern } | Select-Object -First 1
     if (-not $a) { throw "no asset matching '$namePattern' in latest release of $repo" }
     return $a.browser_download_url
+}
+
+function Test-JadxPresent([string]$toolsDir) {
+    # mirrors pc/reconbridge_mcp/external.py _find_jadx(): env override, tools_dir\jadx\bin,
+    # then PATH. Keeps upgrades from re-asking / re-downloading over an existing install.
+    if ($env:RECONBRIDGE_JADX -and (Test-Path $env:RECONBRIDGE_JADX)) { return $true }
+    if (Test-Path (Join-Path $toolsDir "jadx\bin\jadx.bat")) { return $true }
+    return [bool](Get-Command jadx -ErrorAction SilentlyContinue)
+}
+
+function Test-GhidraAndJdkPresent([string]$nativeDir, [string]$toolsDir) {
+    # mirrors _find_ghidra_headless() / _find_jdk21(): env override, then glob
+    # native_tools_dir/tools_dir for ghidra*/support/analyzeHeadless.bat and jdk-21*.
+    $ghidraOk = $false
+    if ($env:RECONBRIDGE_GHIDRA -and (Test-Path (Join-Path $env:RECONBRIDGE_GHIDRA "support\analyzeHeadless.bat"))) {
+        $ghidraOk = $true
+    } else {
+        foreach ($base in @($nativeDir, $toolsDir)) {
+            if (-not (Test-Path $base)) { continue }
+            foreach ($d in Get-ChildItem -Path $base -Filter "ghidra*" -Directory -ErrorAction SilentlyContinue) {
+                if (Test-Path (Join-Path $d.FullName "support\analyzeHeadless.bat")) { $ghidraOk = $true; break }
+            }
+            if ($ghidraOk) { break }
+        }
+    }
+    if (-not $ghidraOk) { return $false }
+
+    $jdkOk = $false
+    foreach ($base in @($nativeDir, $toolsDir)) {
+        if (-not (Test-Path $base)) { continue }
+        foreach ($d in Get-ChildItem -Path $base -Filter "jdk-21*" -Directory -ErrorAction SilentlyContinue) {
+            if (Test-Path (Join-Path $d.FullName "bin")) { $jdkOk = $true; break }
+            foreach ($inner in Get-ChildItem -Path $d.FullName -Filter "jdk-21*" -Directory -ErrorAction SilentlyContinue) {
+                if (Test-Path (Join-Path $inner.FullName "bin")) { $jdkOk = $true; break }
+            }
+            if ($jdkOk) { break }
+        }
+        if ($jdkOk) { break }
+    }
+    return $jdkOk
 }
 
 function Install-Jadx([string]$toolsDir) {
@@ -161,7 +203,9 @@ $toolsDir  = Join-Path $dest "tools"
 $nativeDir = if ($env:RECONBRIDGE_NATIVE_TOOLS) { $env:RECONBRIDGE_NATIVE_TOOLS } `
              else { (Split-Path -Qualifier $dest) + "\ReconBridgeTools" }
 
-if (Confirm-Yes "  install jadx now? decompiler, ~30MB [y/N]" "RB_INSTALL_JADX") {
+if (Test-JadxPresent $toolsDir) {
+    Write-Host "  jadx already installed, skipping (upgrade keeps your existing copy)." -ForegroundColor DarkGray
+} elseif (Confirm-Yes "  install jadx now? decompiler, ~30MB [y/N]" "RB_INSTALL_JADX") {
     try {
         Install-Jadx $toolsDir
     } catch {
@@ -172,7 +216,9 @@ if (Confirm-Yes "  install jadx now? decompiler, ~30MB [y/N]" "RB_INSTALL_JADX")
     Write-Host "  skipped. install later: unzip into $toolsDir\jadx (or set RB_INSTALL_JADX=yes and re-run)." -ForegroundColor DarkGray
 }
 
-if (Confirm-Yes "  install Ghidra + JDK21 now? native .so reverse engineering, ~700MB, takes a while [y/N]" "RB_INSTALL_GHIDRA") {
+if (Test-GhidraAndJdkPresent $nativeDir $toolsDir) {
+    Write-Host "  Ghidra + JDK21 already installed, skipping (upgrade keeps your existing copy)." -ForegroundColor DarkGray
+} elseif (Confirm-Yes "  install Ghidra + JDK21 now? native .so reverse engineering, ~700MB, takes a while [y/N]" "RB_INSTALL_GHIDRA") {
     try {
         Install-GhidraAndJdk $nativeDir
     } catch {
