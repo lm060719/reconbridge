@@ -36,6 +36,7 @@ dist/
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
+.me/
 .DS_Store
 Thumbs.db
 *.log

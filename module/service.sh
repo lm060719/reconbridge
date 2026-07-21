@@ -11,10 +11,12 @@ export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
 mkdir -p "$DATADIR"
 
-# M3：把挂到 /system/lib64 的 shadowhook 库重打标签为 system_lib_file，
-# 否则默认 system_file 不允许 app 域 dlopen(execute)，注入层加载 shadowhook 会失败。
-for L in /system/lib64/libshadowhook.so /system/lib64/libshadowhook_nothing.so \
-         "$MODDIR/system/lib64/libshadowhook.so" "$MODDIR/system/lib64/libshadowhook_nothing.so"; do
+# M3：把挂到 /system/lib64 的 hook 引擎库（arm64=shadowhook，x64=dobby）
+# 重打标签为 system_lib_file，否则默认 system_file 不允许 app 域 dlopen(execute)，
+# 注入层加载会失败。
+for L in /system/lib64/libshadowhook.so /system/lib64/libshadowhook_nothing.so /system/lib64/libdobby.so \
+         "$MODDIR/system/lib64/libshadowhook.so" "$MODDIR/system/lib64/libshadowhook_nothing.so" \
+         "$MODDIR/system/lib64/libdobby.so"; do
   [ -f "$L" ] && chcon u:object_r:system_lib_file:s0 "$L" 2>/dev/null
 done
 

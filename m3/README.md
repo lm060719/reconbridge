@@ -13,17 +13,40 @@ Zygisk 注入 + 数据驱动 ShadowHook 执行器 + 命中事件实时推流（S
 m3/
 ├─ HOOK_PROTOCOL.md            # hook 配置 JSON 协议 + 事件格式（PC 下发用）
 ├─ zygisk/
-│  ├─ module.cpp               # Zygisk 模块（注入层）+ 数据驱动 ShadowHook 执行器
-│  └─ third_party/             # zygisk.hpp / shadowhook.h / json.hpp
-└─ prebuilt/                   # libshadowhook.so + libshadowhook_nothing.so（bytedance 2.0.1）
+│  ├─ module.cpp               # Zygisk 模块（注入层）+ 数据驱动 hook 执行器（双引擎）
+│  └─ third_party/             # zygisk.hpp / shadowhook.h / dobby.h / json.hpp
+├─ prebuilt/                   # libshadowhook*.so（arm64，bytedance 2.0.1）+ libdobby_x86_64.so
+├─ build_dobby_x86_64.ps1      # 交叉编译 libdobby_x86_64.so 的脚本（含上游 bug 说明）
+└─ dobby-android-build-fix.patch  # 上面脚本要打的补丁，见脚本头部注释
 
 （守护进程侧 M3 代码在 src/dynamic.cpp：/hook /unhook /hooks + SSE/WS + 注入 IPC socket）
 ```
 
 刷入 zip 里 M3 相关文件：
-- `zygisk/arm64-v8a.so` —— 注入层（ZygiskNext 加载）
-- `system/lib64/libshadowhook.so` + `libshadowhook_nothing.so` —— 挂到 /system/lib64
+- `zygisk/arm64-v8a.so` + `zygisk/x86_64.so` —— 注入层（ZygiskNext 按进程 ABI 自动选一个加载）
+- `system_lib64_arm64/`（shadowhook 两个 .so）/ `system_lib64_x64/`（libdobby.so）—— 安装时
+  customize.sh 按 `$ARCH` 只把匹配架构的挂到 `/system/lib64`
 - `sepolicy.rule` —— 放行 app 域连接守护进程注入 socket
+
+## x86_64 支持（未经真机/模拟器验证）
+
+shadowhook 官方只支持 armeabi-v7a / arm64-v8a，**不支持 x86/x86_64**。x86_64 分支改用
+[Dobby](https://github.com/jmpews/Dobby)（`DobbyHook` / `DobbySymbolResolver`），在
+`module.cpp` 里用 `#if defined(__aarch64__) / __x86_64__` 分流：arm64 分支是原有 shadowhook
+代码原封不动搬过来，x86_64 分支是新增代码，两者不共享运行时状态。
+
+- **pending hook 的等价实现**：shadowhook 原生支持"目标 so 还没加载就先登记，dlopen 后自动补
+  挂"；Dobby 没有这个能力，x86_64 分支用一个轻量轮询线程模拟（每 150ms 全量重扫一次已加载 so /
+  重试 `DobbySymbolResolver`，30s 后放弃）。多数目标 lib 在 App 启动早期就已加载，实测（arm64
+  路径）通常第 1-2 轮内命中，但这终归是模拟出来的，不是原生能力。
+- **libdobby_x86_64.so 的来源**：Dobby 仓库在 `build_dobby_x86_64.ps1` 固定的 commit
+  （`5dfc854`，tag `latest`）上，Android/Linux 后端本身有三处上游 bug（循环头文件依赖、
+  结构体字段改名后个别文件没跟着改、一个引用了已删除头文件），跟 x86_64 无关，在这个 commit 上编
+  译任何 Android/Linux 目标都会撞上。`dobby-android-build-fix.patch` 修了这三处，脚本头部注释
+  有详细说明。升级 Dobby 版本/换 commit 时大概率要重新核对这些坑。
+- **没有真机/模拟器验证**：arm64 分支在真机上完整验证过（见下方"验收"），x86_64 分支目前只做到
+  "编译通过、逻辑走查"——没有 x86_64 的 Android 设备/模拟器测过 hook 是否真的生效。用之前建议先在
+  模拟器上跑一遍最小验收（比如 hook `libc.so!__system_property_get`，参照下方验收命令）。
 
 ## 前置：设备需有 Zygisk 实现
 KernelSU 本身不带 Zygisk，需要 **ZygiskNext（zygisksu）** 或 ReZygisk。安装脚本会检测并提示。

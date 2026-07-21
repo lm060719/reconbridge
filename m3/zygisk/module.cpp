@@ -28,13 +28,20 @@
 #include <unwind.h>
 #include <link.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "third_party/json.hpp"
+#if defined(__aarch64__)
 #include "third_party/shadowhook.h"
+#elif defined(__x86_64__)
+#include "third_party/dobby.h"
+#endif
 #include "third_party/zygisk.hpp"
 
 using json = nlohmann::json;
@@ -71,8 +78,13 @@ static int connect_inject_socket() {
 }
 
 // ---------------------------------------------------------------------------
-// ShadowHook 函数指针（运行时 dlsym，避免 DT_NEEDED）
+// Hook 引擎函数指针（运行时 dlsym，避免 DT_NEEDED）。
+// arm64 用 shadowhook；shadowhook 官方不支持 x86_64，x86_64 换 Dobby
+//（github.com/jmpews/Dobby，见 m3/dobby-android-build-fix.patch 记录的
+// 交叉编译踩坑 + m3/prebuilt/libdobby_x86_64.so）。Dobby 没有 shadowhook
+// 的 "lib 未加载先占位、dlopen 后自动补挂" 能力，用下方轮询线程模拟。
 // ---------------------------------------------------------------------------
+#if defined(__aarch64__)
 static int (*sh_init)(int, bool) = nullptr;
 static void* (*sh_hook_sym_name)(const char*, const char*, void*, void**) = nullptr;
 static void* (*sh_hook_sym_addr)(void*, void*, void**) = nullptr;
@@ -89,6 +101,17 @@ static bool resolve_shadowhook(void* h) {
     sh_reg_dl_init = (decltype(sh_reg_dl_init))dlsym(h, "shadowhook_register_dl_init_callback");
     return sh_init && sh_hook_sym_name && sh_hook_sym_addr;
 }
+
+#elif defined(__x86_64__)
+static int (*db_hook)(void*, void*, void**) = nullptr;           // DobbyHook(addr, fake, &orig) -> 0=ok
+static void* (*db_resolve)(const char*, const char*) = nullptr;  // DobbySymbolResolver(lib, sym) -> addr|null
+
+static bool resolve_dobby(void* h) {
+    db_hook = (decltype(db_hook))dlsym(h, "DobbyHook");
+    db_resolve = (decltype(db_resolve))dlsym(h, "DobbySymbolResolver");
+    return db_hook && db_resolve;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // 配置结构
@@ -478,6 +501,7 @@ static void apply_offset_hook(int idx, uintptr_t base) {
     Target& t = g_slots[idx];
     if (t.applied) return;
     void* addr = (void*)(base + t.offset);
+#if defined(__aarch64__)
     t.stub = sh_hook_sym_addr(addr, g_proxy[idx], &t.orig);
     if (t.stub) {
         t.applied = true;
@@ -487,10 +511,22 @@ static void apply_offset_hook(int idx, uintptr_t base) {
         LOGE("offset hook fail %s+0x%llx: %s", t.lib.c_str(), (unsigned long long)t.offset,
              sh_to_errmsg ? sh_to_errmsg(e) : "?");
     }
+#elif defined(__x86_64__)
+    int rc = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
+    if (rc == 0) {
+        t.stub = addr;
+        t.applied = true;
+        LOGI("offset hook applied: %s+0x%llx @%p", t.lib.c_str(), (unsigned long long)t.offset, addr);
+    } else {
+        LOGE("offset hook fail %s+0x%llx: DobbyHook rc=%d", t.lib.c_str(), (unsigned long long)t.offset, rc);
+    }
+#endif
 }
 
 // dlopen 后回调：为尚未挂上的 offset hook 补挂
+#if defined(__aarch64__)
 static bool g_dl_cb_registered = false;
+#endif
 static void on_dl_post(struct dl_phdr_info* info, size_t, void*) {
     if (!info->dlpi_name) return;
     std::string bn = base_name(info->dlpi_name);
@@ -500,6 +536,67 @@ static void on_dl_post(struct dl_phdr_info* info, size_t, void*) {
             apply_offset_hook(i, (uintptr_t)info->dlpi_addr);
     }
 }
+
+#if defined(__x86_64__)
+// ---------------------------------------------------------------------------
+// Dobby 版 pending 补挂：symbol 型重试 DobbySymbolResolver，offset 型复用
+// on_dl_post（签名与 dl_iterate_phdr 回调一致，直接手动全量重扫触发）。
+// 每 150ms 一轮，30s 后放弃——目标 lib 多数在 App 启动早期就已加载，
+// 实测（arm64/shadowhook 路径）命中通常在第 1-2 轮内完成。
+// ---------------------------------------------------------------------------
+// dl_iterate_phdr 要求回调返回 int，on_dl_post 因 shadowhook_dl_info_t 签名要求是
+// void 返回值（arm64 分支用它注册回调），这里包一层薄 trampoline 适配。
+static int dl_iter_trampoline(struct dl_phdr_info* info, size_t size, void* data) {
+    on_dl_post(info, size, data);
+    return 0;
+}
+
+static void apply_symbol_hook(int idx) {
+    Target& t = g_slots[idx];
+    if (t.applied) return;
+    void* addr = db_resolve ? db_resolve(t.lib.c_str(), t.symbol.c_str()) : nullptr;
+    if (!addr) return;
+    int rc = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
+    if (rc == 0) {
+        t.stub = addr;
+        t.applied = true;
+        LOGI("sym hook %s!%s -> applied", t.lib.c_str(), t.symbol.c_str());
+    } else {
+        LOGE("sym hook %s!%s fail: DobbyHook rc=%d", t.lib.c_str(), t.symbol.c_str(), rc);
+    }
+}
+
+static std::vector<int> g_pending_sym_idx;
+static std::vector<int> g_pending_offset_idx;
+static std::mutex g_pending_mtx;
+static std::atomic<bool> g_poll_running{false};
+
+static void start_pending_poll() {
+    bool expected = false;
+    if (!g_poll_running.compare_exchange_strong(expected, true)) return;  // 只起一次
+    std::thread([]() {
+        for (int tick = 0; tick < 200; tick++) {
+            usleep(150 * 1000);
+            std::vector<int> sym_todo, off_todo;
+            {
+                std::lock_guard<std::mutex> lk(g_pending_mtx);
+                sym_todo = g_pending_sym_idx;
+                off_todo = g_pending_offset_idx;
+            }
+            if (sym_todo.empty() && off_todo.empty()) return;
+            for (int idx : sym_todo) apply_symbol_hook(idx);
+            if (!off_todo.empty()) dl_iterate_phdr(dl_iter_trampoline, nullptr);
+            std::lock_guard<std::mutex> lk(g_pending_mtx);
+            g_pending_sym_idx.erase(std::remove_if(g_pending_sym_idx.begin(), g_pending_sym_idx.end(),
+                                                    [](int i) { return g_slots[i].applied; }),
+                                     g_pending_sym_idx.end());
+            g_pending_offset_idx.erase(std::remove_if(g_pending_offset_idx.begin(), g_pending_offset_idx.end(),
+                                                       [](int i) { return g_slots[i].applied; }),
+                                        g_pending_offset_idx.end());
+        }
+    }).detach();
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // 解析配置并注入
@@ -584,6 +681,7 @@ static void apply_hooks(const std::string& cfg_text) {
         g_nslots++;  // 占用该 slot
 
         // 注入
+#if defined(__aarch64__)
         if (!t.symbol.empty()) {
             t.stub = sh_hook_sym_name(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig);
             int e = sh_get_errno ? sh_get_errno() : 0;
@@ -609,6 +707,28 @@ static void apply_hooks(const std::string& cfg_text) {
                      (unsigned long long)t.offset);
             }
         }
+#elif defined(__x86_64__)
+        if (!t.symbol.empty()) {
+            apply_symbol_hook(idx);
+            if (!t.applied) {
+                std::lock_guard<std::mutex> lk(g_pending_mtx);
+                g_pending_sym_idx.push_back(idx);
+                start_pending_poll();
+                LOGI("sym hook %s!%s -> pending(poll)", t.lib.c_str(), t.symbol.c_str());
+            }
+        } else if (t.has_offset) {
+            uintptr_t base = find_lib_base(t.lib);
+            if (base) {
+                apply_offset_hook(idx, base);
+            } else {
+                std::lock_guard<std::mutex> lk(g_pending_mtx);
+                g_pending_offset_idx.push_back(idx);
+                start_pending_poll();
+                LOGI("offset hook %s+0x%llx pending(poll)", t.lib.c_str(),
+                     (unsigned long long)t.offset);
+            }
+        }
+#endif
     }
 }
 
@@ -670,8 +790,10 @@ public:
             return;
         }
 
-        // 从 /system/lib64 按名加载 shadowhook（模块把它挂到系统库目录，处于默认命名空间，
-        // 其同级 libshadowhook_nothing.so 也在那里——shadowhook 的 linker init 才能 dlopen 到它）。
+        // 从 /system/lib64 按名加载 hook 引擎（模块把它挂到系统库目录，处于默认命名空间；
+        // arm64=shadowhook 需同级 libshadowhook_nothing.so 供其 linker init dlopen；
+        // x86_64=Dobby，无此要求，直接 dlopen 即可）。
+#if defined(__aarch64__)
         void* h = dlopen("libshadowhook.so", RTLD_NOW);
         if (!h || !resolve_shadowhook(h)) {
             LOGE("加载 shadowhook 失败: %s", dlerror());
@@ -684,6 +806,14 @@ public:
             close(fd);
             return;
         }
+#elif defined(__x86_64__)
+        void* h = dlopen("libdobby.so", RTLD_NOW);
+        if (!h || !resolve_dobby(h)) {
+            LOGE("加载 dobby 失败: %s", dlerror());
+            close(fd);
+            return;  // 已尝试连接，保持加载
+        }
+#endif
         g_evt_fd = fd;  // 保留用于回传事件
         LOGI("为 %s 注入 hook（配置 %u 字节）", g_package.c_str(), clen);
         apply_hooks(cfg);

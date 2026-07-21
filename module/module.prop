@@ -1,6 +1,6 @@
 id=reconbridge
-name=ReconBridge 逆向工作台 (M1+M3)
-version=M3.0
-versionCode=3
+name=ReconBridge 逆向工作台 
+version=M3.1
+versionCode=4
 author=limo
-description=通用逆向能力后端：静态接口(拉包/读文件/列so/procfs/shell) + 动态 Zygisk/ShadowHook hook 执行器(/hook /unhook /hooks + SSE/WS 事件)。端口默认关闭，token 鉴权，需 Zygisk(ZygiskNext)。
+description=通用逆向能力后端：静态接口(拉包/读文件/列so/procfs/shell) + 动态 Zygisk hook 执行器(/hook /unhook /hooks + SSE/WS 事件)。
