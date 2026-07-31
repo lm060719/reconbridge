@@ -1,5 +1,6 @@
 **中文** | [English](README_en.md)
-QQ交流群:1076516767
+
+>QQ交流群:1076516767
 
 # ReconBridge —— 通用逆向分析 KernelSU 模块
 
