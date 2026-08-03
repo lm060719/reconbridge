@@ -137,6 +137,25 @@
   </div>
 
   <div class="card">
+    <div class="row">
+      <div>
+        <div class="label">手机本地 MCP</div>
+        <div id="mcpStateText" class="mono" style="font-size:12px;color:var(--muted);margin-top:4px;">加载中…</div>
+      </div>
+      <label class="switch" id="mcpSwitchWrap">
+        <input type="checkbox" id="mcpEnableSwitch">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="row"><span class="label">Streamable HTTP URL</span><span id="mcpUrlVal" class="val mono url">—</span></div>
+    <div class="inp" style="margin-top:8px;">
+      <input id="mcpPortInput" type="number" inputmode="numeric" placeholder="8790" min="1" max="65535">
+      <button id="saveMcpPortBtn">保存端口</button>
+    </div>
+    <div class="hint">仅监听 <b>127.0.0.1</b>，供本机 AI 软件连接；请求头使用上方 token。此开关独立于 PC 端口，不会修改 PC 的监听地址、端口或开关。</div>
+  </div>
+
+  <div class="card">
     <div class="cardhead">
       <span class="label">活动 Hook</span>
       <div class="tools">
@@ -231,6 +250,7 @@ async function refresh() {
 
 function render(info) {
   const on = String(info.enabled) === "1";
+  const mcpOn = String(info.mcp_enabled) === "1";
   const running = String(info.running) === "1";
 
   // 开关
@@ -257,6 +277,11 @@ function render(info) {
   const tok = info.token && info.token !== "" ? info.token : "(守护进程尚未生成，请稍候)";
   $("tokenVal").textContent = tok;
   $("curlHint").textContent = `curl -H "X-Token: ${info.token || "<token>"}" ${base}/health`;
+
+  if (!busy) $("mcpEnableSwitch").checked = mcpOn;
+  $("mcpStateText").textContent = mcpOn ? "已开启（仅本机）" : "已关闭";
+  $("mcpUrlVal").textContent = mcpOn ? `http://127.0.0.1:${info.mcp_port}/mcp` : "(MCP 关闭)";
+  if (!$("mcpPortInput").value) $("mcpPortInput").placeholder = info.mcp_port;
 }
 
 // 开关切换
@@ -278,6 +303,23 @@ $("enableSwitch").addEventListener("change", async (e) => {
   }
 });
 
+$("mcpEnableSwitch").addEventListener("change", async (e) => {
+  const want = e.target.checked;
+  busy = true;
+  $("mcpSwitchWrap").classList.add("busy");
+  try {
+    await ksuExec(`sh ${RBCTL} ${want ? "mcp-enable" : "mcp-disable"}`);
+    await new Promise((r) => setTimeout(r, 400));
+  } catch (err) {
+    showErr("手机 MCP 切换失败：" + err.message);
+    e.target.checked = !want;
+  } finally {
+    busy = false;
+    $("mcpSwitchWrap").classList.remove("busy");
+    refresh();
+  }
+});
+
 // 保存端口
 $("savePortBtn").addEventListener("click", async () => {
   const v = parseInt($("portInput").value, 10);
@@ -287,6 +329,17 @@ $("savePortBtn").addEventListener("click", async () => {
     $("portInput").value = "";
     refresh();
   } catch (e) { showErr("保存端口失败：" + e.message); }
+});
+
+$("saveMcpPortBtn").addEventListener("click", async () => {
+  const v = parseInt($("mcpPortInput").value, 10);
+  if (!v || v < 1 || v > 65535) { showErr("MCP 端口范围 1–65535"); return; }
+  if (String(v) === String($("portVal").textContent)) { showErr("MCP 端口不能与 PC 端口相同"); return; }
+  try {
+    await ksuExec(`sh ${RBCTL} setmcpport ${v}`);
+    $("mcpPortInput").value = "";
+    refresh();
+  } catch (e) { showErr("保存 MCP 端口失败：" + e.message); }
 });
 
 // 保存监听地址

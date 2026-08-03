@@ -98,6 +98,45 @@ In KernelSU Manager → Modules → Install from local `dist/ReconBridge-M1.zip`
 
 Once installed, just tell Claude Code "connect to my phone and check status" to begin. See the milestone docs below for details.
 
+### Direct connection from a phone AI client (Streamable HTTP)
+
+The phone-local MCP listener is independent from the PC listener and binds only to device loopback. Enable it in the KernelSU WebUI under "Phone-local MCP", or run:
+
+```sh
+sh /data/adb/modules/reconbridge/rbctl mcp-enable
+# Optional: change the port; it must differ from the PC port
+sh /data/adb/modules/reconbridge/rbctl setmcpport 8790
+```
+
+When adding an MCP configuration to a phone AI client that supports Streamable HTTP, custom headers, and cleartext localhost HTTP, you must add this entry under **Custom Headers**:
+
+- Header name: `X-Token`
+- Header value: the complete token shown in the KernelSU WebUI
+
+Do not put the token in the URL, MCP name, or request body. The final configuration should be:
+
+```text
+Transport: Streamable HTTP
+URL: http://127.0.0.1:8790/mcp
+Custom Headers:
+  X-Token: <complete token shown in the WebUI>
+```
+
+`Authorization: Bearer <token>` is also accepted. The phone MCP can run while the PC listener is disabled and exposes the same 25 tool names and input contracts as the PC MCP. Device, file, process, shell, hook, event, scenario, Java trace/patch, dump, and artifact tools execute directly on the phone.
+
+`decompile_apk`, `dexkit_search`, `ghidra_analyze`, and `hermes_decompile` require the optional ReconBridge Mobile Toolpack; the standard module does not currently bundle these large static-analysis backends. Without it, each tool returns an explicit `ok: false` result and its expected executable path. Check `toolchain_status` for availability. The PC MCP's local jadx/androguard/Ghidra/Hermes setup is unaffected.
+
+Files returned by `pull_apk`, `pull_libs`, `read_remote_file`, `list_dumps`, and `list_artifacts` now include an `artifact` object with a 30-minute `download_url` and file-scoped `download_headers`. A phone AI client's rootfs can stream the file without putting binary data in MCP JSON:
+
+```sh
+curl -L -C - \
+  -H 'Authorization: Bearer <short-lived token from artifact.download_headers>' \
+  '<artifact.download_url>' \
+  -o base.apk
+```
+
+Downloads support HEAD, byte ranges, and ETag. The global MCP `X-Token` also works. Artifact IDs map only to regular files in the module work and dump directories; expired, replaced, or metadata-changed files are no longer downloadable.
+
 ## Milestone Overview
 
 | Milestone | Content | Docs |

@@ -34,6 +34,8 @@
 **连接**：默认走 **adb**（`RECONBRIDGE_TRANSPORT=adb`），MCP 自动 `adb forward` 到本地端口并自动从设备读 token（真实 base_url 见 `device_status`）。守护进程设备端口默认 **8787** 且**默认关闭**，需在 KernelSU WebUI 开关或 `rbctl enable` 打开。也支持 `wifi` 模式（局域网直连，需 `RECONBRIDGE_URL` + `RECONBRIDGE_TOKEN`）。
 **多设备**：MCP 会**自动挑唯一在线设备**并忽略 `offline`/`unauthorized` 残留链路（如残留的 tls-connect 链路），无需手动 `adb disconnect`。仅当**多台都在线**时才会报清单让你设 `RECONBRIDGE_SERIAL=<序列号>` 指定其一。
 
+**手机 AI 本地直连**：在 AI 软件中添加 MCP 配置时选择 `Streamable HTTP`，URL 填 `http://127.0.0.1:8790/mcp`。必须在「自定义请求头 / Custom Headers」中新增请求头：名称填 `X-Token`，值填 KernelSU WebUI 中显示的完整 token；不要把 token 填进 URL、MCP 名称或请求体。手机本地 MCP 需先在 WebUI 开启，且客户端须允许明文 localhost HTTP 和访问 `127.0.0.1`。
+
 ---
 
 ## 2. 新会话怎么让工具可用

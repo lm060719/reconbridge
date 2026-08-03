@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # ReconBridge 控制脚本：供 WebUI 与命令行使用。
-# 用法：rbctl enable|disable|setport N|setbind IP|start|stop|info
+# 用法：rbctl enable|disable|setport N|setbind IP|mcp-enable|mcp-disable|setmcpport N|start|stop|info
 #       rbctl log [N]|events [N]|hooks|dumps|unhook PKG   （只读/维护辅助）
 # 仅修改 config.conf；守护进程通过 inotify 感知变更即时生效（start 例外，用于手动拉起进程）。
 
@@ -26,7 +26,15 @@ setk() {
   fi
 }
 
-running() { pgrep -f "$DAEMON_NAME" >/dev/null 2>&1 && echo 1 || echo 0; }
+valid_port() {
+  case "$1" in
+    ""|*[!0-9]*) return 1 ;;
+    *) [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null ;;
+  esac
+}
+
+daemon_pids() { pgrep -f "$DAEMON_BIN.*$CONF" 2>/dev/null; }
+running() { daemon_pids | grep -q . && echo 1 || echo 0; }
 
 wlanip() {
   ip=$(ip -4 addr show wlan0 2>/dev/null | grep -oE 'inet [0-9.]+' | head -1 | awk '{print $2}')
@@ -48,10 +56,22 @@ start_daemon() {
 case "$1" in
   enable)  setk enabled 1 ; start_daemon ;;
   disable) setk enabled 0 ;;
-  setport) [ -n "$2" ] && setk port "$2" ;;
+  setport)
+    valid_port "$2" && [ "$2" != "$(getd mcp_port 8790)" ] || { echo "invalid or conflicting port"; exit 2; }
+    setk port "$2"
+    ;;
   setbind) [ -n "$2" ] && setk bind "$2" ;;
+  mcp-enable)  setk mcp_enabled 1 ; start_daemon ;;
+  mcp-disable) setk mcp_enabled 0 ;;
+  setmcpport)
+    valid_port "$2" && [ "$2" != "$(getd port 8787)" ] || { echo "invalid or conflicting MCP port"; exit 2; }
+    setk mcp_port "$2"
+    ;;
   start)   start_daemon ;;
-  stop)    pkill -f "$DAEMON_NAME" ;;
+  stop)
+    pids=$(daemon_pids)
+    [ -n "$pids" ] && kill $pids
+    ;;
   log)     tail -n "${2:-40}" "$BASE/daemon.log" 2>/dev/null ;;
   events)  tail -n "${2:-60}" "$BASE/events.log" 2>/dev/null ;;
   hooks)
@@ -85,11 +105,12 @@ case "$1" in
     esac
     ;;
   info)
-    printf '{"enabled":%s,"port":%s,"bind":"%s","token":"%s","running":%s,"ip":"%s"}\n' \
-      "$(getd enabled 0)" "$(getd port 8787)" "$(getd bind auto)" "$(get token)" "$(running)" "$(wlanip)"
+    printf '{"enabled":%s,"port":%s,"bind":"%s","token":"%s","mcp_enabled":%s,"mcp_port":%s,"running":%s,"ip":"%s"}\n' \
+      "$(getd enabled 0)" "$(getd port 8787)" "$(getd bind auto)" "$(get token)" \
+      "$(getd mcp_enabled 0)" "$(getd mcp_port 8790)" "$(running)" "$(wlanip)"
     ;;
   *)
-    echo "usage: rbctl enable|disable|setport N|setbind IP|start|stop|info"
+    echo "usage: rbctl enable|disable|setport N|setbind IP|mcp-enable|mcp-disable|setmcpport N|start|stop|info"
     echo "       rbctl log [N]|events [N]|hooks|dumps|unhook PKG"
     ;;
 esac

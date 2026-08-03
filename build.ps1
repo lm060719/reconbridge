@@ -23,7 +23,8 @@ $strip = Join-Path $llvmBin "llvm-strip.exe"
 $outDir = Join-Path $root "module\bin"
 $zygOutDir = Join-Path $root "module\zygisk"
 $zygSrc = Join-Path $root "m3\zygisk\module.cpp"
-$src = @((Join-Path $root "src\daemon.cpp"), (Join-Path $root "src\dynamic.cpp"))
+$src = @((Join-Path $root "src\daemon.cpp"), (Join-Path $root "src\dynamic.cpp"),
+         (Join-Path $root "src\mobile_mcp.cpp"))
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 New-Item -ItemType Directory -Force -Path $zygOutDir | Out-Null
 

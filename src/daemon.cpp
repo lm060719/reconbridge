@@ -36,6 +36,7 @@
 #include "third_party/httplib.h"
 #include "third_party/json.hpp"
 #include "dynamic.h"
+#include "mobile_mcp.h"
 
 using json = nlohmann::json;
 using namespace httplib;
@@ -55,6 +56,8 @@ struct Config {
     int port = 8787;
     std::string bind = "auto";  // auto = 自动探测 wlan0 IP，否则用具体 IP
     std::string token;
+    bool mcp_enabled = false;
+    int mcp_port = 8790;
 };
 
 static std::mutex g_mtx;                     // 保护服务器生命周期
@@ -62,6 +65,11 @@ static Config g_config;                       // 当前配置
 static std::unique_ptr<httplib::Server> g_svr;
 static std::thread g_svr_thread;
 static bool g_running = false;                // 当前是否在监听
+static std::unique_ptr<httplib::Server> g_mcp_svr;
+static std::thread g_mcp_svr_thread;
+static std::unique_ptr<httplib::Server> g_mcp_internal_svr;
+static std::thread g_mcp_internal_svr_thread;
+static bool g_mcp_running = false;
 
 // ---------------------------------------------------------------------------
 // 日志
@@ -249,6 +257,8 @@ static Config load_config(const std::string& path) {
         else if (k == "port") c.port = atoi(v.c_str());
         else if (k == "bind") c.bind = v;
         else if (k == "token") c.token = v;
+        else if (k == "mcp_enabled") c.mcp_enabled = (v == "1" || v == "true");
+        else if (k == "mcp_port") c.mcp_port = atoi(v.c_str());
     }
     return c;
 }
@@ -260,6 +270,8 @@ static void save_config(const std::string& path, const Config& c) {
     f << "port=" << c.port << "\n";
     f << "bind=" << c.bind << "\n";
     f << "token=" << c.token << "\n";
+    f << "mcp_enabled=" << (c.mcp_enabled ? 1 : 0) << "\n";
+    f << "mcp_port=" << c.mcp_port << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -544,15 +556,21 @@ static void handle_shell(const Request& req, Response& res) {
 // ---------------------------------------------------------------------------
 // 服务器生命周期
 // ---------------------------------------------------------------------------
-static void register_routes(httplib::Server& svr) {
-    // 全局鉴权
-    svr.set_pre_routing_handler([](const Request& req, Response& res) {
-        if (!authed(req)) {
+static void register_auth(httplib::Server& svr, bool allow_artifact_tokens = false) {
+    svr.set_pre_routing_handler([allow_artifact_tokens](const Request& req, Response& res) {
+        bool artifact_authed = allow_artifact_tokens &&
+                               req.path.rfind("/artifacts/", 0) == 0 &&
+                               mobile_mcp::authorize_artifact_request(req);
+        if (!authed(req) && !artifact_authed) {
             json_reply(res, 401, {{"error", "unauthorized"}, {"hint", "need X-Token / Authorization: Bearer / ?token="}});
             return Server::HandlerResponse::Handled;
         }
         return Server::HandlerResponse::Unhandled;
     });
+}
+
+static void register_routes(httplib::Server& svr) {
+    register_auth(svr);
 
     svr.Get("/health", [](const Request&, Response& res) {
         json_reply(res, 200, {{"status", "ok"}, {"name", kName}, {"version", kVersion},
@@ -605,11 +623,59 @@ static void stop_server_locked() {
     g_running = false;
 }
 
+static void start_mcp_server_locked(const std::string& base_dir) {
+    if (g_mcp_running) return;
+    int port = g_config.mcp_port;
+    g_mcp_internal_svr = std::make_unique<httplib::Server>();
+    register_routes(*g_mcp_internal_svr);
+    int internal_port = g_mcp_internal_svr->bind_to_any_port("127.0.0.1");
+    if (internal_port <= 0) {
+        log_line("错误：手机 MCP 内部 REST 监听器绑定失败");
+        g_mcp_internal_svr.reset();
+        return;
+    }
+    g_mcp_internal_svr_thread = std::thread([]() {
+        if (!g_mcp_internal_svr->listen_after_bind())
+            log_line("错误：手机 MCP 内部 REST 监听器异常退出");
+    });
+    g_mcp_svr = std::make_unique<httplib::Server>();
+    register_auth(*g_mcp_svr, true);
+    g_mcp_svr->set_payload_max_length(4 * 1024 * 1024);
+    mobile_mcp::register_routes(*g_mcp_svr, base_dir, port, internal_port, g_config.token);
+    g_mcp_running = true;
+    g_mcp_svr_thread = std::thread([port]() {
+        log_line("手机 MCP 服务启动，监听 127.0.0.1:" + std::to_string(port) + "/mcp");
+        if (!g_mcp_svr->listen("127.0.0.1", port))
+            log_line("错误：手机 MCP listen 失败 127.0.0.1:" + std::to_string(port));
+        log_line("手机 MCP 服务已停止");
+    });
+}
+
+static void stop_mcp_server_locked() {
+    if (!g_mcp_running) return;
+    if (g_mcp_svr) g_mcp_svr->stop();
+    if (g_mcp_svr_thread.joinable()) g_mcp_svr_thread.join();
+    g_mcp_svr.reset();
+    if (g_mcp_internal_svr) g_mcp_internal_svr->stop();
+    if (g_mcp_internal_svr_thread.joinable()) g_mcp_internal_svr_thread.join();
+    g_mcp_internal_svr.reset();
+    g_mcp_running = false;
+}
+
 static void apply_config(const Config& nc) {
     std::lock_guard<std::mutex> lk(g_mtx);
     bool need_restart = g_running &&
                         (nc.port != g_config.port || nc.bind != g_config.bind);
+    bool mcp_need_restart = g_mcp_running &&
+                            (nc.mcp_port != g_config.mcp_port || nc.token != g_config.token);
     g_config = nc;
+    std::string base_dir = dirname_of(g_config_path);
+    if (!nc.mcp_enabled) {
+        stop_mcp_server_locked();
+    } else {
+        if (mcp_need_restart) stop_mcp_server_locked();
+        if (!g_mcp_running) start_mcp_server_locked(base_dir);
+    }
     if (!nc.enabled) {
         if (g_running) {
             log_line("配置 enabled=0，关闭端口");
@@ -650,11 +716,17 @@ int main(int argc, char** argv) {
         log_line("首次启动，生成随机 token");
     }
     if (cfg.port <= 0 || cfg.port > 65535) { cfg.port = 8787; changed = true; }
+    if (cfg.mcp_port <= 0 || cfg.mcp_port > 65535 || cfg.mcp_port == cfg.port) {
+        cfg.mcp_port = 8790;
+        changed = true;
+    }
     if (cfg.bind.empty()) { cfg.bind = "auto"; changed = true; }
     if (changed) save_config(g_config_path, cfg);
 
     log_line(std::string(kName) + " " + kVersion + " 启动，配置=" + g_config_path +
-             " enabled=" + (cfg.enabled ? "1" : "0") + " port=" + std::to_string(cfg.port));
+             " enabled=" + (cfg.enabled ? "1" : "0") + " port=" + std::to_string(cfg.port) +
+             " mcp_enabled=" + (cfg.mcp_enabled ? "1" : "0") +
+             " mcp_port=" + std::to_string(cfg.mcp_port));
 
     // M3 动态子系统初始化（hooks 目录 + events.log 监听）
     dynamic::init(dir);

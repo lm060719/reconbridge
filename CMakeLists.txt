@@ -13,7 +13,10 @@ project(reconbridge CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_executable(reconbridge_daemon src/daemon.cpp)
+add_executable(reconbridge_daemon
+  src/daemon.cpp
+  src/dynamic.cpp
+  src/mobile_mcp.cpp)
 
 # 体积优化 + 静态链接 libc++（bionic libc 设备自带，保持动态）
 target_compile_options(reconbridge_daemon PRIVATE

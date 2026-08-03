@@ -102,6 +102,45 @@ cd reconbridge
 
 装好后对 Claude Code 说一句「连一下手机看状态」即可开始。详见下方各里程碑文档。
 
+### 手机 AI 直连（Streamable HTTP）
+
+手机端 MCP 与 PC 端口完全独立，固定只监听设备回环地址。可在 KernelSU WebUI 的「手机本地 MCP」卡片开启，或执行：
+
+```sh
+sh /data/adb/modules/reconbridge/rbctl mcp-enable
+# 可选：修改端口，不能与 PC 端口相同
+sh /data/adb/modules/reconbridge/rbctl setmcpport 8790
+```
+
+在支持 Streamable HTTP、自定义请求头和明文 localhost HTTP 的手机 AI 客户端中添加 MCP 配置时，必须在 AI 软件的「自定义请求头 / Custom Headers」中新增：
+
+- 请求头名称：`X-Token`
+- 请求头值：KernelSU WebUI 中显示的完整 token
+
+不要把 token 填进 URL、MCP 名称或请求体。最终配置应为：
+
+```text
+传输类型：Streamable HTTP
+URL：http://127.0.0.1:8790/mcp
+自定义请求头：
+  X-Token: <WebUI 中显示的完整 token>
+```
+
+也支持 `Authorization: Bearer <token>`。手机 MCP 可在 PC 端口关闭时单独运行，提供与 PC MCP 相同的 25 个工具名称和输入契约；设备、文件、进程、shell、hook、事件、场景、Java trace/patch、dump 与产物工具均直接在手机执行。
+
+`decompile_apk`、`dexkit_search`、`ghidra_analyze`、`hermes_decompile` 需要额外的 ReconBridge Mobile Toolpack，标准模块包目前不内置这些大型静态分析后端。未安装时工具会返回明确的 `ok: false` 和预期执行器路径，可用 `toolchain_status` 检查；PC MCP 的本地 jadx/androguard/Ghidra/Hermes 不受影响。
+
+`pull_apk`、`pull_libs`、`read_remote_file`、`list_dumps` 和 `list_artifacts` 返回的文件会附带 `artifact`：其中包含 30 分钟有效的 `download_url` 和单文件 `download_headers`。AI 软件的 rootfs 可直接流式下载，不需要把二进制放进 MCP JSON：
+
+```sh
+curl -L -C - \
+  -H 'Authorization: Bearer <artifact.download_headers 中的短期 token>' \
+  '<artifact.download_url>' \
+  -o base.apk
+```
+
+下载支持 HEAD、Range 续传和 ETag；也可改用 MCP 配置中的全局 `X-Token`。artifact ID 只映射模块工作目录和 dumps 目录中的普通文件，过期、被替换或内容元数据发生变化后不再提供下载。
+
 ## 里程碑总览
 
 | 里程碑 | 内容 | 文档 |
