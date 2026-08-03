@@ -34,4 +34,5 @@ android {
 dependencies {
     // Xposed API：仅编译期依赖，运行时由 LSPosed 提供
     compileOnly("de.robv.android.xposed:api:82")
+    implementation("org.mozilla:rhino:1.7.15")
 }

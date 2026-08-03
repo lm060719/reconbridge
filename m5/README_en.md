@@ -9,15 +9,17 @@ The target users are already in LSPosed; LSPosed internally is a mature ART hook
 
 ## Components
 - `tracer/` — the generic LSPosed module (Kotlin/Gradle), with no app-specific logic of its own.
-  - `HookEntry.kt` — reads config, installs XposedBridge trace callbacks for `kind:java` targets, serializes hits.
+  - `HookEntry.kt` — reads config, installs XposedBridge trace/action callbacks for `kind:java` targets.
+  - `ActionExecutor.kt` — Action Pipeline executor (supports method invocation, field modifications, constructor calls, Rhino JS / DEX execution, shell commands, before/after callbacks).
   - `InjectSocket.kt` — reproduces M3's `@reconbridge_inject` abstract socket framing protocol.
 - `ReconBridge-Tracer.apk` — prebuilt artifact (debug self-signed, installable directly).
-- `JAVA_HOOK_PROTOCOL.md` — push config / event format / semantics and limitations.
+- `JAVA_HOOK_PROTOCOL.md` — push config / event format / Action Pipeline protocol / semantics and limitations.
 
 ## Usage
 1. `adb install -r m5/ReconBridge-Tracer.apk`
 2. LSPosed Manager: enable "ReconBridge Tracer" and add the target App to its scope.
 3. PC (MCP): `trace_java(package="com.miui.voiceassist", class_name="r70.a", method="sendStreamData", args_render="json", restart=True, seconds=20)`, then trigger the target behavior.
+   - Patching & callbacks: `patch_java(...)` or configure custom `action` pipelines.
    - Or manually: `post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`.
 
 ## Build
@@ -25,7 +27,7 @@ The target users are already in LSPosed; LSPosed internally is a mature ART hook
 cd m5/tracer && ./gradlew.bat :app:assembleDebug
 # artifact: app/build/outputs/apk/debug/app-debug.apk
 ```
-(The repo is under a non-ASCII path; `gradle.properties` already sets `android.overridePathCheck=true`; it's pure Kotlin with no NDK, so it's unaffected.)
+(The repo is under a non-ASCII path; `gradle.properties` already sets `android.overridePathCheck=true`; bundles embedded Rhino JS engine for dynamic script evaluations.)
 
-## Boundaries
-v1 only does trace (observation), does not modify args/return values; requires LSPosed; class resolution goes through the main classloader. See `JAVA_HOOK_PROTOCOL.md` for details.
+## Capabilities & Boundaries
+Supports Trace (observation), real-time tampering (arg/return replacement, skip original), and **Action Pipeline** (invoke Java methods, read/write private fields, instantiate complex objects, evaluate Rhino JS / DEX snippets, execute shell commands); requires LSPosed with scope enabled; class resolution goes through the main classloader. See `JAVA_HOOK_PROTOCOL.md` for details.

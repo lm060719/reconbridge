@@ -115,7 +115,7 @@
 - `capture`：`this`(class/tostring/none)、`when`(before/after/both/**none**=只篡改不出事件)、`args`/`all_args`、`ret`、`fields`(反射读私有字段)、`stack`。
 - `render`：`tostring`(数值/布尔原样，其余 toString 截断) / `class`(类名) / `json`(原样字符串交 PC 解析，适合参数本身是 JSON) / `deep`(反射深度序列化对象图，带深度/环/节点预算防爆)。
 - `paths`(嵌套字段路径捕获)：`[{"path":"args[1].payload.load_url","render":"tostring"}]`——直接拿深埋在 payload 对象里的值，不靠整对象 toString 撞运气。路径 `args[N]`/`this`/`ret` 起头，`.name` 逐层(反射字段→getter→Map key)，`[n]` 索引数组/List；裸字段名=`this.<name>`；解析不到标 `unresolved:true`。
-- `action`(v2 篡改)：`replace_args:[{index,value,type}]`、`replace_return:{value,type}`、`skip_original`。`type ∈ string|int|long|boolean|double|float|short|byte|char`，**类型要与 Java 签名匹配**。命中事件带 `tampered:true`。
+- `action`(篡改与 Action 流水线)：支持快捷覆盖入参 `replace_args:[{index,value,type}]`、覆盖返回值 `replace_return:{value,type}`、`skip_original`；同时支持高级动作链 `before_actions` / `after_actions`，包含 `call_method`(调用Java方法)、`set_field`(读写字段)、`construct`(构造对象)、`eval_js`(Rhino JS片段执行)、`eval_dex`(DEX动态执行)、`exec_shell`(执行Shell命令)。命中事件带 `tampered:true`。
 - `debug:true` 才逐命中打 logcat（默认安静）。
 
 ---

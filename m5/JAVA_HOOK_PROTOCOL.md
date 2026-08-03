@@ -43,21 +43,39 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
         ],
         "stack": false                // 抓 Java 调用栈（前 24 帧）
       },
-      "action": {                     // 可选（M5 v2）：实时篡改。不给=纯观测
-        "replace_args": [             // 进入原方法前覆盖参数
+      "action": {                     // 可选：实时篡改与动作流水线（Action Pipeline）
+        "replace_args": [             // 进入原方法前覆盖参数（标量快捷语法）
           {"index": 1, "value": "被换掉的内容", "type": "string"}
         ],
         "replace_return": {"value": 0, "type": "int"},  // 覆盖返回值
-        "skip_original": false        // true=不执行原方法，直接返回 replace_return（没给则 null）
+        "skip_original": false,       // true=不执行原方法，直接返回 replace_return（没给则 null）
+        
+        // --- 扩展：自定义 Callback 流水线与复杂执行 ---
+        "before_actions": [           // 进入原方法前按顺序执行动作列表
+          { "action": "set_field", "target": "this", "field": "debugMode", "value": true },
+          { "action": "call_method", "target": "this", "method": "setToken", "args": [{"value": "new_tok"}] },
+          { "action": "construct", "class": "com.foo.UserConfig", "args": [{"value": "admin"}], "save_to": "$v1" },
+          { "action": "eval_js", "script": "var t = $args[0]; $thisObject.update(t); t + '_js';", "save_to": "$v2" },
+          { "action": "exec_shell", "cmd": "id", "as_root": false, "save_to": "$sh" },
+          { "action": "eval_dex", "dex_b64": "<base64_dex>", "class": "com.foo.Plugin", "method": "run", "save_to": "$res" }
+        ],
+        "after_actions": [            // 原方法完成后执行动作列表
+          { "action": "call_method", "target": "class:com.foo.Logger", "method": "log", "args": [{"var": "$v2"}] }
+        ]
       }
     }
   ]
 }
 ```
 
-**篡改（action）取值**：`replace_args`/`replace_return` 的 `type` ∈ `string|int|long|boolean|double|float|short|byte|char`；
-省略 `type` 则按 JSON 原生类型（务必与目标参数/返回的 Java 类型匹配，如 `long` 参数别只传 JSON 整数，要显式 `type:"long"`）。
-命中事件里会多一个 `"tampered": true` 标记。想**静默篡改**（不产生事件）设 `capture.when = "none"`。
+**篡改与 Action 流水线扩展（Action Pipeline）**：
+- **`call_method` / `invoke`**：调用任意 Java 静态方法或实例方法。`target` 可为 `"this"`、`"args[N]"`、`"ret"`、`"class:包名.类名"` 或寄存器 `"$v1"`。`save_to` 可将返回值保存到寄存器。
+- **`set_field`**：修改 `this`、参数对象或静态类的私有/公有字段。
+- **`construct` / `new_instance`**：通过反射构造函数实例化任意 Java 复杂对象，并保存至寄存器。
+- **`exec_shell`**：在目标 App 进程空间内执行 Shell 命令（支持 `as_root: true` 以 su 执行），结果保存至寄存器。
+- **`eval_js`**：嵌入 Rhino JS 引擎，执行 JavaScript 代码片段。自动注入环境变量 `$this` / `$thisObject`、`$args`、`$ret`、`$regs`，支持在 JS 中直接调用 Java 方法。
+- **`eval_dex`**：通过 `InMemoryDexClassLoader` (Android 8.0+) 动态加载 Base64 的 DEX 字节流或本地 DEX 文件，并执行指定类的方法。
+- **`before_actions` / `after_actions`**：灵活注入自定义 before/after callback 链。
 
 **render 取值**：`tostring`（数值/布尔原样，其余 `String.valueOf` 截断到 `max`）、`class`（对象类名）、
 `json`（原样字符串，交 PC 侧解析——适合参数本身就是 JSON 文本的场景，如 `sendStreamData` 的 content）、

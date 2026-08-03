@@ -9,7 +9,7 @@
 > 📌 **给 AI agent / 新会话的一页纸速查：[`AGENTS_QUICKSTART.md`](AGENTS_QUICKSTART.md)** —— 全部 MCP 工具签名、M5 用法、典型工作流、高频坑，读一篇即可上手。
 
 > 进度：**M1 / M2 / M3 / M4 / M5 均已完成并真机验证**（Xiaomi SM8750 / Android 16 / KernelSU + ZygiskNext + LSPosed）。
-> - **M5**：通用 Java trace + 实时篡改（LSPosed 模块，`trace_java` / `patch_java`）—— 见 [`m5/README.md`](m5/README.md)、[`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md)。
+> - **M5**：通用 Java trace + 实时篡改与 Action Pipeline（LSPosed 模块，`trace_java` / `patch_java`）—— 见 [`m5/README.md`](m5/README.md)、[`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md)。
 
 ---
 

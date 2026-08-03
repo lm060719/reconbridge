@@ -7,7 +7,7 @@ A **general-purpose reverse-engineering backend** that runs on Android (KernelSU
 > 📌 **One-page cheat sheet for AI agents / new sessions: [`AGENTS_QUICKSTART.md`](AGENTS_QUICKSTART.md)** — all MCP tool signatures, M5 usage, typical workflows, and common pitfalls. Read this single file to get started.
 
 > Progress: **M1 / M2 / M3 / M4 / M5 are all complete and verified on a real device** (Xiaomi SM8750 / Android 16 / KernelSU + ZygiskNext + LSPosed).
-> - **M5**: general Java trace + live tampering (LSPosed module, `trace_java` / `patch_java`) — see [`m5/README.md`](m5/README.md), [`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md).
+> - **M5**: general Java trace + live tampering & Action Pipeline (LSPosed module, `trace_java` / `patch_java`) — see [`m5/README.md`](m5/README.md), [`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md).
 
 ---
 

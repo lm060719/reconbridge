@@ -121,7 +121,7 @@ class HookEntry : IXposedHookLoadPackage {
         if (className.isEmpty()) return 0
         val methodName = t.optString("method")
         val clazz = cl.loadClass(className)
-        val callback = TraceCallback(io, lpparam.packageName, t)
+        val callback = TraceCallback(io, lpparam.packageName, cl, t)
 
         val paramsSpec = t.optJSONArray("params")
 
@@ -184,6 +184,7 @@ class HookEntry : IXposedHookLoadPackage {
 private class TraceCallback(
     private val io: InjectSocket,
     private val pkg: String,
+    private val classLoader: ClassLoader,
     spec: JSONObject,
 ) : XC_MethodHook() {
 
@@ -192,70 +193,31 @@ private class TraceCallback(
     private val capture = spec.optJSONObject("capture") ?: JSONObject()
     private val whenPhase = capture.optString("when", "after")   // before | after | both | none
 
-    // v2 实时篡改（可选）：action = { replace_args:[{index,value,type}], replace_return:{value,type}, skip_original }
     private val action = spec.optJSONObject("action")
-    private val replaceArgs = action?.optJSONArray("replace_args")
-    private val hasReplaceReturn = action?.has("replace_return") == true
-    private val replaceReturn = action?.optJSONObject("replace_return")
-    private val skipOriginal = action?.optBoolean("skip_original", false) ?: false
-    private val tamper = replaceArgs != null || hasReplaceReturn || skipOriginal
+    private val tamper = action != null
 
     override fun beforeHookedMethod(param: MethodHookParam) {
-        // 先按原始输入出事件，再改参数（这样事件里看到的是真实入参）
+        val ctx = ActionContext(param, classLoader, pkg)
+        // 先按原始输入出事件，再改参数/执行 before pipeline
         if (whenPhase == "before" || whenPhase == "both") emit(param, "before", withRet = false)
         try {
-            if (replaceArgs != null) applyReplaceArgs(param)
-            if (skipOriginal) {
-                // 在 before 里设 result 即可跳过原方法执行（Xposed 语义）
-                param.result = if (hasReplaceReturn) coerce(replaceReturn!!) else null
-                vlog("[$pkg] $id skip_original，返回被接管")
-            }
+            ActionExecutor.executeActions(ctx, action, "before")
         } catch (t: Throwable) {
-            log("[$pkg] $id 篡改(before)失败: $t")
+            log("[$pkg] $id action(before) 失败: $t")
         }
     }
 
     override fun afterHookedMethod(param: MethodHookParam) {
+        val ctx = ActionContext(param, classLoader, pkg)
         try {
-            if (!skipOriginal && hasReplaceReturn) {
-                param.result = coerce(replaceReturn!!)
-                vlog("[$pkg] $id 返回值已替换")
-            }
+            ActionExecutor.executeActions(ctx, action, "after")
         } catch (t: Throwable) {
-            log("[$pkg] $id 篡改(after)失败: $t")
+            log("[$pkg] $id action(after) 失败: $t")
         }
-        // 事件里的 ret 反映最终（可能已被替换的）返回值
+        // 事件里的 ret 反映最终（可能已被替换/生成的）返回值
         if (whenPhase == "after" || whenPhase == "both") emit(param, "after", withRet = true)
     }
 
-    /** 按声明类型把 JSON 值转成目标 Java 对象（用于替换参数/返回值）。 */
-    private fun coerce(r: JSONObject): Any? {
-        if (r.isNull("value")) return null
-        val v = r.opt("value")
-        return when (r.optString("type", "")) {
-            "string" -> v?.toString()
-            "int" -> (v as? Number)?.toInt() ?: v.toString().toIntOrNull()
-            "long" -> (v as? Number)?.toLong() ?: v.toString().toLongOrNull()
-            "boolean" -> (v as? Boolean) ?: v.toString().toBoolean()
-            "double" -> (v as? Number)?.toDouble() ?: v.toString().toDoubleOrNull()
-            "float" -> (v as? Number)?.toFloat() ?: v.toString().toFloatOrNull()
-            "short" -> (v as? Number)?.toInt()?.toShort()
-            "byte" -> (v as? Number)?.toInt()?.toByte()
-            "char" -> v.toString().firstOrNull()
-            else -> v   // 未指定 type：按 JSON 原生类型（String/Boolean/Integer/Double…）
-        }
-    }
-
-    private fun applyReplaceArgs(param: MethodHookParam) {
-        val args = param.args ?: return
-        for (i in 0 until replaceArgs!!.length()) {
-            val r = replaceArgs.getJSONObject(i)
-            val idx = r.optInt("index", -1)
-            if (idx < 0 || idx >= args.size) continue
-            args[idx] = coerce(r)
-            vlog("[$pkg] $id 替换 arg[$idx]")
-        }
-    }
 
     private fun emit(param: MethodHookParam, phase: String, withRet: Boolean) {
         try {
