@@ -398,6 +398,10 @@ static void handle_hook(const Request& req, Response& res) {
         reply(res, 400, {{"error", "body 非合法 JSON"}});
         return;
     }
+    if (!body.is_object()) {
+        reply(res, 400, {{"error", "config/body 必须是 JSON 对象 (dict)，不能传字符串或标量"}});
+        return;
+    }
     std::string pkg = body.value("package", "");
     if (!valid_pkg(pkg)) {
         reply(res, 400, {{"error", "invalid or missing package"}});

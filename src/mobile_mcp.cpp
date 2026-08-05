@@ -701,7 +701,12 @@ static json invoke_tool(const std::string& name, const json& a) {
     if (name == "dexkit_search") return run_toolpack("dexkit-search", a);
     if (name == "ghidra_analyze") return run_toolpack("native-analyze", a);
     if (name == "hermes_decompile") return run_toolpack("hermes-decompile", a);
-    if (name == "post_hook") return http_post("/hook", a.at("config"));
+    if (name == "post_hook") {
+        if (!a.contains("config") || !a["config"].is_object()) {
+            return {{"ok", false}, {"error", "Invalid argument: 'config' must be a JSON object (dict)."}};
+        }
+        return http_post("/hook", a["config"]);
+    }
     if (name == "list_hooks") return http_get("/hooks");
     if (name == "unhook") {
         json body = {{"package", a.value("package", "")}};

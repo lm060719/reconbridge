@@ -23,8 +23,9 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
     {
       "kind": "java",                 // 关键：走 M5 Java 执行器（缺省 native 走 M3）
       "id": "sendStream",             // 事件里带上；缺省服务端补
-      "class": "r70.a",               // 目标类全名（含混淆名）
+      "class": "r70.a",               // 目标类全名（含混淆名；或留空/正则）
       "method": "sendStreamData",     // 方法名；"<init>" 表示构造函数
+      "using_strings": ["sendStream"],// 新增：按字符串特征自动搜索 DEX 定位混淆类与方法（可配合 class_name_match / method_name_match 过滤）
       "params": ["java.lang.String","java.lang.String"],  // 可选：精确重载；省略=hook 所有同名重载
       "capture": {
         "this": "class",              // this 渲染：class（类名）| tostring | none

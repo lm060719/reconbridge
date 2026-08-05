@@ -199,6 +199,11 @@ def post_hook(config: dict) -> dict:
     {package, restart?, targets:[{id,lib,symbol|offset,capture:{args,ret,backtrace,dump},action}]}。
     注入在目标下次启动时生效（restart:true 会 force-stop 目标触发重注入）。
     """
+    if not isinstance(config, dict):
+        return {
+            "ok": False,
+            "error": f"Invalid argument: 'config' must be a JSON object (dict), got {type(config).__name__} ({repr(config)})"
+        }
     return client.post_json("/hook", config)
 
 
@@ -496,7 +501,8 @@ def patch_java(package: str, class_name: str, method: str,
                debug: bool = False,
                restart: bool = True,
                seconds: float = 0.0,
-               max_events: int = 100) -> dict:
+               max_events: int = 100,
+               hot: bool = False) -> dict:
     """实时篡改与高级动作流水线（M5 v2）：改参数 / 改返回值 / 字段深层路径篡改 / 条件执行 / 副作用动作。
 
     需设备已装 **ReconBridge Tracer** LSPosed 模块并启用+勾选目标作用域。协议见 m5/JAVA_HOOK_PROTOCOL.md。
@@ -507,6 +513,7 @@ def patch_java(package: str, class_name: str, method: str,
     - replace_args: 进入原方法前覆盖参数，[{"index":1,"value":"新内容","type":"string"}]。
     - replace_return: 覆盖返回值，{"value":0,"type":"int"}。
     - skip_original: True 则不执行原方法，直接返回 replace_return。
+    - hot=True: **免重启热加**——若目标进程在跑，增量合并配置并下发到运行中的进程（restart 强制置 False）。
     - 模板变量：value / args 字段支持 `${args[0]}`、`${ret.type}`、`${$v1}` 语法引用运行时数据。
     """
     target: dict[str, Any] = {
@@ -542,7 +549,10 @@ def patch_java(package: str, class_name: str, method: str,
         act["skip_original"] = True
     if act:
         target["action"] = act
-    config = {"package": package, "restart": restart, "debug": debug, "targets": [target]}
+    config: dict[str, Any] = {"package": package, "restart": restart, "debug": debug, "targets": [target]}
+    if hot:
+        config["restart"] = False
+        config["mode"] = "append"
     posted = client.post_json("/hook", config)
     result: dict[str, Any] = {"posted": posted}
     if seconds and seconds > 0:

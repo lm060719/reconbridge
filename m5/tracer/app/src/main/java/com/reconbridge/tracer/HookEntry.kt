@@ -110,8 +110,56 @@ class HookEntry : IXposedHookLoadPackage {
         return installed
     }
 
-    /** 按一个 java 目标解析类/方法/重载并挂 trace 回调，返回实际挂上的方法数。 */
+    /** 按一个 java 目标解析类/方法/重载并挂 trace 回调，支持使用 using_strings 按字符串特征搜索定位方法。 */
     private fun installJavaHook(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        io: InjectSocket,
+        t: JSONObject,
+    ): Int {
+        val usingStrings = mutableListOf<String>()
+        val usingArr = t.optJSONArray("using_strings")
+            ?: t.optJSONObject("search")?.optJSONArray("using_strings")
+            ?: t.optJSONObject("search")?.optJSONArray("strings")
+        if (usingArr != null) {
+            for (k in 0 until usingArr.length()) {
+                val s = usingArr.optString(k)
+                if (s.isNotEmpty()) usingStrings.add(s)
+            }
+        } else {
+            val singleStr = t.optString("using_strings", "")
+            if (singleStr.isNotEmpty()) usingStrings.add(singleStr)
+        }
+
+        if (usingStrings.isNotEmpty()) {
+            val classFilter = t.optString("class_name_match").ifEmpty { t.optString("class") }
+            val methodFilter = t.optString("method_name_match").ifEmpty { t.optString("method") }
+            val matches = DexStringSearcher.findMatches(lpparam, usingStrings, classFilter, methodFilter)
+            if (matches.isEmpty()) {
+                log("[${lpparam.packageName}] using_strings $usingStrings 未查到匹配方法")
+                return 0
+            }
+            log("[${lpparam.packageName}] using_strings $usingStrings 查到 ${matches.size} 个匹配方法: ${matches.map { "${it.className}.${it.methodName}" }}")
+            var count = 0
+            for (m in matches) {
+                try {
+                    val subT = JSONObject(t.toString())
+                    subT.put("class", m.className)
+                    subT.put("method", m.methodName)
+                    if (!t.has("params")) {
+                        subT.put("params", JSONArray(m.paramTypes))
+                    }
+                    count += installExplicitJavaHook(lpparam, io, subT)
+                } catch (th: Throwable) {
+                    log("[${lpparam.packageName}] 搜索挂钩 ${m.className}.${m.methodName} 失败: $th")
+                }
+            }
+            return count
+        }
+
+        return installExplicitJavaHook(lpparam, io, t)
+    }
+
+    private fun installExplicitJavaHook(
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
         t: JSONObject,
