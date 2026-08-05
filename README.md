@@ -149,6 +149,7 @@ curl -L -C - \
 | **M2** | PC 端 MCP Server：M1 接口 + 本地反编译链（jadx / DexKit→androguard / Ghidra / Hermes）封装为 Claude Code 工具 | [`pc/README.md`](pc/README.md) |
 | **M3** | 通用动态 hook 执行器：Zygisk 注入 + 数据驱动 ShadowHook + SSE/WS 命中推流 | [`m3/README.md`](m3/README.md) · 协议 [`m3/HOOK_PROTOCOL.md`](m3/HOOK_PROTOCOL.md) |
 | **M4** | 加固/反调试增强：通用内存 dex dump（`/dump_dex`）+ 反检测 hook 配置模板 | [`m4/README.md`](m4/README.md) |
+| **M5** | 通用 Java trace + 实时篡改与 Action Pipeline（LSPosed 模块） | [`m5/README.md`](m5/README.md) · 协议 [`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md) |
 
 构建全部产物：`./build.ps1` → `./pack.ps1`（生成 `dist/ReconBridge-M1.zip`）。
 > 设备端注意：Windows 经 adb 传 `/data/...` 路径需 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`（Git Bash 否则会改写 Unix 路径）。

@@ -448,10 +448,13 @@ static const json& tools() {
                      {"until_n_events", prop("integer", 0)}, {"fold_stack", prop("boolean", true)},
                      {"include_recent", prop("boolean", false)}, {"since_seq", prop("integer", 0)},
                      {"hot", prop("boolean", false)}}, {"package", "class_name", "method"})),
-        tool("patch_java", "实时替换 Java 参数或返回值，也可跳过原方法。",
+        tool("patch_java", "实时替换 Java 参数/返回值/深层字段，条件执行与动作流水线。",
              schema({{"package", prop("string")}, {"class_name", prop("string")}, {"method", prop("string")},
                      {"params", nullable("array")}, {"replace_args", nullable("array")},
-                     {"replace_return", nullable("object")}, {"skip_original", prop("boolean", false)},
+                     {"replace_return", nullable("object")}, {"mutate_return", nullable("array")},
+                     {"condition", nullable("object")}, {"before_actions", nullable("array")},
+                     {"after_actions", nullable("array")}, {"action", nullable("object")},
+                     {"skip_original", prop("boolean", false)},
                      {"trace", prop("boolean", true)}, {"capture_args", nullable("array")},
                      {"this", prop("string", "class")}, {"when", prop("string", "after")},
                      {"hook_id", prop("string", "")}, {"debug", prop("boolean", false)},
@@ -792,8 +795,13 @@ static json invoke_tool(const std::string& name, const json& a) {
         if(a.value("trace",true)) cap["ret"]={{"capture",true},{"render","tostring"}};
         json target={{"kind","java"},{"id",a.value("hook_id",short_cls+"_"+method)},{"class",cls},{"method",method},{"capture",cap}};
         if(a.contains("params")&&!a["params"].is_null()) target["params"]=a["params"];
-        json action=json::object(); if(a.contains("replace_args")&&!a["replace_args"].is_null()) action["replace_args"]=a["replace_args"];
+        json action=a.contains("action")&&a["action"].is_object()?a["action"]:json::object();
+        if(a.contains("replace_args")&&!a["replace_args"].is_null()) action["replace_args"]=a["replace_args"];
         if(a.contains("replace_return")&&!a["replace_return"].is_null()) action["replace_return"]=a["replace_return"];
+        if(a.contains("mutate_return")&&!a["mutate_return"].is_null()) action["mutate_return"]=a["mutate_return"];
+        if(a.contains("condition")&&!a["condition"].is_null()) action["condition"]=a["condition"];
+        if(a.contains("before_actions")&&!a["before_actions"].is_null()) action["before_actions"]=a["before_actions"];
+        if(a.contains("after_actions")&&!a["after_actions"].is_null()) action["after_actions"]=a["after_actions"];
         if(a.value("skip_original",false)) action["skip_original"]=true; if(!action.empty()) target["action"]=action;
         json cfg={{"package",a.value("package","")},{"restart",a.value("restart",true)},{"debug",a.value("debug",false)},{"targets",json::array({target})}};
         json posted=http_post("/hook",cfg), result={{"posted",posted}}; if(a.value("seconds",0.0)>0){json ev=collect_events(a);result["count"]=ev["count"];result["seconds"]=a["seconds"];result["events"]=ev["events"];} return result;

@@ -30,4 +30,4 @@ cd m5/tracer && ./gradlew.bat :app:assembleDebug
 (The repo is under a non-ASCII path; `gradle.properties` already sets `android.overridePathCheck=true`; bundles embedded Rhino JS engine for dynamic script evaluations.)
 
 ## Capabilities & Boundaries
-Supports Trace (observation), real-time tampering (arg/return replacement, skip original), and **Action Pipeline** (invoke Java methods, read/write private fields, instantiate complex objects, evaluate Rhino JS / DEX snippets, execute shell commands); requires LSPosed with scope enabled; class resolution goes through the main classloader. See `JAVA_HOOK_PROTOCOL.md` for details.
+Supports Trace (observation), real-time tampering (arg/return replacement, skip original, field & Map key mutation `mutate_return`), conditional execution (`condition`/`if`), path-based return access in `after` phase, **Action Pipeline** (invoke Java methods, read/write private fields, instantiate complex objects, evaluate Rhino JS / DEX snippets, execute shell commands), and template variables `${...}`; requires LSPosed with scope enabled; class resolution goes through the main classloader. See `JAVA_HOOK_PROTOCOL.md` for details.

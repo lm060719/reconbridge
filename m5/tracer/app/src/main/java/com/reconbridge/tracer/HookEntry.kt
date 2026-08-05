@@ -315,7 +315,7 @@ private class TraceCallback(
                     val entry = JSONObject().put("path", expr).put("render", rend)
                     try {
                         val resolved = resolvePath(param, expr)
-                        if (resolved === MISSING) {
+                        if (resolved === ActionExecutor.MISSING) {
                             entry.put("value", JSONObject.NULL)
                             entry.put("unresolved", true)
                         } else {
@@ -452,92 +452,8 @@ private class TraceCallback(
      * @return 解析到的原始对象（可能为 null=字段本就是 null）；无法解析返回哨兵 MISSING。
      */
     private fun resolvePath(param: MethodHookParam, expr0: String): Any? {
-        val expr = expr0.trim()
-        var cur: Any?
-        var s: String
-        when {
-            expr == "this" || expr.startsWith("this.") || expr.startsWith("this[") -> {
-                cur = param.thisObject; s = expr.substring(4)
-            }
-            expr == "ret" || expr.startsWith("ret.") || expr.startsWith("ret[") -> {
-                cur = param.result; s = expr.substring(3)
-            }
-            expr.startsWith("args[") -> {
-                val close = expr.indexOf(']')
-                if (close < 0) return MISSING
-                val idx = expr.substring(5, close).toIntOrNull() ?: return MISSING
-                val args = param.args
-                if (args == null || idx !in args.indices) return MISSING
-                cur = args[idx]; s = expr.substring(close + 1)
-            }
-            else -> { cur = param.thisObject; s = ".$expr" }  // 裸字段名 → this.<name>
-        }
-        while (s.isNotEmpty()) {
-            if (cur == null) return MISSING  // 中间节点为 null，无法继续下钻
-            if (s.startsWith(".")) { s = s.substring(1); continue }
-            if (s.startsWith("[")) {
-                val close = s.indexOf(']')
-                if (close < 0) return MISSING
-                val idx = s.substring(1, close).toIntOrNull() ?: return MISSING
-                cur = indexInto(cur, idx)
-                if (cur === MISSING) return MISSING
-                s = s.substring(close + 1)
-            } else {
-                val cut = s.indexOfFirst { it == '.' || it == '[' }
-                val name = if (cut < 0) s else s.substring(0, cut)
-                s = if (cut < 0) "" else s.substring(cut)
-                cur = memberOf(cur, name)
-                if (cur === MISSING) return MISSING
-            }
-        }
-        return cur
-    }
-
-    /** 取对象成员：Map.key → 反射字段（含私有/父类）→ getter（getX/x/isX）。找不到返回 MISSING。 */
-    private fun memberOf(obj: Any, name: String): Any? {
-        if (obj is Map<*, *>) {
-            if (obj.containsKey(name)) return obj[name]
-        }
-        var c: Class<*>? = obj.javaClass
-        while (c != null) {
-            try {
-                val f = c.getDeclaredField(name)
-                f.isAccessible = true
-                return f.get(obj)
-            } catch (_: NoSuchFieldException) {
-                c = c.superclass
-            } catch (_: Throwable) {
-                return MISSING
-            }
-        }
-        val cap = name.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-        for (mName in listOf("get$cap", name, "is$cap")) {
-            try {
-                val m = obj.javaClass.getMethod(mName)
-                m.isAccessible = true
-                return m.invoke(obj)
-            } catch (_: NoSuchMethodException) {
-            } catch (_: Throwable) {
-                return MISSING
-            }
-        }
-        return MISSING
-    }
-
-    /** 索引进数组/List；越界或不可索引返回 MISSING。 */
-    private fun indexInto(obj: Any, idx: Int): Any? {
-        return try {
-            when {
-                obj is List<*> -> if (idx in obj.indices) obj[idx] else MISSING
-                obj.javaClass.isArray -> {
-                    val n = java.lang.reflect.Array.getLength(obj)
-                    if (idx in 0 until n) java.lang.reflect.Array.get(obj, idx) else MISSING
-                }
-                else -> MISSING
-            }
-        } catch (_: Throwable) {
-            MISSING
-        }
+        val ctx = ActionContext(param, classLoader, pkg)
+        return ActionExecutor.resolvePath(ctx, expr0)
     }
 
     private fun readField(holder: Any?, name: String, mode: String, max: Int): Any {

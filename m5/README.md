@@ -23,15 +23,14 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
 1. `adb install -r m5/ReconBridge-Tracer.apk`
 2. LSPosed 管理器：启用「ReconBridge Tracer」，把目标 App 勾进作用域。
 3. PC（MCP）：`trace_java(package="com.miui.voiceassist", class_name="r70.a", method="sendStreamData", args_render="json", restart=True, seconds=20)`，然后唤起目标行为。
-   - 实时篡改与回调：`patch_java(...)` 或配置 `action` 流水线。
+   - 实时篡改与回调：`patch_java(...)`（支持改参数、改返回值、返回值深层字段/Map key篡改 `mutate_return`、条件检查 `condition`、模板变量 `${...}` 及 Action Pipeline）。
    - 或手工：`post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`。
 
 ## 构建
 ```
 cd m5/tracer && ./gradlew.bat :app:assembleDebug
-# 产物 app/build/outputs/apk/debug/app-debug.apk
 ```
 （仓库在非 ASCII 路径，`gradle.properties` 里已加 `android.overridePathCheck=true`；内置 Rhino JS 引擎，支持脚本动态计算。）
 
 ## 边界与能力
-支持 Trace（观测）、实时篡改（参数/返回值覆盖/Skip原方法）以及**Action Pipeline**（调用Java方法/改读私有字段/构造复杂对象/Rhino JS片段/DEX动态执行/shell命令）；需 LSPosed 并在管理器里勾选作用域；类解析走主 classloader。详见 `JAVA_HOOK_PROTOCOL.md`。
+支持 Trace（观测）、实时篡改（参数/返回值覆盖/Skip原方法/深层字段与 Map key 篡改 `mutate_return`）、条件执行（`condition` / `if`）、`after` 阶段返回值 Path 读写、**Action Pipeline**（调用 Java 方法/改写字段/构造对象/Rhino JS片段/DEX动态执行/shell命令）及模板变量 `${...}`。需 LSPosed 并在管理器里勾选作用域；类解析走主 classloader。详见 `JAVA_HOOK_PROTOCOL.md`。

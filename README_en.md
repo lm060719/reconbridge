@@ -145,6 +145,7 @@ Downloads support HEAD, byte ranges, and ETag. The global MCP `X-Token` also wor
 | **M2** | PC-side MCP Server: wraps the M1 endpoints + local decompilation chain (jadx / DexKit→androguard / Ghidra / Hermes) as Claude Code tools | [`pc/README.md`](pc/README.md) |
 | **M3** | General dynamic hook executor: Zygisk injection + data-driven ShadowHook + SSE/WS hit streaming | [`m3/README.md`](m3/README.md) · protocol [`m3/HOOK_PROTOCOL.md`](m3/HOOK_PROTOCOL.md) |
 | **M4** | Packer/anti-debug enhancements: general in-memory dex dump (`/dump_dex`) + anti-detection hook config templates | [`m4/README.md`](m4/README.md) |
+| **M5** | General-purpose Java trace & real-time tampering / Action Pipeline (LSPosed module) | [`m5/README.md`](m5/README.md) · protocol [`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md) |
 
 Build all artifacts: `./build.ps1` → `./pack.ps1` (generates `dist/ReconBridge-M1.zip`).
 > Device-side note: on Windows, passing `/data/...` paths through adb requires `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` (Git Bash otherwise rewrites Unix paths).

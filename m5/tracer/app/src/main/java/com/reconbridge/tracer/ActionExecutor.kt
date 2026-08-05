@@ -7,10 +7,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.mozilla.javascript.ScriptableObject
 import java.io.File
-import java.io.InputStream
 import java.lang.reflect.Constructor
 import java.lang.reflect.Field
-import java.lang.reflect.Member
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
 import java.nio.ByteBuffer
@@ -19,14 +17,22 @@ import java.util.Base64
 private const val TAG = "ActionExecutor"
 
 /**
- * Action 执行上下文：记录当前 Hook 调用的参数、返回值、this 对象、ClassLoader 以及局部寄存器变量。
+ * Action 执行上下文：记录当前 Hook 调用的参数、返回值、this 对象、ClassLoader 以及跨 before/after 共享的局部寄存器变量。
  */
 class ActionContext(
     val param: MethodHookParam,
     val classLoader: ClassLoader,
     val pkg: String,
 ) {
-    val registers = HashMap<String, Any?>()
+    @Suppress("UNCHECKED_CAST")
+    val registers: HashMap<String, Any?> = run {
+        var regs = param.getObjectExtra("recon_registers") as? HashMap<String, Any?>
+        if (regs == null) {
+            regs = HashMap()
+            param.setObjectExtra("recon_registers", regs)
+        }
+        regs
+    }
 
     var thisObject: Any?
         get() = param.thisObject
@@ -46,8 +52,10 @@ class ActionContext(
 
 object ActionExecutor {
 
+    val MISSING = Any()
+
     /**
-     * 执行指定 phase (before | after) 的 action 配置（支持单步或流水线列表）。
+     * 执行指定 phase (before | after) 的 action 配置（支持条件判断、返回值篡改、动作流水线与修改列表）。
      */
     fun executeActions(
         ctx: ActionContext,
@@ -56,7 +64,14 @@ object ActionExecutor {
     ) {
         if (actionObj == null) return
 
-        // 1. 支持按 phase 分离的 callback: action.before_actions / action.after_actions
+        // 缺口 2: Action 级条件检查（if / condition）
+        val actionCond = actionObj.opt("condition") ?: actionObj.opt("if")
+        if (actionCond != null && !evaluateCondition(ctx, actionCond)) {
+            Log.d(TAG, "[${ctx.pkg}] Action 满足跳过条件 ($phase 阶段未触发)")
+            return
+        }
+
+        // 1. 按 phase 分离的 callback: action.before_actions / action.after_actions
         val phaseKey = if (phase == "before") "before_actions" else "after_actions"
         val phaseActions = actionObj.optJSONArray(phaseKey)
         if (phaseActions != null) {
@@ -70,7 +85,14 @@ object ActionExecutor {
             runPipeline(ctx, steps)
         }
 
-        // 3. 兼容原有标量属性: replace_args, skip_original (before 阶段), replace_return (after 或 skip_original 时)
+        // 3. 缺口 1 & 3: 返回值 / 字段深层路径篡改 (mutate_return / mutate_fields)
+        val mutateReturn = actionObj.optJSONArray("mutate_return") ?: actionObj.optJSONArray("mutate_fields")
+        val mutatePhase = actionObj.optString("mutate_phase", "after")
+        if (mutateReturn != null && mutatePhase == phase) {
+            applyMutateReturn(ctx, mutateReturn)
+        }
+
+        // 4. 兼容原有标量属性: replace_args, skip_original (before 阶段), replace_return (after 或 skip_original 时)
         if (phase == "before") {
             val replaceArgs = actionObj.optJSONArray("replace_args")
             if (replaceArgs != null) {
@@ -92,6 +114,11 @@ object ActionExecutor {
     private fun runPipeline(ctx: ActionContext, steps: JSONArray) {
         for (i in 0 until steps.length()) {
             val step = steps.optJSONObject(i) ?: continue
+            // 缺口 2: 单 Step 条件检查
+            val stepCond = step.opt("condition") ?: step.opt("if")
+            if (stepCond != null && !evaluateCondition(ctx, stepCond)) {
+                continue
+            }
             try {
                 executeStep(ctx, step)
             } catch (t: Throwable) {
@@ -105,18 +132,218 @@ object ActionExecutor {
         when (type) {
             "call_method", "invoke" -> stepCallMethod(ctx, step)
             "set_field" -> stepSetField(ctx, step)
+            "mutate", "set_path", "mutate_path" -> stepMutatePath(ctx, step)
             "construct", "new_instance" -> stepConstruct(ctx, step)
             "exec_shell", "shell" -> stepExecShell(ctx, step)
             "eval_js", "js" -> stepEvalJs(ctx, step)
             "eval_dex", "dex" -> stepEvalDex(ctx, step)
             "set_arg" -> stepSetArg(ctx, step)
-            "set_result" -> stepSetResult(ctx, step)
+            "set_result", "replace_return" -> stepSetResult(ctx, step)
             else -> Log.w(TAG, "[${ctx.pkg}] 未知 action 类型: $type")
         }
     }
 
     // ------------------------------------------------------------------------
-    // 1. 调用 Java 方法 (call_method)
+    // 缺口 2: 条件检查 (Conditional Execution)
+    // ------------------------------------------------------------------------
+    fun evaluateCondition(ctx: ActionContext, condObj: Any?): Boolean {
+        if (condObj == null) return true
+        if (condObj is JSONArray) {
+            for (i in 0 until condObj.length()) {
+                if (!evaluateCondition(ctx, condObj.get(i))) return false
+            }
+            return true
+        }
+        val obj = condObj as? JSONObject ?: return true
+
+        // 1. JS 脚本评估 condition
+        if (obj.has("script") || obj.has("eval")) {
+            val script = obj.optString("script", obj.optString("eval"))
+            if (script.isNotEmpty()) {
+                val res = evalJsInternal(ctx, script)
+                return when (res) {
+                    is Boolean -> res
+                    is Number -> res.toDouble() != 0.0
+                    is String -> res.isNotEmpty() && res != "false"
+                    null -> false
+                    else -> true
+                }
+            }
+        }
+
+        // 2. 表达式条件: { path, op, value }
+        val pathExpr = obj.optString("path", obj.optString("target", obj.optString("var")))
+        if (pathExpr.isEmpty()) return true
+
+        val op = obj.optString("op", "eq").lowercase()
+        val rawLeft = resolvePath(ctx, pathExpr)
+        val leftVal = if (rawLeft === MISSING) null else rawLeft
+
+        if (op == "is_null" || op == "null") return leftVal == null
+        if (op == "not_null" || op == "non_null") return leftVal != null
+
+        val rightVal = resolveValueItem(ctx, obj.opt("value"))
+
+        val leftStr = leftVal?.toString() ?: ""
+        val rightStr = rightVal?.toString() ?: ""
+
+        return when (op) {
+            "eq", "==", "equals" -> leftStr == rightStr
+            "neq", "!=", "not_equals" -> leftStr != rightStr
+            "contains" -> leftStr.contains(rightStr)
+            "matches", "regex" -> try { Regex(rightStr).containsMatchIn(leftStr) } catch (_: Throwable) { false }
+            "gt", ">" -> compareNums(leftVal, rightVal) > 0
+            "gte", ">=" -> compareNums(leftVal, rightVal) >= 0
+            "lt", "<" -> compareNums(leftVal, rightVal) < 0
+            "lte", "<=" -> compareNums(leftVal, rightVal) <= 0
+            else -> leftStr == rightStr
+        }
+    }
+
+    private fun compareNums(a: Any?, b: Any?): Int {
+        val da = (a as? Number)?.toDouble() ?: a.toString().toDoubleOrNull() ?: 0.0
+        val db = (b as? Number)?.toDouble() ?: b.toString().toDoubleOrNull() ?: 0.0
+        return da.compareTo(db)
+    }
+
+    // ------------------------------------------------------------------------
+    // 缺口 1 & 3: 返回值 / 字段深层路径篡改 (Return Value & Field Mutation)
+    // ------------------------------------------------------------------------
+    private fun stepMutatePath(ctx: ActionContext, step: JSONObject) {
+        val targetPath = step.optString("target", step.optString("path"))
+        if (targetPath.isEmpty()) return
+        val valObj = resolveValueItem(ctx, step.opt("value"))
+        mutatePath(ctx, targetPath, valObj)
+    }
+
+    private fun applyMutateReturn(ctx: ActionContext, mutateList: JSONArray) {
+        for (i in 0 until mutateList.length()) {
+            val item = mutateList.optJSONObject(i) ?: continue
+            val path = item.optString("path", item.optString("target"))
+            if (path.isEmpty()) continue
+            val fullPath = if (path.startsWith("ret.") || path.startsWith("result.") ||
+                path.startsWith("args[") || path.startsWith("this.") || path.startsWith("$")) {
+                path
+            } else {
+                "ret.$path"
+            }
+            val valObj = resolveValueItem(ctx, item.opt("value"))
+            mutatePath(ctx, fullPath, valObj)
+        }
+    }
+
+    fun mutatePath(ctx: ActionContext, pathExpr: String, newValue: Any?): Boolean {
+        val expr = pathExpr.trim()
+        if (expr.isEmpty()) return false
+
+        var lastDotOrBracket = -1
+        var inQuote = false
+        var quoteChar = ' '
+        for (i in expr.indices) {
+            val ch = expr[i]
+            if ((ch == '\'' || ch == '"')) {
+                if (!inQuote) { inQuote = true; quoteChar = ch }
+                else if (quoteChar == ch) { inQuote = false }
+            } else if (!inQuote && (ch == '.' || ch == '[')) {
+                lastDotOrBracket = i
+            }
+        }
+
+        if (lastDotOrBracket < 0) {
+            if (expr == "ret" || expr == "result") {
+                ctx.result = newValue
+                return true
+            }
+            if (expr.startsWith("args[")) {
+                val close = expr.indexOf(']')
+                if (close > 0) {
+                    val idx = expr.substring(5, close).toIntOrNull()
+                    if (idx != null && ctx.args != null && idx in ctx.args!!.indices) {
+                        ctx.args!![idx] = newValue
+                        return true
+                    }
+                }
+            }
+            if (expr.startsWith("$")) {
+                ctx.registers[expr] = newValue
+                return true
+            }
+            return false
+        }
+
+        val parentExpr = expr.substring(0, lastDotOrBracket)
+        val sep = expr[lastDotOrBracket]
+        val parentObj = resolvePath(ctx, parentExpr)
+        if (parentObj == null || parentObj === MISSING) {
+            Log.w(TAG, "无法篡改路径 '$expr': 父节点 '$parentExpr' 未能解析到有效对象")
+            return false
+        }
+
+        val realParent = if (parentObj is TargetInstance) parentObj.instance else parentObj
+        if (realParent == null) return false
+
+        if (sep == '[') {
+            val close = expr.indexOf(']', lastDotOrBracket)
+            if (close < 0) return false
+            val keyStr = expr.substring(lastDotOrBracket + 1, close).trim().removeSurrounding("'", "'").removeSurrounding("\"", "\"")
+            val idx = keyStr.toIntOrNull()
+
+            if (realParent is MutableMap<*, *>) {
+                @Suppress("UNCHECKED_CAST")
+                (realParent as MutableMap<Any?, Any?>)[keyStr] = newValue
+                return true
+            }
+            if (idx != null && realParent is MutableList<*>) {
+                @Suppress("UNCHECKED_CAST")
+                (realParent as MutableList<Any?>)[idx] = newValue
+                return true
+            }
+            if (idx != null && realParent.javaClass.isArray) {
+                java.lang.reflect.Array.set(realParent, idx, newValue)
+                return true
+            }
+            return setMemberField(realParent, keyStr, newValue)
+        } else {
+            val fieldName = expr.substring(lastDotOrBracket + 1).trim()
+            if (realParent is MutableMap<*, *>) {
+                @Suppress("UNCHECKED_CAST")
+                (realParent as MutableMap<Any?, Any?>)[fieldName] = newValue
+                return true
+            }
+            return setMemberField(realParent, fieldName, newValue)
+        }
+    }
+
+    private fun setMemberField(obj: Any, fieldName: String, value: Any?): Boolean {
+        var c: Class<*>? = obj.javaClass
+        while (c != null) {
+            try {
+                val f = c.getDeclaredField(fieldName)
+                f.isAccessible = true
+                f.set(obj, value)
+                return true
+            } catch (_: NoSuchFieldException) {
+                c = c.superclass
+            } catch (t: Throwable) {
+                Log.e(TAG, "设置字段 $fieldName 失败 (${obj.javaClass.name}): $t")
+                return false
+            }
+        }
+        val cap = fieldName.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        for (m in obj.javaClass.methods) {
+            if (m.name == "set$cap" && m.parameterTypes.size == 1) {
+                try {
+                    m.isAccessible = true
+                    m.invoke(obj, value)
+                    return true
+                } catch (_: Throwable) {}
+            }
+        }
+        return false
+    }
+
+    // ------------------------------------------------------------------------
+    // 缺口 4: 副作用调用 (Action Pipeline Implementation)
     // ------------------------------------------------------------------------
     private fun stepCallMethod(ctx: ActionContext, step: JSONObject) {
         val targetExpr = step.optString("target", "this")
@@ -156,9 +383,6 @@ object ActionExecutor {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // 2. 修改对象字段 (set_field)
-    // ------------------------------------------------------------------------
     private fun stepSetField(ctx: ActionContext, step: JSONObject) {
         val targetExpr = step.optString("target", "this")
         val fieldName = step.optString("field")
@@ -182,9 +406,6 @@ object ActionExecutor {
         field.set(invTarget, valToSet)
     }
 
-    // ------------------------------------------------------------------------
-    // 3. 构造复杂对象 (construct / new_instance)
-    // ------------------------------------------------------------------------
     private fun stepConstruct(ctx: ActionContext, step: JSONObject) {
         val className = step.optString("class")
         if (className.isEmpty()) return
@@ -219,9 +440,6 @@ object ActionExecutor {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // 4. 执行 Shell 命令 (exec_shell)
-    // ------------------------------------------------------------------------
     private fun stepExecShell(ctx: ActionContext, step: JSONObject) {
         val cmdObj = step.opt("cmd") ?: return
         val asRoot = step.optBoolean("as_root", false)
@@ -262,19 +480,23 @@ object ActionExecutor {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // 5. 执行 JavaScript 代码片段 (eval_js) - 集成 Rhino 引擎
-    // ------------------------------------------------------------------------
     private fun stepEvalJs(ctx: ActionContext, step: JSONObject) {
         val script = step.optString("script")
         if (script.isEmpty()) return
+        val javaRes = evalJsInternal(ctx, script)
 
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = javaRes
+        }
+    }
+
+    private fun evalJsInternal(ctx: ActionContext, script: String): Any? {
         val jsCtx = org.mozilla.javascript.Context.enter()
         try {
-            jsCtx.optimizationLevel = -1 // Android 上关闭 JIT 字节码生成，走解释执行模式
+            jsCtx.optimizationLevel = -1 // Android 上关闭 JIT 字节码生成
             val scope: ScriptableObject = jsCtx.initStandardObjects()
 
-            // 绑定变量: $this, $args, $ret, $ctx, $regs
             ScriptableObject.putProperty(scope, "\$this", org.mozilla.javascript.Context.javaToJS(ctx.thisObject, scope))
             ScriptableObject.putProperty(scope, "\$args", org.mozilla.javascript.Context.javaToJS(ctx.args, scope))
             ScriptableObject.putProperty(scope, "\$ret", org.mozilla.javascript.Context.javaToJS(ctx.result, scope))
@@ -282,24 +504,16 @@ object ActionExecutor {
             ScriptableObject.putProperty(scope, "\$regs", org.mozilla.javascript.Context.javaToJS(ctx.registers, scope))
 
             val res = jsCtx.evaluateString(scope, script, "<m5_script>", 1, null)
-            val javaRes = when (res) {
+            return when (res) {
                 null, is org.mozilla.javascript.Undefined -> null
                 is org.mozilla.javascript.Wrapper -> res.unwrap()
                 else -> res
-            }
-
-            val saveTo = step.optString("save_to")
-            if (saveTo.isNotEmpty()) {
-                ctx.registers[saveTo] = javaRes
             }
         } finally {
             org.mozilla.javascript.Context.exit()
         }
     }
 
-    // ------------------------------------------------------------------------
-    // 6. 执行 Java/Kotlin DEX 代码片段 (eval_dex)
-    // ------------------------------------------------------------------------
     private fun stepEvalDex(ctx: ActionContext, step: JSONObject) {
         val dexB64 = step.optString("dex_b64")
         val dexPath = step.optString("dex_path")
@@ -346,9 +560,6 @@ object ActionExecutor {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // 辅助动作: set_arg & set_result
-    // ------------------------------------------------------------------------
     private fun stepSetArg(ctx: ActionContext, step: JSONObject) {
         val idx = step.optInt("index", -1)
         val args = ctx.args ?: return
@@ -373,31 +584,158 @@ object ActionExecutor {
     }
 
     // ------------------------------------------------------------------------
-    // 表达式与对象解析
+    // 缺口 3 & 5: 通用表达式解析与模板变量 (Path Resolution & Template Variables)
     // ------------------------------------------------------------------------
     private class TargetClass(val clazz: Class<*>)
     private class TargetInstance(val instance: Any?)
 
-    private fun resolveTarget(ctx: ActionContext, expr: String): Any? {
-        val s = expr.trim()
-        if (s == "this") return ctx.thisObject
-        if (s == "ret" || s == "result") return ctx.result
-        if (s.startsWith("args[")) {
-            val close = s.indexOf(']')
-            if (close > 0) {
-                val idx = s.substring(5, close).toIntOrNull()
+    fun resolvePath(ctx: ActionContext, expr0: String): Any? {
+        val expr = expr0.trim()
+        if (expr.isEmpty()) return MISSING
+
+        var cur: Any?
+        var s: String
+
+        when {
+            expr == "this" || expr.startsWith("this.") || expr.startsWith("this[") -> {
+                cur = ctx.thisObject
+                s = if (expr == "this") "" else expr.substring(4)
+            }
+            expr == "ret" || expr == "result" || expr.startsWith("ret.") || expr.startsWith("ret[") || expr.startsWith("result.") || expr.startsWith("result[") -> {
+                cur = ctx.result
+                val prefixLen = if (expr.startsWith("result")) 6 else 3
+                s = if (expr == "ret" || expr == "result") "" else expr.substring(prefixLen)
+            }
+            expr.startsWith("args[") -> {
+                val close = expr.indexOf(']')
+                if (close < 0) return MISSING
+                val idx = expr.substring(5, close).toIntOrNull() ?: return MISSING
                 val args = ctx.args
-                if (idx != null && args != null && idx in args.indices) {
-                    return args[idx]
+                if (args == null || idx !in args.indices) return MISSING
+                cur = args[idx]
+                s = expr.substring(close + 1)
+            }
+            expr.startsWith("class:") -> {
+                val cName = expr.substring(6)
+                return try { TargetClass(ctx.classLoader.loadClass(cName)) } catch (_: Throwable) { MISSING }
+            }
+            expr.startsWith("$") -> {
+                val cut = expr.indexOfFirst { it == '.' || it == '[' }
+                val regName = if (cut < 0) expr else expr.substring(0, cut)
+                if (!ctx.registers.containsKey(regName)) return MISSING
+                cur = ctx.registers[regName]
+                s = if (cut < 0) "" else expr.substring(cut)
+            }
+            else -> {
+                val cut = expr.indexOfFirst { it == '.' || it == '[' }
+                val head = if (cut < 0) expr else expr.substring(0, cut)
+                if (ctx.registers.containsKey(head) || ctx.registers.containsKey("$$head")) {
+                    cur = ctx.registers[head] ?: ctx.registers["$$head"]
+                    s = if (cut < 0) "" else expr.substring(cut)
+                } else {
+                    cur = ctx.thisObject
+                    s = ".$expr"
                 }
             }
         }
+
+        while (s.isNotEmpty()) {
+            if (cur == null) return MISSING
+            if (s.startsWith(".")) {
+                s = s.substring(1)
+                continue
+            }
+            if (s.startsWith("[")) {
+                val close = s.indexOf(']')
+                if (close < 0) return MISSING
+                val keyStr = s.substring(1, close).trim().removeSurrounding("'", "'").removeSurrounding("\"", "\"")
+                val idx = keyStr.toIntOrNull()
+                if (idx != null && (cur is List<*> || (cur != null && cur.javaClass.isArray))) {
+                    cur = indexInto(cur, idx)
+                } else if (cur is Map<*, *>) {
+                    cur = mapGet(cur, keyStr)
+                } else {
+                    cur = memberOf(cur, keyStr)
+                }
+                if (cur === MISSING) return MISSING
+                s = s.substring(close + 1)
+            } else {
+                val cut = s.indexOfFirst { it == '.' || it == '[' }
+                val name = if (cut < 0) s else s.substring(0, cut)
+                s = if (cut < 0) "" else s.substring(cut)
+                cur = memberOf(cur, name)
+                if (cur === MISSING) return MISSING
+            }
+        }
+        return cur
+    }
+
+    private fun mapGet(map: Map<*, *>, keyStr: String): Any? {
+        if (map.containsKey(keyStr)) return map[keyStr]
+        val intKey = keyStr.toIntOrNull()
+        if (intKey != null && map.containsKey(intKey)) return map[intKey]
+        for ((k, v) in map) {
+            if (k?.toString() == keyStr) return v
+        }
+        return MISSING
+    }
+
+    private fun memberOf(obj: Any, name: String): Any? {
+        if (obj is TargetClass) return obj
+        val inst = if (obj is TargetInstance) obj.instance else obj
+        if (inst == null) return MISSING
+        if (inst is Map<*, *>) {
+            val res = mapGet(inst, name)
+            if (res !== MISSING) return res
+        }
+        var c: Class<*>? = inst.javaClass
+        while (c != null) {
+            try {
+                val f = c.getDeclaredField(name)
+                f.isAccessible = true
+                return f.get(inst)
+            } catch (_: NoSuchFieldException) {
+                c = c.superclass
+            } catch (_: Throwable) {
+                return MISSING
+            }
+        }
+        val cap = name.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+        for (mName in listOf("get$cap", name, "is$cap")) {
+            try {
+                val m = inst.javaClass.getMethod(mName)
+                m.isAccessible = true
+                return m.invoke(inst)
+            } catch (_: NoSuchMethodException) {
+            } catch (_: Throwable) {
+                return MISSING
+            }
+        }
+        return MISSING
+    }
+
+    private fun indexInto(obj: Any, idx: Int): Any? {
+        return try {
+            when {
+                obj is List<*> -> if (idx in obj.indices) obj[idx] else MISSING
+                obj.javaClass.isArray -> {
+                    val n = java.lang.reflect.Array.getLength(obj)
+                    if (idx in 0 until n) java.lang.reflect.Array.get(obj, idx) else MISSING
+                }
+                else -> MISSING
+            }
+        } catch (_: Throwable) {
+            MISSING
+        }
+    }
+
+    private fun resolveTarget(ctx: ActionContext, expr: String): Any? {
+        val s = expr.trim()
+        val res = resolvePath(ctx, s)
+        if (res !== MISSING && res != null) return res
         if (s.startsWith("class:")) {
             val cName = s.substring(6)
-            return TargetClass(ctx.classLoader.loadClass(cName))
-        }
-        if (s.startsWith("$")) {
-            return ctx.registers[s]
+            return try { TargetClass(ctx.classLoader.loadClass(cName)) } catch (_: Throwable) { null }
         }
         return ctx.registers[s] ?: ctx.thisObject
     }
@@ -406,18 +744,69 @@ object ActionExecutor {
         if (vObj is JSONObject) {
             return resolveValue(ctx, vObj)
         }
-        if (vObj is String && vObj.startsWith("$")) {
-            return ctx.registers[vObj]
+        if (vObj is String) {
+            val s = vObj.trim()
+            // 单一模板表达式 "${ret.body.type}" -> 返回原始 Java 对象
+            if (s.startsWith("\${") && s.endsWith("}") && countMatches(s, "\${") == 1) {
+                val expr = s.substring(2, s.length - 1).trim()
+                val resolved = resolvePath(ctx, expr)
+                return if (resolved === MISSING) null else resolved
+            }
+            // 嵌入模板表达式 "Prefix_${args[0]}_Suffix" -> 插值拼接为字符串
+            if (s.contains("\${")) {
+                return interpolateTemplateString(ctx, vObj)
+            }
+            if (s.startsWith("$") && ctx.registers.containsKey(s)) {
+                return ctx.registers[s]
+            }
         }
         return vObj
+    }
+
+    private fun interpolateTemplateString(ctx: ActionContext, str: String): String {
+        val sb = StringBuilder()
+        var pos = 0
+        while (pos < str.length) {
+            val start = str.indexOf("\${", pos)
+            if (start < 0) {
+                sb.append(str.substring(pos))
+                break
+            }
+            sb.append(str.substring(pos, start))
+            val end = str.indexOf('}', start + 2)
+            if (end < 0) {
+                sb.append(str.substring(start))
+                break
+            }
+            val expr = str.substring(start + 2, end).trim()
+            val valObj = resolvePath(ctx, expr)
+            val text = if (valObj === MISSING || valObj == null) "" else valObj.toString()
+            sb.append(text)
+            pos = end + 1
+        }
+        return sb.toString()
+    }
+
+    private fun countMatches(str: String, sub: String): Int {
+        var count = 0
+        var idx = 0
+        while (str.indexOf(sub, idx).also { idx = it } != -1) {
+            count++
+            idx += sub.length
+        }
+        return count
     }
 
     private fun resolveValue(ctx: ActionContext, r: JSONObject): Any? {
         if (r.has("var")) {
             return ctx.registers[r.optString("var")]
         }
+        if (r.has("path")) {
+            val pVal = resolvePath(ctx, r.optString("path"))
+            return if (pVal === MISSING) null else pVal
+        }
         if (r.isNull("value")) return null
-        val v = r.opt("value")
+        val v = resolveValueItem(ctx, r.opt("value"))
         val type = r.optString("type", "")
         return coerce(v, type)
     }

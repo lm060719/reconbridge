@@ -482,6 +482,11 @@ def patch_java(package: str, class_name: str, method: str,
                params: Optional[list] = None,
                replace_args: Optional[list] = None,
                replace_return: Optional[dict] = None,
+               mutate_return: Optional[list] = None,
+               condition: Optional[dict] = None,
+               before_actions: Optional[list] = None,
+               after_actions: Optional[list] = None,
+               action: Optional[dict] = None,
                skip_original: bool = False,
                trace: bool = True,
                capture_args: Optional[list] = None,
@@ -492,21 +497,17 @@ def patch_java(package: str, class_name: str, method: str,
                restart: bool = True,
                seconds: float = 0.0,
                max_events: int = 100) -> dict:
-    """实时篡改一个 Java 方法（M5 v2）：改参数 / 改返回值 / 跳过原方法。
+    """实时篡改与高级动作流水线（M5 v2）：改参数 / 改返回值 / 字段深层路径篡改 / 条件执行 / 副作用动作。
 
-    需设备已装 **ReconBridge Tracer** LSPosed 模块并启用+勾选目标作用域。篡改是**持久**的
-    （下发后一直生效，直到 unhook）。协议见 m5/JAVA_HOOK_PROTOCOL.md。
+    需设备已装 **ReconBridge Tracer** LSPosed 模块并启用+勾选目标作用域。协议见 m5/JAVA_HOOK_PROTOCOL.md。
 
+    - mutate_return: **返回值深层字段/Map key 篡改**，[{"path":"body.type","value":"normal"}]。
+    - condition: **条件执行**，{"path":"ret.type","op":"eq","value":"revokemsg"} 或 {"script":"$ret != null"}。
+    - before_actions / after_actions: **副作用动作流水线**，包含 call_method, set_field, eval_js, exec_shell, mutate 等。
     - replace_args: 进入原方法前覆盖参数，[{"index":1,"value":"新内容","type":"string"}]。
-      type ∈ string|int|long|boolean|double|float|short|byte|char；省略 type 则按 JSON 原生类型。
-    - replace_return: 覆盖返回值，{"value":0,"type":"int"}（对无 skip_original 时在 after 生效）。
-    - skip_original: True 则不执行原方法，直接返回 replace_return（没给则返回 null）——用于“拦掉某调用”。
-    - trace: True 同时把命中回传（含 tampered 标记）；想静默篡改设 trace=False（when=none）。
-    - seconds>0 时下发后顺便采集命中；=0 只下发（篡改持续生效）。
-
-    例：把某 String 参数换掉 → replace_args=[{"index":1,"value":"...","type":"string"}]；
-        让某校验方法恒返回 true → replace_return={"value":true,"type":"boolean"}, skip_original=True。
-    注意：模块进程启动时读配置，已运行目标需 restart=True。
+    - replace_return: 覆盖返回值，{"value":0,"type":"int"}。
+    - skip_original: True 则不执行原方法，直接返回 replace_return。
+    - 模板变量：value / args 字段支持 `${args[0]}`、`${ret.type}`、`${$v1}` 语法引用运行时数据。
     """
     target: dict[str, Any] = {
         "kind": "java",
@@ -524,11 +525,19 @@ def patch_java(package: str, class_name: str, method: str,
     if trace:
         cap["ret"] = {"capture": True, "render": "tostring"}
     target["capture"] = cap
-    act: dict[str, Any] = {}
+    act: dict[str, Any] = action.copy() if action is not None else {}
     if replace_args is not None:
         act["replace_args"] = replace_args
     if replace_return is not None:
         act["replace_return"] = replace_return
+    if mutate_return is not None:
+        act["mutate_return"] = mutate_return
+    if condition is not None:
+        act["condition"] = condition
+    if before_actions is not None:
+        act["before_actions"] = before_actions
+    if after_actions is not None:
+        act["after_actions"] = after_actions
     if skip_original:
         act["skip_original"] = True
     if act:

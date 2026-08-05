@@ -44,13 +44,20 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
         "stack": false                // 抓 Java 调用栈（前 24 帧）
       },
       "action": {                     // 可选：实时篡改与动作流水线（Action Pipeline）
-        "replace_args": [             // 进入原方法前覆盖参数（标量快捷语法）
-          {"index": 1, "value": "被换掉的内容", "type": "string"}
+        "condition": {                // 缺口 2：条件执行 (Conditional Execution)
+          "path": "ret.body.type", "op": "eq", "value": "revokemsg"   // 或 "script": "$ret != null"
+        },
+        "mutate_return": [            // 缺口 1 & 3：返回值字段级篡改与 Path 访问 (Return Value Mutation)
+          { "path": "body.type", "value": "normal" },
+          { "path": "headers['x-status']", "value": "ok" }
         ],
-        "replace_return": {"value": 0, "type": "int"},  // 覆盖返回值
+        "replace_args": [             // 进入原方法前覆盖参数（标量快捷语法）
+          {"index": 1, "value": "被换掉的内容 ${args[0]}", "type": "string"} // 缺口 5：模板变量 ${...}
+        ],
+        "replace_return": {"value": 0, "type": "int"},  // 覆盖整个返回值
         "skip_original": false,       // true=不执行原方法，直接返回 replace_return（没给则 null）
         
-        // --- 扩展：自定义 Callback 流水线与复杂执行 ---
+        // --- 扩展：缺口 4 副作用调用 (Side Effect Actions) 与自定义 Callback 流水线 ---
         "before_actions": [           // 进入原方法前按顺序执行动作列表
           { "action": "set_field", "target": "this", "field": "debugMode", "value": true },
           { "action": "call_method", "target": "this", "method": "setToken", "args": [{"value": "new_tok"}] },
@@ -59,8 +66,9 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
           { "action": "exec_shell", "cmd": "id", "as_root": false, "save_to": "$sh" },
           { "action": "eval_dex", "dex_b64": "<base64_dex>", "class": "com.foo.Plugin", "method": "run", "save_to": "$res" }
         ],
-        "after_actions": [            // 原方法完成后执行动作列表
-          { "action": "call_method", "target": "class:com.foo.Logger", "method": "log", "args": [{"var": "$v2"}] }
+        "after_actions": [            // 原方法完成后执行动作列表（缺口 3：可读写 ret 路径）
+          { "condition": { "path": "ret.code", "op": "neq", "value": 200 },
+            "action": "call_method", "target": "class:com.foo.Logger", "method": "log", "args": [{"value": "Status: ${ret.code}, user: ${args[0]}"}] }
         ]
       }
     }
@@ -69,13 +77,17 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
 ```
 
 **篡改与 Action 流水线扩展（Action Pipeline）**：
-- **`call_method` / `invoke`**：调用任意 Java 静态方法或实例方法。`target` 可为 `"this"`、`"args[N]"`、`"ret"`、`"class:包名.类名"` 或寄存器 `"$v1"`。`save_to` 可将返回值保存到寄存器。
-- **`set_field`**：修改 `this`、参数对象或静态类的私有/公有字段。
-- **`construct` / `new_instance`**：通过反射构造函数实例化任意 Java 复杂对象，并保存至寄存器。
-- **`exec_shell`**：在目标 App 进程空间内执行 Shell 命令（支持 `as_root: true` 以 su 执行），结果保存至寄存器。
-- **`eval_js`**：嵌入 Rhino JS 引擎，执行 JavaScript 代码片段。自动注入环境变量 `$this` / `$thisObject`、`$args`、`$ret`、`$regs`，支持在 JS 中直接调用 Java 方法。
-- **`eval_dex`**：通过 `InMemoryDexClassLoader` (Android 8.0+) 动态加载 Base64 的 DEX 字节流或本地 DEX 文件，并执行指定类的方法。
-- **`before_actions` / `after_actions`**：灵活注入自定义 before/after callback 链。
+- **缺口 1：返回值字段级篡改（Return Value Mutation）**：通过 `mutate_return` / `mutate_fields` 或 step `"action": "mutate"`，按路径（如 `ret.body.type` 或 `ret['key']` 或 `args[0].name`）修改返回值对象内部的某个字段/Map key/List 索引，而不是整体替换。
+- **缺口 2：条件执行（Conditional Execution）**：Action 或 Step 级可包含 `condition` 检查。支持 `op`：`eq`, `neq`, `contains`, `matches` (正则), `gt`, `gte`, `lt`, `lte`, `is_null`, `not_null`，或通过 Rhino JS 执行 `"script": "$ret != null && $ret.code == 200"`。条件不满足时自动跳过当前 action / step。
+- **缺口 3：After 阶段访问返回值路径（Path-based Return Access）**：在 after 阶段，`ret` / `result` 以及嵌套路径表达式（`ret.body.type` / `ret['key']`）作为完整上下文开放给 `condition`、`mutate`、`call_method` 与模板变量，并跨 before/after 共享寄存器 `$v1`。
+- **缺口 4：副作用调用（Side Effect Actions）**：
+  - **`call_method` / `invoke`**：调用任意 Java 静态方法或实例方法。`target` 可为 `"this"`、`"args[N]"`、`"ret.xxx"`、`"class:包名.类名"` 或寄存器 `"$v1"`。`save_to` 保存返回值。
+  - **`set_field`**：修改 `this`、参数或静态类的私有/公有字段。
+  - **`construct` / `new_instance`**：实例化 Java 复杂对象，保存至寄存器。
+  - **`exec_shell`**：在目标 App 进程空间内执行 Shell 命令（支持 `as_root: true`），保存输出。
+  - **`eval_js`**：嵌入 Rhino JS 引擎执行 JavaScript 代码。自动注入环境变量 `$this`, `$args`, `$ret`, `$ctx`, `$regs`。
+  - **`eval_dex`**：动态加载 Base64/本地 DEX 文件并执行指定类的方法。
+- **缺口 5：模板化参数引用（Template Variables）**：在 action 参数或 value 中使用 `${args[0]}`、`${ret.body.type}`、`${$v1}` 等模板语法，运行时自动解析并填入对应数据。单一 `${expr}` 保持原始 Java 对象类型，复合文本 `"user_${args[0]}"` 自动插值。
 
 **render 取值**：`tostring`（数值/布尔原样，其余 `String.valueOf` 截断到 `max`）、`class`（对象类名）、
 `json`（原样字符串，交 PC 侧解析——适合参数本身就是 JSON 文本的场景，如 `sendStreamData` 的 content）、
