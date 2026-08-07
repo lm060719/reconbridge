@@ -19,10 +19,25 @@ from . import external
 mcp = FastMCP("reconbridge")
 
 
+_PKG_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$")
+
+
+def _validate_package_name(package_name: str) -> str:
+    if not package_name or not _PKG_NAME_RE.match(package_name):
+        raise ReconError(f"Invalid package_name: '{package_name}'")
+    return package_name
+
+
 def _pkg_dir(package_name: str, sub: str) -> Path:
-    d = settings.workdir / package_name / sub
+    _validate_package_name(package_name)
+    d = (settings.workdir / package_name / sub).resolve()
+    try:
+        d.relative_to(settings.workdir.resolve())
+    except ValueError:
+        raise ReconError(f"Package path escapes workdir: {package_name}")
     d.mkdir(parents=True, exist_ok=True)
     return d
+
 
 
 # =====================================================================
@@ -109,7 +124,26 @@ def read_remote_file(path: str, save_as: str = "", max_inline_kb: int = 64) -> d
     save_as: PC 本地保存路径；为空时存到工作目录 files/ 下。
     小于 max_inline_kb 且疑似文本时，附带内联内容预览。
     """
-    dest = Path(save_as) if save_as else (settings.workdir / "files" / Path(path).name)
+    if save_as:
+        p = Path(save_as)
+        if not p.is_absolute():
+            p = settings.workdir / p
+        dest = p.resolve()
+        try:
+            dest.relative_to(settings.workdir.resolve())
+        except ValueError:
+            raise ReconError(f"save_as path must be within workdir ({settings.workdir})")
+    else:
+        safe_name = Path(path).name
+        if not safe_name or safe_name in (".", ".."):
+            safe_name = "remote_file"
+        dest = (settings.workdir / "files" / safe_name).resolve()
+        try:
+            dest.relative_to(settings.workdir.resolve())
+        except ValueError:
+            raise ReconError(f"Target path escapes workdir: {path}")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
     n = client.download("/file", {"path": path}, dest)
     result: dict[str, Any] = {"remote_path": path, "local_path": str(dest), "bytes": n}
     if n <= max_inline_kb * 1024:
@@ -120,6 +154,7 @@ def read_remote_file(path: str, save_as: str = "", max_inline_kb: int = 64) -> d
             result["text"] = None
             result["hint"] = "二进制文件，未内联；见 local_path"
     return result
+
 
 
 @mcp.tool()
@@ -216,10 +251,12 @@ def list_hooks() -> dict:
 @mcp.tool()
 def unhook(package: str, hook_id: str = "") -> dict:
     """移除某包的 hook：不给 hook_id 则移除该包全部；给了则只移除该 id。"""
+    _validate_package_name(package)
     body = {"package": package}
     if hook_id:
         body["id"] = hook_id
     return client.post_json("/unhook", body)
+
 
 
 @mcp.tool()
@@ -448,7 +485,9 @@ def trace_java(package: str, class_name: str, method: str,
       hot_injected 会告诉你热注入了几个进程；为 0 说明目标没在跑（配置会在下次启动生效）。
       需设备装的是**支持热加的 tracer**（新版 APK）；旧版或 native 目标不响应热加，仍需 restart。
     """
+    _validate_package_name(package)
     capture: dict[str, Any] = {"this": this, "when": when, "stack": stack}
+
     if capture_args is not None:
         capture["args"] = capture_args
     else:
@@ -516,7 +555,9 @@ def patch_java(package: str, class_name: str, method: str,
     - hot=True: **免重启热加**——若目标进程在跑，增量合并配置并下发到运行中的进程（restart 强制置 False）。
     - 模板变量：value / args 字段支持 `${args[0]}`、`${ret.type}`、`${$v1}` 语法引用运行时数据。
     """
+    _validate_package_name(package)
     target: dict[str, Any] = {
+
         "kind": "java",
         "id": hook_id or f"{class_name.rsplit('.', 1)[-1]}_{method}",
         "class": class_name,
@@ -569,8 +610,10 @@ def dump_dex(package: str, symbol: str = "", offset: str = "", base_arg: int = 0
     symbol/offset 指定入口（用 ghidra_analyze 分析 /system/lib64/libart.so 定位）；
     base_arg/size_arg 为 dex 基址/长度所在参数下标。命中后用 list_dumps / read_remote_file 取回。
     """
+    _validate_package_name(package)
     body: dict[str, Any] = {"package": package, "lib": lib, "base_arg": base_arg,
                             "size_arg": size_arg, "restart": restart}
+
     if symbol:
         body["symbol"] = symbol
     if offset:
@@ -612,8 +655,14 @@ def list_artifacts(package_name: str = "") -> dict:
         }
 
     if package_name:
-        pkg_dir = base / package_name
+        _validate_package_name(package_name)
+        pkg_dir = (base / package_name).resolve()
+        try:
+            pkg_dir.relative_to(base.resolve())
+        except ValueError:
+            raise ReconError(f"Package path escapes workdir: {package_name}")
         if not pkg_dir.is_dir():
+
             return {"package": package_name, "exists": False,
                     "note": "工作目录下无该包产出物；用 pull_apk / pull_libs 先拉取"}
         return {"exists": True, **scan(pkg_dir)}

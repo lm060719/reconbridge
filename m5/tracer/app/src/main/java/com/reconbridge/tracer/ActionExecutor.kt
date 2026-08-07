@@ -16,39 +16,117 @@ import java.util.Base64
 
 private const val TAG = "ActionExecutor"
 
+private fun logD(msg: String) {
+    try { Log.d(TAG, msg) } catch (_: Throwable) { println("[$TAG] $msg") }
+}
+private fun logW(msg: String) {
+    try { Log.w(TAG, msg) } catch (_: Throwable) { println("[$TAG] $msg") }
+}
+private fun logE(msg: String, t: Throwable? = null) {
+    try {
+        if (t != null) Log.e(TAG, msg, t) else Log.e(TAG, msg)
+    } catch (_: Throwable) {
+        println("[$TAG] $msg ${t ?: ""}")
+    }
+}
+
+
 /**
  * Action 执行上下文：记录当前 Hook 调用的参数、返回值、this 对象、ClassLoader 以及跨 before/after 共享的局部寄存器变量。
  */
+internal fun getFieldAny(obj: Any, name: String): Any? {
+    var c: Class<*>? = obj.javaClass
+    while (c != null && c != Any::class.java) {
+        try {
+            val f = c.getDeclaredField(name)
+            f.isAccessible = true
+            return f.get(obj)
+        } catch (_: NoSuchFieldException) {
+            c = c.superclass
+        }
+    }
+    return null
+}
+
+internal fun setFieldAny(obj: Any, name: String, value: Any?): Boolean {
+    var c: Class<*>? = obj.javaClass
+    while (c != null && c != Any::class.java) {
+        try {
+            val f = c.getDeclaredField(name)
+            f.isAccessible = true
+            f.set(obj, value)
+            return true
+        } catch (_: NoSuchFieldException) {
+            c = c.superclass
+        }
+    }
+    return false
+}
+
 class ActionContext(
     val param: MethodHookParam,
     val classLoader: ClassLoader,
     val pkg: String,
 ) {
+    private var fallbackThis: Any? = null
+    private var fallbackArgs: Array<Any?>? = null
+    private var fallbackResult: Any? = null
+    private var hasFallbackResult = false
+
     @Suppress("UNCHECKED_CAST")
     val registers: HashMap<String, Any?> = run {
-        var regs = param.getObjectExtra("recon_registers") as? HashMap<String, Any?>
+        var regs: HashMap<String, Any?>? = null
+        try {
+            regs = param.getObjectExtra("recon_registers") as? HashMap<String, Any?>
+        } catch (_: Throwable) {}
         if (regs == null) {
             regs = HashMap()
-            param.setObjectExtra("recon_registers", regs)
+            try {
+                param.setObjectExtra("recon_registers", regs)
+            } catch (_: Throwable) {}
         }
         regs
     }
 
     var thisObject: Any?
-        get() = param.thisObject
+        get() = try {
+            val t = param.thisObject
+            if (t != null) t else fallbackThis
+        } catch (_: Throwable) {
+            fallbackThis
+        }
         set(value) {
-            param.thisObject = value
+            fallbackThis = value
+            try {
+                param.thisObject = value
+            } catch (_: Throwable) {}
         }
 
     val args: Array<Any?>?
-        get() = param.args
+        get() = try {
+            val a = param.args
+            if (a != null) a else fallbackArgs
+        } catch (_: Throwable) {
+            fallbackArgs
+        }
 
     var result: Any?
-        get() = param.result
+        get() = if (hasFallbackResult) {
+            fallbackResult
+        } else {
+            try { param.result } catch (_: Throwable) { fallbackResult }
+        }
         set(value) {
-            param.result = value
+            fallbackResult = value
+            hasFallbackResult = true
+            try {
+                param.setResult(value)
+            } catch (_: Throwable) {}
         }
 }
+
+
+
 
 object ActionExecutor {
 
@@ -67,9 +145,10 @@ object ActionExecutor {
         // 缺口 2: Action 级条件检查（if / condition）
         val actionCond = actionObj.opt("condition") ?: actionObj.opt("if")
         if (actionCond != null && !evaluateCondition(ctx, actionCond)) {
-            Log.d(TAG, "[${ctx.pkg}] Action 满足跳过条件 ($phase 阶段未触发)")
+            logD("[${ctx.pkg}] Action 满足跳过条件 ($phase 阶段未触发)")
             return
         }
+
 
         // 1. 按 phase 分离的 callback: action.before_actions / action.after_actions
         val phaseKey = if (phase == "before") "before_actions" else "after_actions"
@@ -122,7 +201,7 @@ object ActionExecutor {
             try {
                 executeStep(ctx, step)
             } catch (t: Throwable) {
-                Log.e(TAG, "[${ctx.pkg}] 执行 Step $i (${step.optString("action")}) 失败: $t", t)
+                logE("[${ctx.pkg}] 执行 Step $i (${step.optString("action")}) 失败: $t", t)
             }
         }
     }
@@ -139,9 +218,10 @@ object ActionExecutor {
             "eval_dex", "dex" -> stepEvalDex(ctx, step)
             "set_arg" -> stepSetArg(ctx, step)
             "set_result", "replace_return" -> stepSetResult(ctx, step)
-            else -> Log.w(TAG, "[${ctx.pkg}] 未知 action 类型: $type")
+            else -> logW("[${ctx.pkg}] 未知 action 类型: $type")
         }
     }
+
 
     // ------------------------------------------------------------------------
     // 缺口 2: 条件检查 (Conditional Execution)
@@ -275,9 +355,10 @@ object ActionExecutor {
         val sep = expr[lastDotOrBracket]
         val parentObj = resolvePath(ctx, parentExpr)
         if (parentObj == null || parentObj === MISSING) {
-            Log.w(TAG, "无法篡改路径 '$expr': 父节点 '$parentExpr' 未能解析到有效对象")
+            logW("无法篡改路径 '$expr': 父节点 '$parentExpr' 未能解析到有效对象")
             return false
         }
+
 
         val realParent = if (parentObj is TargetInstance) parentObj.instance else parentObj
         if (realParent == null) return false
@@ -325,9 +406,10 @@ object ActionExecutor {
             } catch (_: NoSuchFieldException) {
                 c = c.superclass
             } catch (t: Throwable) {
-                Log.e(TAG, "设置字段 $fieldName 失败 (${obj.javaClass.name}): $t")
+                logE("设置字段 $fieldName 失败 (${obj.javaClass.name}): $t")
                 return false
             }
+
         }
         val cap = fieldName.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
         for (m in obj.javaClass.methods) {

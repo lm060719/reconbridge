@@ -15,6 +15,14 @@ import java.io.OutputStream
 @Volatile
 internal var traceVerbose = false
 
+private fun logW(msg: String) {
+    try { Log.w("ReconTracer", msg) } catch (_: Throwable) { println("[ReconTracer] $msg") }
+}
+private fun logI(msg: String) {
+    try { Log.i("ReconTracer", msg) } catch (_: Throwable) { println("[ReconTracer] $msg") }
+}
+
+
 /**
  * 复刻 ReconBridge M3 的注入 IPC 协议（见 src/dynamic.cpp inject_client）。
  *
@@ -54,9 +62,10 @@ class InjectSocket private constructor(
                 output.flush()
             } catch (t: Throwable) {
                 alive = false
-                Log.w("ReconTracer", "声明可热加失败: $t")
+                logW("声明可热加失败: $t")
                 return
             }
+
         }
         Thread({
             try {
@@ -72,8 +81,9 @@ class InjectSocket private constructor(
                         try {
                             onReload(cfg)
                         } catch (t: Throwable) {
-                            Log.w("ReconTracer", "热加处理异常: $t")
+                            logW("热加处理异常: $t")
                         }
+
                     }
                     // 其它类型忽略（前向兼容）
                 }
@@ -94,12 +104,13 @@ class InjectSocket private constructor(
                 output.write(le32(payload.size))
                 output.write(payload)
                 output.flush()
-                if (traceVerbose) Log.i("ReconTracer", "sendEvent ok ${payload.size}B")
+                if (traceVerbose) logI("sendEvent ok ${payload.size}B")
             } catch (t: Throwable) {
                 alive = false
-                Log.w("ReconTracer", "sendEvent 失败，通道断开: $t")
+                logW("sendEvent 失败，通道断开: $t")
                 try { socket.close() } catch (_: Throwable) {}
             }
+
         }
     }
 

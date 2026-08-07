@@ -3,8 +3,8 @@
 import asyncio
 import json
 import os
-
 import httpx
+import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -24,11 +24,14 @@ def result_json(result) -> dict:
     return json.loads(result.content[0].text)
 
 
-async def main() -> None:
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("RECONBRIDGE_TOKEN"),
+    reason="RECONBRIDGE_TOKEN environment variable is required for mobile MCP E2E test"
+)
+async def test_mobile_mcp_e2e() -> None:
     url = os.environ.get("RECONBRIDGE_MOBILE_MCP_URL", "http://127.0.0.1:8790/mcp")
     token = os.environ.get("RECONBRIDGE_TOKEN", "")
-    if not token:
-        raise RuntimeError("RECONBRIDGE_TOKEN is required")
 
     async with httpx.AsyncClient(headers={"X-Token": token}, timeout=30) as http:
         async with streamable_http_client(url, http_client=http) as (read, write, _):
@@ -58,7 +61,7 @@ async def main() -> None:
                     "read_remote_file",
                     {
                         "path": "/system/etc/hosts",
-                        "save_as": "/data/adb/reconbridge/work/files/mobile-mcp-e2e-hosts",
+                        "save_as": "mobile-mcp-e2e-hosts",
                         "max_inline_kb": 0,
                     },
                 ))
@@ -86,11 +89,6 @@ async def main() -> None:
                     invalid = await invalid_http.get(artifact["download_url"])
                     assert invalid.status_code == 401
 
-                print(
-                    f"tools={len(names)} model={shell['stdout'].strip()} "
-                    f"artifact_bytes={artifact['bytes']} health=ok"
-                )
-
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    pytest.main([__file__])
