@@ -702,10 +702,24 @@ static json invoke_tool(const std::string& name, const json& a) {
     if (name == "ghidra_analyze") return run_toolpack("native-analyze", a);
     if (name == "hermes_decompile") return run_toolpack("hermes-decompile", a);
     if (name == "post_hook") {
-        if (!a.contains("config") || !a["config"].is_object()) {
+        json cfg;
+        if (a.contains("config")) {
+            if (a["config"].is_string()) {
+                try {
+                    cfg = json::parse(a["config"].get<std::string>());
+                } catch (...) {
+                    return {{"ok", false}, {"error", "Invalid argument: 'config' is a string but failed to parse as JSON."}};
+                }
+            } else if (a["config"].is_object()) {
+                cfg = a["config"];
+            }
+        } else if (a.contains("package") && a.contains("targets")) {
+            cfg = a;
+        }
+        if (!cfg.is_object() || cfg.empty()) {
             return {{"ok", false}, {"error", "Invalid argument: 'config' must be a JSON object (dict)."}};
         }
-        return http_post("/hook", a["config"]);
+        return http_post("/hook", cfg);
     }
     if (name == "list_hooks") return http_get("/hooks");
     if (name == "unhook") {

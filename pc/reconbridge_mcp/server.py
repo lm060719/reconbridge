@@ -229,17 +229,26 @@ def hermes_decompile(bundle_path: str, output_dir: str = "") -> dict:
 # =====================================================================
 
 @mcp.tool()
-def post_hook(config: dict) -> dict:
+def post_hook(config: dict | str) -> dict:
     """下发 hook 配置（M3）。config 见 m3/HOOK_PROTOCOL.md：
     {package, restart?, targets:[{id,lib,symbol|offset,capture:{args,ret,backtrace,dump},action}]}。
     注入在目标下次启动时生效（restart:true 会 force-stop 目标触发重注入）。
     """
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except Exception as e:
+            return {
+                "ok": False,
+                "error": f"Invalid argument: 'config' is a string but failed to parse as JSON: {e}"
+            }
     if not isinstance(config, dict):
         return {
             "ok": False,
             "error": f"Invalid argument: 'config' must be a JSON object (dict), got {type(config).__name__} ({repr(config)})"
         }
     return client.post_json("/hook", config)
+
 
 
 @mcp.tool()
