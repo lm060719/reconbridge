@@ -169,9 +169,17 @@ def record_search(
             )
             add_edge(graph, qid, mid, "matched")
 
+            matched_values: list[str] = []
             matched_string = result.get("matched_string")
             if matched_string:
-                sid = string_node(graph, str(matched_string))
+                matched_values.append(str(matched_string))
+            for value in result.get("matched_strings") or []:
+                value = str(value)
+                if value and value not in matched_values:
+                    matched_values.append(value)
+
+            for matched_value in matched_values[:12]:
+                sid = string_node(graph, matched_value)
                 add_edge(graph, qid, sid, "led_to")
                 add_edge(graph, sid, mid, "referenced_by")
 
