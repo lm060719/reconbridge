@@ -4405,13 +4405,31 @@ def post_hook(config: dict | str) -> dict:
 
 @mcp.tool()
 def list_hooks() -> dict:
-    """列出当前已下发的 hook 配置。"""
+    """列出当前磁盘上的期望 hook 配置。"""
     return client.get_json("/hooks")
 
 
 @mcp.tool()
+def runtime_hook_status(package: str = "") -> dict:
+    """查看运行中 Tracer 的 HookRegistry 真实状态。
+
+    与 list_hooks 不同，这里返回的是目标进程当前实际已安装的 Java Hook、
+    live reconcile 能力、进程名和 Hook 成员数。package 为空时列出全部连接进程。
+    """
+    params = None
+    if package:
+        _validate_package_name(package)
+        params = {"package": package}
+    return client.get_json("/runtime_status", params=params)
+
+
+@mcp.tool()
 def unhook(package: str, hook_id: str = "") -> dict:
-    """移除某包的 hook：不给 hook_id 则移除该包全部；给了则只移除该 id。"""
+    """移除某包 hook；运行中的 M5 Tracer 会立即 live unhook。
+
+    不给 hook_id 则清空该包全部期望 Hook；给了则只移除该 id。
+    对支持 HookRegistry reconcile 的运行进程会立即调用 LSPosed Unhook，无需 force-stop。
+    """
     _validate_package_name(package)
     body = {"package": package}
     if hook_id:
