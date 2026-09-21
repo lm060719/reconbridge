@@ -479,6 +479,84 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
 
 
 @mcp.tool()
+def inspect_method(
+    session_id: str,
+    class_name: str,
+    method: str,
+    descriptor: str = "",
+    relation_limit: int = 20,
+    include_source: bool = True,
+    auto_prepare_source: bool = True,
+) -> dict:
+    """展开一个已知 Java 方法：调用者、被调用方法、关联字符串、同类字段和 JADX 源码上下文。
+
+    include_source=True 且当前没有 JADX 产物时，默认自动反编译一次主 APK；之后会复用已有源码。
+    """
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "当前会话没有 APK，无法展开方法上下文",
+        }
+
+    index_result = external.ensure_dex_index(apk)
+    source_prepare: dict[str, Any] | None = None
+
+    if include_source and auto_prepare_source and not state["artifacts"].get("jadx_dirs"):
+        source_prepare = external.decompile_apk(apk)
+        state = investigation.load(session_id, refresh=True)
+
+    context = investigation.method_context(
+        session_id,
+        class_name,
+        method,
+        descriptor=descriptor,
+        relation_limit=max(1, min(int(relation_limit), 100)),
+        include_source=include_source,
+    )
+    investigation.record_method_context_evidence(
+        session_id,
+        candidate.normalize_class_name(class_name),
+        method,
+        descriptor,
+        context,
+    )
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "method_context",
+            "class": candidate.normalize_class_name(class_name),
+            "method": method,
+            "descriptor": descriptor,
+            "callers": len((context.get("relations") or {}).get("callers", [])),
+            "callees": len((context.get("relations") or {}).get("callees", [])),
+            "source": bool((context.get("source") or {}).get("available")),
+        },
+    )
+
+    return {
+        "ok": bool((context.get("relations") or {}).get("ok")) or bool((context.get("source") or {}).get("available")),
+        "session_id": session_id,
+        "package": state["package"],
+        "index": {
+            "ok": index_result.get("ok"),
+            "reused": index_result.get("reused"),
+            "built": index_result.get("built"),
+            "error": index_result.get("error"),
+        },
+        "source_prepare": source_prepare,
+        **context,
+    }
+
+
+@mcp.tool()
 def investigate(
     session_id: str,
     goal: str,
@@ -490,11 +568,15 @@ def investigate(
     restart: bool = True,
     stack: bool = False,
     include_events: bool = False,
+    include_source: bool = True,
+    auto_prepare_source: bool = True,
+    relation_limit: int = 20,
 ) -> dict:
-    """执行一轮自动调查：目标解析 → DEX 索引 → 多词候选排序 → 可选批量运行时验证 → 证据汇总。
+    """执行一轮自动调查：目标解析 → DEX 索引 → 多词候选排序 → 可选运行时验证 → 方法上下文 → 证据汇总。
 
     goal 可以是自然语言，例如“找到会员状态判断方法”或“定位点击「立即开通」后走的方法”。
-    默认会做运行时验证；如果设备/Tracer 不可用，仍保留静态候选并明确标记为未验证。
+    默认会做运行时验证，并在主候选确定后自动展开 callers/callees 与 JADX 源码上下文。
+    如果设备/Tracer 不可用，仍保留静态候选和源码/调用关系结果。
     """
     goal = goal.strip()
     if not goal:
@@ -650,6 +732,64 @@ def investigate(
         primary = static_top[0]
         next_action = "需要确认真实执行路径时，调用 verify_candidates 或再次 investigate(verify_runtime=true)"
 
+    method_ctx: dict[str, Any] | None = None
+    source_prepare: dict[str, Any] | None = None
+    if include_source and auto_prepare_source:
+        refreshed = investigation.load(session_id, refresh=True)
+        if not refreshed["artifacts"].get("jadx_dirs"):
+            source_prepare = external.decompile_apk(apk)
+            refreshed = investigation.load(session_id, refresh=True)
+            stages.append(
+                {
+                    "stage": "source_prepare",
+                    "ok": bool(source_prepare.get("ok")) if isinstance(source_prepare, dict) else False,
+                    "reused": False,
+                    "error": source_prepare.get("error") if isinstance(source_prepare, dict) else None,
+                }
+            )
+
+    try:
+        method_ctx = investigation.method_context(
+            session_id,
+            str(primary.get("class", "")),
+            str(primary.get("method", "")),
+            descriptor=str(primary.get("descriptor", "")),
+            relation_limit=max(1, min(int(relation_limit), 100)),
+            include_source=include_source,
+        )
+        investigation.record_method_context_evidence(
+            session_id,
+            candidate.normalize_class_name(str(primary.get("class", ""))),
+            str(primary.get("method", "")),
+            str(primary.get("descriptor", "")),
+            method_ctx,
+        )
+        relations = method_ctx.get("relations") or {}
+        source_info = method_ctx.get("source") or {}
+        stages.append(
+            {
+                "stage": "method_context",
+                "ok": bool(relations.get("ok")) or bool(source_info.get("available")),
+                "callers": len(relations.get("callers", [])),
+                "callees": len(relations.get("callees", [])),
+                "strings": len(relations.get("strings", [])),
+                "source": bool(source_info.get("available")),
+                "error": relations.get("error"),
+            }
+        )
+    except Exception as exc:
+        method_ctx = {
+            "relations": {"ok": False, "error": str(exc)},
+            "source": {"available": False, "reason": "context_failed"},
+        }
+        stages.append(
+            {
+                "stage": "method_context",
+                "ok": False,
+                "error": str(exc),
+            }
+        )
+
     focus = (
         (primary.get("matched_queries") or [None])[0]
         or planned_queries[0]
@@ -691,6 +831,7 @@ def investigate(
         "top_candidates": compact_static,
         "evidence_summary": explanation.get("summary", ""),
         "evidence_focus": explanation.get("focus", focus),
+        "method_context": method_ctx,
         "stages": stages,
         "next_action": next_action,
     }
