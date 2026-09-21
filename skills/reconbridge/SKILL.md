@@ -41,6 +41,8 @@ description: >-
 - `inspect_method`：已知具体类/方法时，直接展开一层 callers、callees、关联字符串、同类字段和 JADX 方法体；没有源码时默认自动准备一次。
 - `inspect_call_graph`：递归向上/向下追调用链，默认各 2 层；返回完整 nodes/edges 和“入口 → 目标 → 下游”代表路径，并叠加已有 runtime 命中覆盖。
 - `verify_call_path`：对一条代表路径上的方法统一挂 before Hook；触发一次目标行为后按 ts/seq/tid 还原真实顺序，返回 node/edge coverage、完整路径是否出现和相邻入口 delta_ms。
+- `capture_call_graph_scenario`：围绕同一目标方法对整张局部调用图挂同一组 before Hook，采集一次命名场景；默认不展开框架节点，结果独立存盘，不塞进主会话 JSON。
+- `diff_call_graph_scenarios`：比较两个同图同 Hook 集合的场景，输出公共前缀、首次分叉、仅 A/仅 B 节点与边，以及共享边耗时差。
 - `rank_candidates`：需要手工控制时，综合字符串 xref、方法名/类名和 Evidence Graph 对候选方法做可解释排序。
 - `verify_candidates`：一次性给前 N 个候选装观测 Hook，共享一个采集窗口；触发一次行为即可知道谁真实命中。
 - `trace_target`：已知具体方法时的单方法精细 trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook；命中会自动写入证据图。
@@ -59,7 +61,7 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-默认：`open_target` → `investigate(goal=...)` → 读取 `call_graph.representative_paths` → `verify_call_path`。路径验证使用方法入口 before 事件，并要求静态相邻边在同一 tid 按序出现，避免 after 逆序和多线程交错误判。只有要查看完整静态图或调整深度时才用 `inspect_call_graph`；换候选/看源码用 `inspect_method`；需要抓具体参数/字段时再用 `trace_target`。native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `investigate(goal=...)` → 读取 `call_graph.representative_paths` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，在同一目标方法上分别调用两次 `capture_call_graph_scenario`，然后 `diff_call_graph_scenarios`；两次会校验静态图和 Hook 集合指纹，避免采集范围变化造成假分叉。只有要查看完整静态图或调整深度时才用 `inspect_call_graph`；换候选/看源码用 `inspect_method`；需要抓具体参数/字段时再用 `trace_target`。native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
