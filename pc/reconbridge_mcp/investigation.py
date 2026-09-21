@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .dex_index import index_status
+from .dex_index import index_status, method_relations
 from . import evidence
 from .settings import settings
 
@@ -222,6 +222,188 @@ def explain_evidence_graph(
     state = load(session_id)
     graph = state.setdefault("evidence_graph", evidence.new_graph())
     return evidence.explain(graph, focus=focus, depth=depth, limit=limit)
+
+
+def _normalize_class_name(class_name: str) -> str:
+    value = (class_name or "").strip()
+    if value.startswith("L") and value.endswith(";"):
+        value = value[1:-1]
+    return value.replace("/", ".")
+
+
+def source_method_context(
+    session_id: str,
+    class_name: str,
+    method_name: str,
+    context_lines: int = 8,
+    max_chars: int = 12000,
+) -> dict[str, Any]:
+    """从已有 JADX 产物里定位方法声明并返回方法体附近源码。"""
+    state = load(session_id, refresh=True)
+    jadx_dirs = state["artifacts"].get("jadx_dirs", [])
+    if not jadx_dirs:
+        return {
+            "available": False,
+            "reason": "jadx_not_ready",
+            "hint": "调用 prepare_target 生成 JADX 源码",
+        }
+
+    normalized = _normalize_class_name(class_name)
+    outer = normalized.split("$", 1)[0]
+    parts = outer.split(".")
+    simple = parts[-1] if parts else outer
+    rel = Path(*parts) if parts else Path(simple)
+
+    candidates: list[Path] = []
+    for jadx_dir in jadx_dirs:
+        root = Path(jadx_dir) / "sources"
+        if not root.is_dir():
+            root = Path(jadx_dir)
+
+        for suffix in (".java", ".kt"):
+            direct = root / rel.with_suffix(suffix)
+            if direct.is_file() and direct not in candidates:
+                candidates.append(direct)
+
+        if not candidates:
+            for suffix in (".java", ".kt"):
+                for path in root.rglob(simple + suffix):
+                    if path.is_file():
+                        candidates.append(path)
+                        if len(candidates) >= 8:
+                            break
+                if candidates:
+                    break
+
+    if not candidates:
+        return {
+            "available": False,
+            "reason": "source_file_not_found",
+            "class": normalized,
+        }
+
+    path = candidates[0]
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return {
+            "available": False,
+            "reason": "source_read_failed",
+            "error": str(exc),
+            "path": str(path),
+        }
+
+    target_name = simple if method_name == "<init>" else method_name
+    pattern = re.compile(rf"(?<![\w$.]){re.escape(target_name)}\s*\(")
+    modifier_re = re.compile(
+        r"\b(public|private|protected|static|final|synchronized|native|abstract|override|fun)\b"
+    )
+    best_index = -1
+    best_score = -1
+
+    for index, line in enumerate(lines):
+        match = pattern.search(line)
+        if not match:
+            continue
+        stripped = line.strip()
+        score = 0
+        if modifier_re.search(stripped):
+            score += 5
+        if "{" in stripped:
+            score += 3
+        prefix = stripped[: match.start()]
+        if "." not in prefix:
+            score += 2
+        if stripped.endswith("{"):
+            score += 1
+        if stripped.startswith("//"):
+            score -= 5
+        if score > best_score:
+            best_score = score
+            best_index = index
+
+    if best_index < 0:
+        return {
+            "available": False,
+            "reason": "method_declaration_not_found",
+            "path": str(path),
+            "class": normalized,
+            "method": method_name,
+        }
+
+    # 尝试按花括号找完整方法体；遇到反编译异常时退回固定上下文窗口。
+    body_end = min(len(lines) - 1, best_index + max(20, context_lines * 4))
+    depth = 0
+    seen_open = False
+    for index in range(best_index, min(len(lines), best_index + 220)):
+        line = lines[index]
+        opens = line.count("{")
+        closes = line.count("}")
+        if opens:
+            seen_open = True
+        if seen_open:
+            depth += opens - closes
+            if depth <= 0:
+                body_end = index
+                break
+
+    start = max(0, best_index - max(2, context_lines // 2))
+    end = min(len(lines) - 1, body_end + max(2, context_lines // 2))
+    numbered = "\n".join(
+        f"{line_no + 1:>6} | {lines[line_no]}"
+        for line_no in range(start, end + 1)
+    )
+    truncated = len(numbered) > max_chars
+    if truncated:
+        numbered = numbered[:max_chars] + "\n... <源码片段已截断>"
+
+    return {
+        "available": True,
+        "path": str(path),
+        "class": normalized,
+        "method": method_name,
+        "declaration_line": best_index + 1,
+        "start_line": start + 1,
+        "end_line": end + 1,
+        "truncated": truncated,
+        "text": numbered,
+    }
+
+
+def method_context(
+    session_id: str,
+    class_name: str,
+    method_name: str,
+    descriptor: str = "",
+    relation_limit: int = 20,
+    include_source: bool = True,
+) -> dict[str, Any]:
+    """聚合 DEX 调用关系与 JADX 源码上下文。"""
+    state = load(session_id, refresh=True)
+    apk = state.get("primary_apk", "")
+    relations = (
+        method_relations(
+            apk,
+            class_name,
+            method_name,
+            descriptor=descriptor,
+            limit=relation_limit,
+        )
+        if apk
+        else {"ok": False, "error": "当前会话没有 APK"}
+    )
+    source = (
+        source_method_context(session_id, class_name, method_name)
+        if include_source
+        else {"available": False, "reason": "disabled"}
+    )
+    return {
+        "class": _normalize_class_name(class_name),
+        "method": method_name,
+        "descriptor": descriptor,
+        "relations": relations,
+        "source": source,
+    }
 
 
 def source_search(session_id: str, query: str, limit: int = 20) -> dict[str, Any]:
