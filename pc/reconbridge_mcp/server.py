@@ -4411,10 +4411,11 @@ def list_hooks() -> dict:
 
 @mcp.tool()
 def runtime_hook_status(package: str = "") -> dict:
-    """查看运行中 Tracer 的 HookRegistry 真实状态。
+    """查看运行中 Tracer 的 HookRegistry / ClassLoader 真实状态。
 
-    与 list_hooks 不同，这里返回的是目标进程当前实际已安装的 Java Hook、
-    live reconcile 能力、进程名和 Hook 成员数。package 为空时列出全部连接进程。
+    与 list_hooks 不同，这里返回目标进程当前实际 installed / pending Java Hook、
+    live reconcile 能力、进程/pid、动态 ClassLoader 注册表与 watcher 状态。
+    pending_hooks 会显示等待的类名、重试次数和最后错误；package 为空时列出全部连接进程。
     """
     params = None
     if package:
