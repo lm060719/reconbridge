@@ -245,6 +245,7 @@ struct InjectConn {
     std::string base_pkg;
     std::string process_name;
     std::mutex write_mutex;
+    bool alive = true;
     bool reload_capable = false;
     json runtime_status = nullptr;
     int64_t status_updated_at = 0;
@@ -331,6 +332,8 @@ static int hot_reload(const std::string& base_pkg, const std::string& cfg) {
 
     for (const auto& c : targets) {
         std::lock_guard<std::mutex> write_lk(c->write_mutex);
+        if (!c->alive)
+            continue;
         if (sock_write_full(c->fd, hdr, 5) &&
             (l == 0 || sock_write_full(c->fd, cfg.data(), l))) {
             n++;
@@ -412,8 +415,13 @@ static void inject_client(int fd) {
             }
         }
     }
-    reg_remove(conn);  // 断开：移出连接表（在 close 前，避免热加写已关闭 fd）
-    close(fd);
+    reg_remove(conn);
+    {
+        // 和 hot_reload 使用同一把锁，避免并发配置写撞上 close / fd 复用。
+        std::lock_guard<std::mutex> write_lk(conn->write_mutex);
+        conn->alive = false;
+        close(fd);
+    }
 }
 
 static void inject_server() {
