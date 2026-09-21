@@ -484,6 +484,31 @@ static const json& tools() {
              schema({{"package", prop("string")}, {"actions", prop("array")},
                      {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
                     {"package", "actions"})),
+        tool("runtime_program_install", "安装一个命名 Runtime Program。",
+             schema({{"package", prop("string")}, {"manifest", prop("object")},
+                     {"enable", prop("boolean", true)}, {"restart", prop("boolean", false)},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "manifest"})),
+        tool("runtime_program_replace", "替换 Runtime Program 并保留 rollback 历史。",
+             schema({{"package", prop("string")}, {"manifest", prop("object")},
+                     {"enable", nullable("boolean")}, {"expected_revision", prop("integer", 0)},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "manifest"})),
+        tool("runtime_program_enable", "启用已安装 Runtime Program。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "program_id"})),
+        tool("runtime_program_disable", "禁用 Runtime Program 并执行 state_cleanup。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "program_id"})),
+        tool("runtime_program_rollback", "回滚 Runtime Program 到上一份 manifest。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "program_id"})),
+        tool("runtime_program_status", "查看 Runtime Program 版本、启用状态和 rollback 深度。",
+             schema({{"package", prop("string")}, {"program_id", prop("string", "")}},
+                    {"package"})),
         tool("unhook", "移除某包全部 hook 或指定 hook id；运行中 M5 会立即 live unhook。",
              schema({{"package", prop("string")}, {"hook_id", prop("string", "")}}, {"package"})),
         tool("collect_events", "收集 hook 命中事件，支持最近事件补捞与早停。",
@@ -873,6 +898,59 @@ static json invoke_tool(const std::string& name, const json& a) {
         const std::string process = a.value("process", "");
         if (!process.empty()) body["process"] = process;
         return http_post("/runtime_command", body);
+    }
+    if (
+        name == "runtime_program_install" ||
+        name == "runtime_program_replace"
+    ) {
+        json body = {
+            {"package", a.value("package", "")},
+            {"manifest", a.value("manifest", json::object())},
+            {"mode", name == "runtime_program_install"
+                ? "install"
+                : "replace"},
+            {"restart", a.value("restart", false)},
+            {"timeout_ms", a.value("timeout_ms", 3000)}
+        };
+        if (a.contains("enable") && !a["enable"].is_null())
+            body["enable"] = a["enable"];
+        if (name == "runtime_program_install" &&
+            !body.contains("enable"))
+            body["enable"] = true;
+        const int expected = a.value("expected_revision", 0);
+        if (expected > 0)
+            body["expected_revision"] = expected;
+        return http_post("/runtime_program/install", body);
+    }
+    if (
+        name == "runtime_program_enable" ||
+        name == "runtime_program_disable" ||
+        name == "runtime_program_rollback"
+    ) {
+        json body = {
+            {"package", a.value("package", "")},
+            {"id", a.value("program_id", "")},
+            {"restart", a.value("restart", false)},
+            {"timeout_ms", a.value("timeout_ms", 3000)}
+        };
+        std::string endpoint;
+        if (name == "runtime_program_enable")
+            endpoint = "/runtime_program/enable";
+        else if (name == "runtime_program_disable")
+            endpoint = "/runtime_program/disable";
+        else
+            endpoint = "/runtime_program/rollback";
+        return http_post(endpoint, body);
+    }
+    if (name == "runtime_program_status") {
+        std::map<std::string, std::string> params = {
+            {"package", a.value("package", "")}
+        };
+        const std::string program_id =
+            a.value("program_id", "");
+        if (!program_id.empty())
+            params["id"] = program_id;
+        return http_get("/runtime_programs", params);
     }
     if (name == "unhook") {
         json body = {{"package", a.value("package", "")}};
