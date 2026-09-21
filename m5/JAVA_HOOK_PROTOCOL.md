@@ -234,6 +234,144 @@ State 的远程 scope 支持 `process/package/hook`。远程命令**不支持 th
 
 Runtime Command 不修改 `hooks/<pkg>.json`，也不创建临时 Hook，因此适合交互式调试、状态开关、远程触发 Event Bus 和当前 Activity 操作。Tracer 每次命令后会重新发布 runtime status，便于 `runtime_hook_status` 看到最新 State/Event/Context 状态。
 
+## Runtime Program / Module Manifest（Runtime Phase 6）
+
+Phase 6 把一组 Java/Runtime targets、State 初始化和模块元数据打包成一个**命名 Runtime Program**。Program 持久化在设备端 daemon：
+
+```text
+/data/adb/reconbridge/runtime_programs/<package>/<program_id>.json
+```
+
+manifest 示例：
+
+```jsonc
+{
+  "id": "vip_debug",
+  "name": "VIP 调试模块",
+  "version": "1.0.0",
+  "description": "把会员状态和页面行为组合成一个可启停 Runtime Program",
+
+  "targets": [
+    {
+      "id": "vip_source",
+      "kind": "java",
+      "class": "com.target.UserRepo",
+      "method": "refreshVip",
+      "capture": {"when": "none"},
+      "action": {
+        "after_actions": [
+          {
+            "action": "emit_event",
+            "name": "vip.changed",
+            "payload": {"vip": "${ret}"}
+          }
+        ]
+      }
+    },
+    {
+      "id": "vip_listener",
+      "kind": "runtime",
+      "on_event": {
+        "name": "vip.changed",
+        "actions": [
+          {
+            "action": "set_state",
+            "scope": "process",
+            "key": "last_vip",
+            "value": "${event.vip}"
+          }
+        ]
+      }
+    }
+  ],
+
+  "state_init": [
+    {
+      "scope": "process",
+      "key": "vip_program_enabled",
+      "value": true
+    }
+  ],
+
+  "state_cleanup": [
+    {
+      "scope": "process",
+      "key": "vip_program_enabled"
+    }
+  ]
+}
+```
+
+对应 MCP：
+
+```text
+runtime_program_install(package, manifest)
+runtime_program_replace(package, manifest, expected_revision=...)
+runtime_program_enable(package, program_id)
+runtime_program_disable(package, program_id)
+runtime_program_rollback(package, program_id)
+runtime_program_status(package, program_id="")
+```
+
+### Target 命名空间
+
+manifest 内的 target id 是 Program 局部 id。daemon 物化到 HookRegistry 时自动改成：
+
+```text
+rp:<program_id>:<local_target_id>
+```
+
+例如：
+
+```text
+vip_source
+→ rp:vip_debug:vip_source
+```
+
+因此不同 Program 都可以拥有 `id:"listener"`，不会互相覆盖。物化 target 还带 `__reconbridge_program / __reconbridge_local_id / __reconbridge_program_revision` 元数据，便于状态与排错。
+
+普通 `post_hook/unhook` 只管理手工 Hook；已启用 Program targets 会在最终期望配置中自动重新加入。直接对 `rp:<program>:<target>` 调 `unhook` 会被拒绝，应该使用 `runtime_program_disable` 或 `runtime_program_replace`。
+
+### state_init / state_cleanup
+
+Phase 6 的 Program State 声明目前支持 `process/package` scope。
+
+`state_init` 有两层保证：
+
+1. Program install/enable/replace/rollback 后，如果目标 Runtime 在线，daemon 立即通过 Phase 5 Runtime Command 执行 `state_set`；
+2. daemon 还会自动生成一个 Program 私有 bootstrap target，在未来进程启动时监听 `lifecycle.application_attached` 再执行同一批初始化。
+
+因此 `state_init` 不会只在安装当下有效。对应 bootstrap id：
+
+```text
+rp:<program_id>:__bootstrap
+```
+
+`state_cleanup` 在 disable/replace/rollback 时对在线 Runtime 执行 `state_remove`。进程未在线时不会报 Program 安装失败；持久化 manifest 和未来启动 bootstrap 仍然有效。
+
+### revision / replace / rollback
+
+每个 Program 有单调递增的 `revision`。同 id 更新使用 `runtime_program_replace`，旧 manifest 会进入最多 **5 层**历史。
+
+```text
+revision 1   install v1
+revision 2   replace v2
+revision 3   replace v3
+revision 4   rollback → 恢复 v2 manifest
+```
+
+rollback 会消费最近一层历史，但 revision 继续递增，不会倒退。这样 PC/手机两端可以用 `expected_revision` 做乐观并发检查，避免覆盖另一端刚写入的 Program。
+
+`runtime_program_status` 会返回：
+- 当前 revision / enabled；
+- name / version / description；
+- target/state_init/state_cleanup 数量；
+- history_depth；
+- effective_target_ids；
+- 原始 manifest。
+
+Program disable 只移除该 Program 的物化 targets，并保留 manifest/history，所以之后可以无重装再次 enable。
+
 ## Runtime State + Event Bus（Runtime Phase 3）
 
 Phase 3 让不同 Hook 不再彼此独立。每个目标 App **进程**拥有一份 `RuntimeStateStore` 和 `RuntimeEventBus`，Java Hook、动态 ClassLoader 后补装 Hook、以及纯事件 target 都共享它们。
