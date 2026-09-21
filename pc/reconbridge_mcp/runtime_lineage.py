@@ -323,6 +323,27 @@ def analyze_capture(
             best_tid = tid
             best_sequence = sequence
 
+    # 值比较优先限定到主业务线程，避免后台同名方法调用把稳定值冲成 unstable。
+    for observation in observations:
+        hook_id = str(observation.get("hook_id", ""))
+        hook_events = events_by_hook.get(hook_id, [])
+        observation["returns_all_threads"] = observation.get("returns")
+        if best_tid is not None:
+            primary_events = [
+                event
+                for event in hook_events
+                if event.get("tid") == best_tid
+            ]
+            if primary_events:
+                observation["returns"] = _summarize_returns(primary_events)
+                observation["primary_thread_hit_count"] = len(
+                    [
+                        event
+                        for event in primary_events
+                        if str(event.get("phase", "")) == "after"
+                    ]
+                )
+
     timeline: list[dict[str, Any]] = []
     previous_ts: float | None = None
     for event in best_sequence:
@@ -350,8 +371,15 @@ def analyze_capture(
             "",
         )
         if writer_hook_id:
+            writer_events = events_by_hook.get(writer_hook_id, [])
+            if best_tid is not None:
+                writer_events = [
+                    event
+                    for event in writer_events
+                    if event.get("tid") == best_tid
+                ]
             writer_change = writer_probe.analyze_writer_events(
-                events_by_hook.get(writer_hook_id, []),
+                writer_events,
                 str(field.get("field", "")),
             )
 
