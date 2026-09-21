@@ -63,7 +63,7 @@ internal fun setFieldAny(obj: Any, name: String, value: Any?): Boolean {
     return false
 }
 
-class ActionContext(
+internal class ActionContext(
     val param: MethodHookParam?,
     val classLoader: ClassLoader,
     val pkg: String,
@@ -160,7 +160,7 @@ class ActionContext(
 
 
 
-object ActionExecutor {
+internal object ActionExecutor {
 
     val MISSING = Any()
 
