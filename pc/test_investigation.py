@@ -185,6 +185,54 @@ def test_condition_probe_is_stored_inside_call_scenario(tmp_path, monkeypatch):
     assert listed[0]["condition_probe_count"] == 1
 
 
+def test_runtime_lineage_capture_is_stored_in_scenario(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
+
+    pkg = "com.example.target"
+    apk_dir = tmp_path / pkg / "apk"
+    apk_dir.mkdir(parents=True)
+    (apk_dir / "base.apk").write_bytes(b"fake-apk")
+
+    state = investigation.create(pkg)
+    session_id = state["session_id"]
+    investigation.save_call_scenario(
+        session_id,
+        "会员",
+        {
+            "graph_fingerprint": "graph-1",
+            "hook_fingerprint": "hooks-1",
+            "analysis": {"event_count": 2},
+        },
+    )
+
+    saved = investigation.save_runtime_lineage_capture(
+        session_id,
+        "会员",
+        "lineage-1",
+        {
+            "scenario": "会员",
+            "lineage_fingerprint": "lineage-1",
+            "analysis": {
+                "method_coverage": 1.0,
+                "ordered_coverage": 1.0,
+            },
+        },
+    )
+
+    assert saved["capture_count"] == 1
+    loaded = investigation.load_runtime_lineage_capture(
+        session_id,
+        "会员",
+        "lineage-1",
+    )
+    assert loaded is not None
+    assert loaded["analysis"]["method_coverage"] == 1.0
+
+    listed = investigation.list_call_scenarios(session_id)
+    assert listed[0]["runtime_lineage_capture_count"] == 1
+
+
 def test_call_graph_scenario_rejects_unsafe_name(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workdir", tmp_path)
     monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
