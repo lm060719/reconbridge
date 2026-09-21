@@ -167,6 +167,12 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
             investigation.add_discovery(session_id, {
                 "type": "search", "query": query, "strategy": source["strategy"], "count": source["count"]
             })
+            investigation.record_search_evidence(
+                session_id,
+                query,
+                source["strategy"],
+                source.get("results", []),
+            )
             return {"ok": True, "session_id": session_id, "package": package, **source}
     elif kind == "source":
         return {
@@ -211,6 +217,12 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
         investigation.add_discovery(session_id, {
             "type": "search", "query": query, "strategy": strategy, "count": result.get("count", 0)
         })
+        investigation.record_search_evidence(
+            session_id,
+            query,
+            strategy,
+            result.get("results", []),
+        )
     return {
         **result,
         "session_id": session_id,
@@ -278,6 +290,12 @@ def trace_target(session_id: str, class_name: str, method: str,
             "method": method,
             "hits": result.get("count", 0),
         })
+        investigation.record_trace_evidence(
+            session_id,
+            class_name,
+            method,
+            result.get("events", []),
+        )
         result.update({
             "session_id": session_id,
             "package": state["package"],
@@ -291,6 +309,55 @@ def trace_target(session_id: str, class_name: str, method: str,
                 unhook(state["package"], hook_id)
             finally:
                 investigation.remove_temporary_hook(session_id, hook_id)
+
+
+@mcp.tool()
+def evidence_graph(session_id: str, focus: str = "", depth: int = 2, limit: int = 100) -> dict:
+    """查看分析会话证据图。
+
+    focus 为空时返回图摘要与一部分节点；指定字符串、类名、方法名或字段名后，
+    返回该节点附近最多 depth 层的关联证据。适合继续调查前快速恢复上下文。
+    """
+    try:
+        graph = investigation.evidence_subgraph(
+            session_id,
+            focus=focus,
+            depth=depth,
+            limit=limit,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+    return {
+        "ok": True,
+        "session_id": session_id,
+        **graph,
+    }
+
+
+@mcp.tool()
+def explain_evidence(session_id: str, focus: str, depth: int = 3, limit: int = 80) -> dict:
+    """解释某个关键词/类/方法/字段当前已有的证据链。
+
+    返回关联字符串、方法、字段、运行时确认情况和对应边，不替用户做最终安全结论，
+    但能直接回答“我们为什么怀疑/确认这里”。
+    """
+    focus = focus.strip()
+    if not focus:
+        return {"ok": False, "error": "focus 不能为空", "session_id": session_id}
+    try:
+        result = investigation.explain_evidence_graph(
+            session_id,
+            focus=focus,
+            depth=depth,
+            limit=limit,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+    return {
+        "ok": True,
+        "session_id": session_id,
+        **result,
+    }
 
 
 @mcp.tool()
