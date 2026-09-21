@@ -1194,6 +1194,88 @@ def save_runtime_lineage_capture(
     }
 
 
+def save_root_cause_hypothesis_capture(
+    session_id: str,
+    scenario_name: str,
+    hypothesis_key: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """把压缩后的根因假设实验结果写回对应场景文件。"""
+    load(session_id)
+    path = _call_scenario_path(session_id, scenario_name)
+    if not path.exists():
+        raise FileNotFoundError(f"call graph scenario not found: {scenario_name}")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    captures = data.setdefault("root_cause_hypothesis_captures", {})
+    captures[hypothesis_key] = {
+        **payload,
+        "saved_at": _now_ms(),
+    }
+    data["root_cause_hypothesis_updated_at"] = _now_ms()
+
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return {
+        "scenario": scenario_name,
+        "hypothesis_key": hypothesis_key,
+        "path": str(path),
+        "capture_count": len(captures),
+    }
+
+
+def load_root_cause_hypothesis_capture(
+    session_id: str,
+    scenario_name: str,
+    hypothesis_key: str,
+) -> dict[str, Any] | None:
+    data = load_call_scenario(session_id, scenario_name)
+    capture = (data.get("root_cause_hypothesis_captures") or {}).get(
+        hypothesis_key
+    )
+    return dict(capture) if isinstance(capture, dict) else None
+
+
+def save_root_cause_hypothesis_result(
+    session_id: str,
+    candidate_key: str,
+    payload: dict[str, Any],
+) -> None:
+    """保存很小的根因假设比较结论，供后续重新排名时复用。"""
+    state = load(session_id)
+    results = state.setdefault("root_cause_hypotheses", {})
+    results[candidate_key] = {
+        **payload,
+        "updated_at": _now_ms(),
+    }
+    if len(results) > 50:
+        ordered = sorted(
+            results.items(),
+            key=lambda item: int(
+                (item[1] or {}).get("updated_at", 0) or 0
+            ),
+        )
+        for key, _ in ordered[:-50]:
+            results.pop(key, None)
+    save(state)
+
+
+def root_cause_hypothesis_results(
+    session_id: str,
+) -> dict[str, dict[str, Any]]:
+    state = load(session_id)
+    results = state.get("root_cause_hypotheses") or {}
+    return {
+        str(key): dict(value)
+        for key, value in results.items()
+        if isinstance(value, dict)
+    }
+
+
 def load_runtime_lineage_capture(
     session_id: str,
     scenario_name: str,
@@ -1235,6 +1317,9 @@ def list_call_scenarios(session_id: str) -> list[dict[str, Any]]:
                 "condition_probe_count": len(data.get("condition_probes") or {}),
                 "runtime_lineage_capture_count": len(
                     data.get("runtime_lineage_captures") or {}
+                ),
+                "root_cause_hypothesis_capture_count": len(
+                    data.get("root_cause_hypothesis_captures") or {}
                 ),
                 "path": str(path),
             }
