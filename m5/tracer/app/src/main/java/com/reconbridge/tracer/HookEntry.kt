@@ -76,7 +76,6 @@ class HookEntry : IXposedHookLoadPackage {
             contextRegistry = contextRegistry,
             eventBus = eventBus,
         )
-        lifecycleManager.start()
 
         val registry = HookRegistry(
             packageName = pkg,
@@ -168,6 +167,12 @@ class HookEntry : IXposedHookLoadPackage {
         val initialTargets = cfg.optJSONArray("targets") ?: JSONArray()
         val initial = registry.reconcile(initialTargets)
         logSyncResult(pkg, "初始同步", initial)
+
+        lifecycleManager.setStatusPublisher {
+            publishRuntimeStatus()
+        }
+        lifecycleManager.start()
+
         watcher.setPendingEnabled(registry.hasPending())
         publishRuntimeStatus()
 
