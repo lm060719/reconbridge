@@ -845,6 +845,61 @@ def record_root_cause_ranking(
             )
 
 
+def record_root_cause_hypothesis(
+    graph: dict[str, Any],
+    candidate: dict[str, Any],
+    comparison: dict[str, Any],
+) -> None:
+    """把根因假设验证结论写回方法证据节点。"""
+    if candidate.get("candidate_type") != "method":
+        return
+
+    mid = method_node(
+        graph,
+        str(candidate.get("class", "")),
+        str(candidate.get("method", "")),
+        str(candidate.get("descriptor", "")),
+        root_cause_hypothesis_status=str(
+            comparison.get("status", "")
+        ),
+        root_cause_hypothesis_adjustment=int(
+            comparison.get("score_adjustment", 0) or 0
+        ),
+        root_cause_hypothesis_explanation=str(
+            comparison.get("explanation", "")
+        )[:1200],
+        root_cause_hypothesis_input_coverage_complete=bool(
+            comparison.get("input_coverage_complete")
+        ),
+        root_cause_hypothesis_differing_inputs=[
+            str(item.get("name", ""))
+            for item in (
+                comparison.get("differing_inputs") or []
+            )[:12]
+            if item.get("name")
+        ],
+        root_cause_hypothesis_differing_outputs=[
+            str(item.get("name", ""))
+            for item in (
+                comparison.get("differing_outputs") or []
+            )[:12]
+            if item.get("name")
+        ],
+    )
+
+    # 明确留一条自环型验证关系，便于 subgraph/explain 时看出这是实验结论而非静态属性。
+    add_edge(
+        graph,
+        mid,
+        mid,
+        "root_cause_hypothesis_verified",
+        status=str(comparison.get("status", "")),
+        score_adjustment=int(
+            comparison.get("score_adjustment", 0) or 0
+        ),
+    )
+
+
 def summary(graph: dict[str, Any]) -> dict[str, Any]:
     _ensure(graph)
     type_counts: dict[str, int] = {}
