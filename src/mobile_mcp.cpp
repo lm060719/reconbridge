@@ -420,7 +420,7 @@ static const json& tools() {
         tool("post_hook", "下发 native 或 Java hook 配置。",
              schema({{"config", prop("object")}}, {"config"})),
         tool("list_hooks", "列出当前磁盘上的期望 hook 配置。", schema()),
-        tool("runtime_hook_status", "查看运行中 Tracer 的 HookRegistry 真实状态。",
+        tool("runtime_hook_status", "查看运行中 M5 Runtime 的 Hook/ClassLoader/State/Event/Context 与 Runtime Command 能力。",
              schema({{"package", prop("string", "")}})),
         tool("runtime_state_get", "直接读取在线 M5 Runtime State，不创建临时 Hook。",
              schema({{"package", prop("string")}, {"key", prop("string")},
