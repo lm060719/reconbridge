@@ -2168,7 +2168,7 @@ def verify_condition_writer(
         "posted": result.get("posted"),
         "cleanup": cleanup,
         "next_action": (
-            "该 writer 已观测到字段值变化；结合 writer.assignments/source_hints 继续追右值调用来源"
+            "该 writer 已观测到字段值变化；下一步调用 inspect_value_lineage 自动跨方法追右值来源链"
             if change.get("changed")
             else "本轮未观测到字段变化；确认已触发对应场景，或尝试下一个 writer_rank"
         ),
