@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, runtime_lineage, runtime_path, scenario_path, writer_probe
+from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, root_cause, runtime_lineage, runtime_path, scenario_path, writer_probe
 
 mcp = FastMCP("reconbridge")
 
@@ -2763,8 +2763,8 @@ def compare_value_lineage_runtime(
 
     if first:
         next_action = (
-            "已找到 A/B 最早稳定返回值差异；优先 inspect_method/trace_target 检查该方法的入参、"
-            "上游对象字段和返回构造逻辑"
+            "已找到 A/B 最早稳定返回值差异；下一步调用 rank_root_causes，"
+            "把最早差异、writer 变化与静态来源证据综合排序"
         )
     elif comparison.get("a_full_sequence") and comparison.get(
         "b_full_sequence"
@@ -2784,6 +2784,153 @@ def compare_value_lineage_runtime(
         "package": lineage_result.get("package"),
         "selected_path_index": path_index,
         "selected_path": selected_path,
+        "next_action": next_action,
+    }
+
+
+@mcp.tool()
+def rank_root_causes(
+    session_id: str,
+    a: str,
+    b: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_rank: int = 1,
+    path_index: int = 0,
+    max_depth: int = 4,
+    max_nodes: int = 60,
+    limit: int = 5,
+) -> dict:
+    """综合静态来源、Runtime Lineage 与 writer 变化，对根因节点做可解释排序。
+
+    即使 A/B Runtime Lineage 尚未采集，也会返回静态排序；若运行时结果齐全，
+    会把最早稳定值差异、A/B 命中、完整链覆盖和 writer 字段变化加入评分。
+    """
+    lineage_result = inspect_value_lineage(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_rank=writer_rank,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+    )
+    if not lineage_result.get("ok"):
+        return lineage_result
+
+    lineage = lineage_result.get("lineage") or {}
+    paths = lineage.get("origin_paths") or []
+    if not paths:
+        return {
+            **lineage_result,
+            "ok": False,
+            "error": "当前 Value Lineage 没有 origin_path，无法排序根因",
+        }
+
+    path_index = max(0, min(int(path_index), len(paths) - 1))
+    selected_path = paths[path_index]
+    lineage_key = runtime_lineage.path_fingerprint(selected_path)
+
+    capture_a = None
+    capture_b = None
+    try:
+        capture_a = investigation.load_runtime_lineage_capture(
+            session_id,
+            a,
+            lineage_key,
+        )
+    except (ValueError, FileNotFoundError):
+        capture_a = None
+    try:
+        capture_b = investigation.load_runtime_lineage_capture(
+            session_id,
+            b,
+            lineage_key,
+        )
+    except (ValueError, FileNotFoundError):
+        capture_b = None
+
+    runtime_comparison = None
+    if capture_a is not None and capture_b is not None:
+        comparison = runtime_lineage.compare_captures(
+            capture_a,
+            capture_b,
+        )
+        if comparison.get("comparable"):
+            runtime_comparison = comparison
+
+    ranking = root_cause.rank_root_causes(
+        lineage,
+        runtime_comparison=runtime_comparison,
+        selected_path_index=path_index,
+        limit=max(1, min(int(limit), 20)),
+    )
+    if not ranking.get("ok"):
+        return {
+            **ranking,
+            "session_id": session_id,
+            "package": lineage_result.get("package"),
+            "a": a,
+            "b": b,
+        }
+
+    investigation.record_root_cause_ranking(
+        session_id,
+        ranking,
+    )
+
+    top = ranking.get("top_candidate") or {}
+    missing_runtime = [
+        name
+        for name, capture in ((a, capture_a), (b, capture_b))
+        if capture is None
+    ]
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "root_cause_ranking",
+            "a": a,
+            "b": b,
+            "lineage_fingerprint": lineage_key,
+            "top_label": top.get("label", ""),
+            "top_score": top.get("score", 0),
+            "top_evidence_level": top.get("evidence_level", ""),
+            "runtime_available": bool(runtime_comparison),
+            "missing_runtime": missing_runtime,
+        },
+    )
+
+    if missing_runtime:
+        next_action = (
+            "当前排名包含静态证据；要提升到运行时根因排序，请分别调用 verify_value_lineage，"
+            "capture_for=" + " / ".join(missing_runtime)
+        )
+    elif top.get("is_first_runtime_difference"):
+        next_action = (
+            "排名第一节点就是 A/B 最早稳定值差异；优先检查它的入参、对象字段和返回构造逻辑"
+        )
+    elif top.get("is_writer") and top.get("writer_changed"):
+        next_action = (
+            "排名第一节点是已真实改字段的 writer；继续追它的赋值右值和上游 callee"
+        )
+    else:
+        next_action = str(top.get("next_action", "")) or (
+            "继续补充排名靠前节点的运行时值证据"
+        )
+
+    return {
+        **ranking,
+        "session_id": session_id,
+        "package": lineage_result.get("package"),
+        "a": a,
+        "b": b,
+        "condition": lineage_result.get("condition"),
+        "probe": lineage_result.get("probe"),
+        "lineage_fingerprint": lineage_key,
+        "runtime_available": bool(runtime_comparison),
+        "missing_runtime": missing_runtime,
+        "runtime_comparison": runtime_comparison,
         "next_action": next_action,
     }
 
