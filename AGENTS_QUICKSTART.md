@@ -61,6 +61,7 @@
 | `capture_call_graph_scenario(session_id, name, class_name, method, ...)` | 围绕目标方法对整张局部调用图挂同一组 before Hook，采集一个可做 A/B 比较的命名场景 |
 | `list_call_graph_scenarios(session_id)` | 列出当前 Investigation 会话保存的调用图场景 |
 | `diff_call_graph_scenarios(session_id, a, b)` | 校验两次采集使用相同静态图+Hook 集合后，输出公共前缀、首次分叉、仅 A/仅 B 方法/边和共享边耗时差 |
+| `analyze_scenario_divergence(session_id, a, b, ...)` | 自动取公共前缀最后一个方法，回到 JADX 源码定位 if/else、switch、when、三元条件，关联类字段/条件方法并生成 trace 探针计划 |
 | `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
@@ -213,6 +214,12 @@ diff_call_graph_scenarios(session_id, "非会员", "会员")
 # → b_next: Feature.enterFeature
 # → only_in_a / only_in_b / only_edges_a / only_edges_b
 # → shared_edge_timing: 两边共同边的入口耗时差
+
+analyze_scenario_divergence(session_id, "非会员", "会员")
+# → branch_point: PayManager.checkVip
+# → top_condition: premiumStatus
+# → branch_orientation: a_false_b_true
+# → probe_plan: 观测 premiumStatus 字段或 isPremiumUser() 条件方法
 ```
 两次采集会同时保存 `graph_fingerprint` 与 `hook_fingerprint`；任一不一致就拒绝给出“业务分叉”结论，避免第二次 Hook 少挂了方法导致假差异。场景事件经过压缩后独立保存在当前 Investigation 会话目录，不会持续膨胀主 session JSON。
 
@@ -257,6 +264,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 触发一次行为确认真实链路。若比较两个行为，分别 `capture_call_graph_scenario` 后用 `diff_call_graph_scenarios` 找首次分叉。要完整静态图用 `inspect_call_graph`，只展开另一个方法用 `inspect_method`；确认链路后再 `trace_target` 抓精细参数/字段。
+3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 触发一次行为确认真实链路。若比较两个行为，分别 `capture_call_graph_scenario` → `diff_call_graph_scenarios` → `analyze_scenario_divergence`，从首次分叉继续定位具体条件变量。要完整静态图用 `inspect_call_graph`，只展开另一个方法用 `inspect_method`；确认条件后再按 probe_plan/trace_target 抓精细值。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
