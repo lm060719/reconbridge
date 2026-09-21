@@ -323,6 +323,17 @@ class ActionExecutorUnitTest
                             put("scope", "process")
                             put("key", "event_hits")
                         }
+                    )
+                    .put(
+                        JSONObject().apply {
+                            put("action", "set_state")
+                            put("scope", "process")
+                            put("key", "meta_value")
+                            put(
+                                "value",
+                                "\${event.meta.value}",
+                            )
+                        }
                     ),
             )
 
@@ -361,10 +372,17 @@ class ActionExecutorUnitTest
                     put("name", "vip_changed")
                     put(
                         "payload",
-                        JSONObject().put(
-                            "vip",
-                            "\${args[0]}",
-                        ),
+                        JSONObject()
+                            .put(
+                                "vip",
+                                "\${args[0]}",
+                            )
+                            .put(
+                                "meta",
+                                JSONObject()
+                                    .put("value", "raw")
+                                    .put("label", "keep-object"),
+                            ),
                     )
                 }
             ),
@@ -389,6 +407,14 @@ class ActionExecutorUnitTest
             state.get(
                 "process",
                 "event_hits",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            "raw",
+            state.get(
+                "process",
+                "meta_value",
                 "listener_hook",
             ),
         )
