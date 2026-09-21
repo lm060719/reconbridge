@@ -175,6 +175,8 @@ daemon 下发的配置被视为“完整期望状态”，运行中收到新配�
 
 无需再 force-stop 才能恢复。若目标进程未运行，则只更新磁盘期望配置，下次启动自然不会再安装。
 
+> **Phase 6 之后的边界**：普通 `POST /unhook` / MCP `unhook` 只管理手工 Hook。已启用 Runtime Program 的物化 targets 会自动重新加入最终期望配置；要停 Program 必须调用 `runtime_program_disable`。直接尝试 unhook `rp:<program>:<target>` 会返回冲突提示。
+
 查询分两层：
 
 - `GET /hooks` / MCP `list_hooks`：磁盘上的**期望配置**；
