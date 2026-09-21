@@ -675,6 +675,38 @@ internal object ActionExecutor {
                     scope,
                 ),
             )
+            ScriptableObject.putProperty(
+                scope,
+                "\$application",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.applicationObject(),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$context",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.contextObject(),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$activity",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.activityObject(),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$lifecycle",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.lifecycleView(),
+                    scope,
+                ),
+            )
 
             val res = jsCtx.evaluateString(scope, script, "<m5_script>", 1, null)
             return when (res) {
