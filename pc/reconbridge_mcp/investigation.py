@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .dex_index import field_relations, index_status, method_call_graph, method_relations
-from . import evidence, state_origin
+from . import evidence, state_origin, value_lineage
 from .settings import settings
 
 _SESSION_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -556,6 +556,426 @@ def condition_method_origin_context(
     }
 
 
+def _lineage_method_id(
+    graph: dict[str, Any],
+    runtime: dict[tuple[str, str], dict[str, Any]],
+    class_name: str,
+    method_name: str,
+    descriptor: str = "",
+) -> str:
+    normalized = _normalize_class_name(class_name)
+    stats = runtime.get((normalized, method_name), {})
+    return value_lineage.add_node(
+        graph,
+        "method",
+        f"{normalized}#{method_name}{descriptor}",
+        f"{normalized}.{method_name}{descriptor}",
+        class_name=normalized,
+        method_name=method_name,
+        descriptor=descriptor,
+        runtime_confirmed=bool(stats.get("runtime_confirmed")),
+        runtime_hits=int(stats.get("runtime_hits", 0) or 0),
+    )
+
+
+def _expand_method_lineage(
+    session_id: str,
+    graph: dict[str, Any],
+    runtime: dict[tuple[str, str], dict[str, Any]],
+    class_name: str,
+    method_name: str,
+    descriptor: str,
+    method_node_id: str,
+    depth: int,
+    max_depth: int,
+    max_nodes: int,
+    visited: set[tuple[str, str, str]],
+) -> None:
+    if depth > max_depth or len(graph["nodes"]) >= max_nodes:
+        return
+
+    normalized = _normalize_class_name(class_name)
+    key = (normalized, method_name, descriptor)
+    if key in visited:
+        return
+    visited.add(key)
+
+    context = method_context(
+        session_id,
+        normalized,
+        method_name,
+        descriptor=descriptor,
+        relation_limit=80,
+        include_source=True,
+    )
+    source = context.get("source") or {}
+    relations = context.get("relations") or {}
+    callees = relations.get("callees") or []
+
+    if not source.get("available"):
+        origin_id = value_lineage.add_node(
+            graph,
+            "origin",
+            f"unavailable:{normalized}#{method_name}{descriptor}",
+            f"源码不可用: {normalized}.{method_name}",
+            kind="source_unavailable",
+        )
+        value_lineage.add_edge(
+            graph,
+            origin_id,
+            method_node_id,
+            "unknown_feeds_method",
+        )
+        return
+
+    returns = state_origin.extract_return_sources(str(source.get("text", "")))
+    if not returns:
+        return
+
+    for index, item in enumerate(returns[:12]):
+        if len(graph["nodes"]) >= max_nodes:
+            break
+        expression = str(item.get("expression", ""))
+        expr_id = value_lineage.add_node(
+            graph,
+            "expression",
+            f"{normalized}#{method_name}:{index}:{expression}",
+            expression[:500] or "<empty return>",
+            owner_class=normalized,
+            owner_method=method_name,
+            source_path=source.get("path", ""),
+            line_offset=item.get("line_offset"),
+        )
+        value_lineage.add_edge(
+            graph,
+            expr_id,
+            method_node_id,
+            "returns_from",
+        )
+
+        for hint in value_lineage.terminal_hints(
+            item.get("source_hints") or []
+        )[:4]:
+            kind = str(hint.get("kind", "unknown"))
+            origin_id = value_lineage.add_node(
+                graph,
+                "origin",
+                f"{kind}:{expression}",
+                str(hint.get("reason") or kind),
+                kind=kind,
+                confidence=float(hint.get("confidence", 0) or 0),
+                expression=expression[:1000],
+            )
+            value_lineage.add_edge(
+                graph,
+                origin_id,
+                expr_id,
+                "feeds_expression",
+            )
+
+        for call in (item.get("calls") or [])[:12]:
+            resolution = value_lineage.resolve_call(str(call), callees)
+            if resolution.get("ambiguous"):
+                graph["ambiguities"].append(
+                    {
+                        "owner": f"{normalized}.{method_name}",
+                        "call": call,
+                        "candidates": resolution.get("candidates", [])[:12],
+                    }
+                )
+                continue
+
+            resolved = resolution.get("resolved")
+            if not resolved:
+                graph["unresolved_calls"].append(
+                    {
+                        "owner": f"{normalized}.{method_name}",
+                        "call": call,
+                    }
+                )
+                continue
+
+            callee_class = _normalize_class_name(
+                str(resolved.get("class", ""))
+            )
+            callee_method = str(resolved.get("method", ""))
+            callee_descriptor = str(resolved.get("descriptor", ""))
+            callee_id = _lineage_method_id(
+                graph,
+                runtime,
+                callee_class,
+                callee_method,
+                callee_descriptor,
+            )
+            value_lineage.add_edge(
+                graph,
+                callee_id,
+                expr_id,
+                "returns_into_expression",
+                call_expression=str(call),
+            )
+            _expand_method_lineage(
+                session_id,
+                graph,
+                runtime,
+                callee_class,
+                callee_method,
+                callee_descriptor,
+                callee_id,
+                depth + 1,
+                max_depth,
+                max_nodes,
+                visited,
+            )
+
+
+def field_value_lineage(
+    session_id: str,
+    class_name: str,
+    field_name: str,
+    field_type: str = "",
+    writer_rank: int = 1,
+    max_depth: int = 4,
+    max_nodes: int = 60,
+) -> dict[str, Any]:
+    """从字段的一个 writer 赋值表达式递归追踪跨方法值来源。"""
+    max_depth = max(1, min(int(max_depth), 8))
+    max_nodes = max(10, min(int(max_nodes), 160))
+    origin = field_origin_context(
+        session_id,
+        class_name,
+        field_name,
+        field_type=field_type,
+        limit=max(40, int(writer_rank)),
+        include_source=True,
+    )
+    if not origin.get("ok"):
+        return origin
+
+    writers = origin.get("writers") or []
+    writer_rank = max(1, int(writer_rank))
+    writer = next(
+        (item for item in writers if int(item.get("rank", 0) or 0) == writer_rank),
+        None,
+    )
+    if writer is None:
+        return {
+            "ok": False,
+            "error": f"找不到 writer_rank={writer_rank}",
+            "writers": writers[:20],
+        }
+
+    state = load(session_id)
+    runtime = evidence.runtime_method_stats(
+        state.get("evidence_graph") or evidence.new_graph()
+    )
+    graph = value_lineage.new_graph()
+    normalized_field_class = _normalize_class_name(
+        str((origin.get("field") or {}).get("class", class_name))
+    )
+    sink_id = value_lineage.add_node(
+        graph,
+        "field",
+        f"{normalized_field_class}#{field_name}",
+        f"{normalized_field_class}.{field_name}",
+        class_name=normalized_field_class,
+        field_name=field_name,
+        field_type=str((origin.get("field") or {}).get("type", field_type)),
+    )
+
+    writer_class = _normalize_class_name(str(writer.get("class", "")))
+    writer_method = str(writer.get("method", ""))
+    writer_descriptor = str(writer.get("descriptor", ""))
+    writer_id = _lineage_method_id(
+        graph,
+        runtime,
+        writer_class,
+        writer_method,
+        writer_descriptor,
+    )
+    value_lineage.add_edge(
+        graph,
+        writer_id,
+        sink_id,
+        "writes_field",
+        offset=int(writer.get("offset", 0) or 0),
+        writer_rank=writer_rank,
+    )
+
+    writer_context = method_context(
+        session_id,
+        writer_class,
+        writer_method,
+        descriptor=writer_descriptor,
+        relation_limit=80,
+        include_source=True,
+    )
+    callees = (writer_context.get("relations") or {}).get("callees") or []
+    assignments = writer.get("assignments") or []
+    visited: set[tuple[str, str, str]] = set()
+
+    for index, assignment in enumerate(assignments[:12]):
+        if len(graph["nodes"]) >= max_nodes:
+            break
+        expression = str(assignment.get("expression", ""))
+        expr_id = value_lineage.add_node(
+            graph,
+            "expression",
+            f"{writer_class}#{writer_method}:assign:{index}:{expression}",
+            expression[:500] or "<empty assignment>",
+            owner_class=writer_class,
+            owner_method=writer_method,
+            line_offset=assignment.get("line_offset"),
+        )
+        value_lineage.add_edge(
+            graph,
+            expr_id,
+            writer_id,
+            "assigned_by_expression",
+        )
+
+        for hint in value_lineage.terminal_hints(
+            assignment.get("source_hints") or []
+        )[:4]:
+            kind = str(hint.get("kind", "unknown"))
+            origin_id = value_lineage.add_node(
+                graph,
+                "origin",
+                f"{kind}:{expression}",
+                str(hint.get("reason") or kind),
+                kind=kind,
+                confidence=float(hint.get("confidence", 0) or 0),
+                expression=expression[:1000],
+            )
+            value_lineage.add_edge(
+                graph,
+                origin_id,
+                expr_id,
+                "feeds_expression",
+            )
+
+        for call in (assignment.get("calls") or [])[:12]:
+            resolution = value_lineage.resolve_call(str(call), callees)
+            if resolution.get("ambiguous"):
+                graph["ambiguities"].append(
+                    {
+                        "owner": f"{writer_class}.{writer_method}",
+                        "call": call,
+                        "candidates": resolution.get("candidates", [])[:12],
+                    }
+                )
+                continue
+            resolved = resolution.get("resolved")
+            if not resolved:
+                graph["unresolved_calls"].append(
+                    {
+                        "owner": f"{writer_class}.{writer_method}",
+                        "call": call,
+                    }
+                )
+                continue
+
+            callee_class = _normalize_class_name(
+                str(resolved.get("class", ""))
+            )
+            callee_method = str(resolved.get("method", ""))
+            callee_descriptor = str(resolved.get("descriptor", ""))
+            callee_id = _lineage_method_id(
+                graph,
+                runtime,
+                callee_class,
+                callee_method,
+                callee_descriptor,
+            )
+            value_lineage.add_edge(
+                graph,
+                callee_id,
+                expr_id,
+                "returns_into_expression",
+                call_expression=str(call),
+            )
+            _expand_method_lineage(
+                session_id,
+                graph,
+                runtime,
+                callee_class,
+                callee_method,
+                callee_descriptor,
+                callee_id,
+                1,
+                max_depth,
+                max_nodes,
+                visited,
+            )
+
+    result = value_lineage.finalize(graph, sink_id)
+    result.update(
+        {
+            "field": origin.get("field"),
+            "writer": writer,
+            "writer_rank": writer_rank,
+            "limits": {
+                "max_depth": max_depth,
+                "max_nodes": max_nodes,
+            },
+        }
+    )
+    return result
+
+
+def condition_method_value_lineage(
+    session_id: str,
+    class_name: str,
+    method_name: str,
+    descriptor: str = "",
+    max_depth: int = 4,
+    max_nodes: int = 60,
+) -> dict[str, Any]:
+    """从条件方法的 return 表达式递归追踪跨方法值来源。"""
+    max_depth = max(1, min(int(max_depth), 8))
+    max_nodes = max(10, min(int(max_nodes), 160))
+    state = load(session_id)
+    runtime = evidence.runtime_method_stats(
+        state.get("evidence_graph") or evidence.new_graph()
+    )
+    graph = value_lineage.new_graph()
+    sink_id = _lineage_method_id(
+        graph,
+        runtime,
+        class_name,
+        method_name,
+        descriptor,
+    )
+    _expand_method_lineage(
+        session_id,
+        graph,
+        runtime,
+        class_name,
+        method_name,
+        descriptor,
+        sink_id,
+        0,
+        max_depth,
+        max_nodes,
+        set(),
+    )
+    result = value_lineage.finalize(graph, sink_id)
+    result.update(
+        {
+            "method": {
+                "class": _normalize_class_name(class_name),
+                "method": method_name,
+                "descriptor": descriptor,
+            },
+            "limits": {
+                "max_depth": max_depth,
+                "max_nodes": max_nodes,
+            },
+        }
+    )
+    return result
+
+
 def record_method_context_evidence(
     session_id: str,
     class_name: str,
@@ -582,6 +1002,16 @@ def record_field_origin_evidence(
     state = load(session_id)
     graph = state.setdefault("evidence_graph", evidence.new_graph())
     evidence.record_field_origin(graph, context)
+    save(state)
+
+
+def record_value_lineage_evidence(
+    session_id: str,
+    lineage: dict[str, Any],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_value_lineage(graph, lineage)
     save(state)
 
 
