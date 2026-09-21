@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+from .dex_index import index_is_ready, index_path_for_apk, index_status, query_index
 from .resource import java_memory_env, run_limited
 from .settings import FROZEN, settings
 
@@ -142,45 +143,43 @@ def decompile_apk(apk_path: str, output_dir: str = "", no_res: bool = True) -> d
 
 
 # ---------------------------------------------------------------------------
-# dexkit_search —— 用 androguard 做类/方法/字段/字符串定位
+# dexkit_search —— 首次建立 SQLite 持久索引，后续只查数据库
 # ---------------------------------------------------------------------------
-def _dexkit_cache_path(apk: Path, query: dict) -> Path:
-    stat = apk.stat()
-    apk_key = hashlib.sha256(
-        f"{apk.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
-    ).hexdigest()[:24]
-    query_key = hashlib.sha256(
-        json.dumps(query, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()[:24]
-    cache_dir = settings.workdir / ".cache" / "dexkit" / apk_key
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir / f"{query_key}.json"
-
-
-def dexkit_search(apk_path: str, query: dict) -> dict:
-    """在独立 worker 中运行 Androguard，任务结束后由操作系统一次性回收分析堆。"""
+def ensure_dex_index(apk_path: str, force: bool = False) -> dict:
+    """确保 APK 已有可用 DEX 索引；首次构建在受内存限制的 worker 中完成。"""
     apk = Path(apk_path)
     if not apk.exists():
         return {"ok": False, "error": f"apk 不存在: {apk_path}"}
 
+    target = index_path_for_apk(apk)
+    if not force and index_is_ready(apk):
+        return {
+            "ok": True,
+            "built": False,
+            "reused": True,
+            **index_status(apk),
+        }
+
     import json as _json
     import tempfile
 
-    cache_path = _dexkit_cache_path(apk, query)
-    if cache_path.exists():
-        try:
-            cached = _json.loads(cache_path.read_text(encoding="utf-8"))
-            cached["cache_hit"] = True
-            return cached
-        except Exception:
-            cache_path.unlink(missing_ok=True)
+    if force:
+        target.unlink(missing_ok=True)
+        target.with_suffix(target.suffix + ".building").unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="reconbridge-dexkit-") as td:
+    with tempfile.TemporaryDirectory(prefix="reconbridge-dex-index-") as td:
         td_path = Path(td)
         req = td_path / "request.json"
         resp = td_path / "response.json"
         req.write_text(
-            _json.dumps({"apk_path": str(apk), "query": query}, ensure_ascii=False),
+            _json.dumps(
+                {
+                    "operation": "build_index",
+                    "apk_path": str(apk),
+                    "index_path": str(target),
+                },
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
 
@@ -200,7 +199,7 @@ def dexkit_search(apk_path: str, query: dict) -> dict:
             reason = "超时" if p.timed_out else "worker 未产出结果"
             return {
                 "ok": False,
-                "error": f"androguard {reason}，可能触发了内存上限",
+                "error": f"DEX 索引构建{reason}，可能触发了内存上限",
                 "worker_exit": p.returncode,
                 "timed_out": p.timed_out,
                 "memory_limit_enforced": p.memory_limit_enforced,
@@ -213,7 +212,7 @@ def dexkit_search(apk_path: str, query: dict) -> dict:
         except Exception as exc:
             return {
                 "ok": False,
-                "error": f"androguard worker 返回损坏: {exc}",
+                "error": f"DEX 索引 worker 返回损坏: {exc}",
                 "worker_exit": p.returncode,
                 "log_tail": p.log_tail,
             }
@@ -222,17 +221,88 @@ def dexkit_search(apk_path: str, query: dict) -> dict:
         result["timed_out"] = p.timed_out
         result["memory_limit_enforced"] = p.memory_limit_enforced
         result["memory_limit_mb"] = settings.dexkit_memory_mb
+        result["built"] = bool(result.get("ok"))
+        result["reused"] = False
         if p.log_tail:
-            result["log_tail"] = p.log_tail
-        result["cache_hit"] = False
+            result["log_tail"] = p.log_tail[-2000:]
+
+        if result.get("ok") and not index_is_ready(apk):
+            return {
+                **result,
+                "ok": False,
+                "error": "worker 返回成功，但索引完整性校验未通过",
+            }
         if result.get("ok"):
-            try:
-                cache_path.write_text(
-                    _json.dumps(result, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
+            result.update(index_status(apk))
+        return result
+
+
+def dexkit_search(apk_path: str, query: dict) -> dict:
+    """优先查询持久 SQLite 索引；首次调用只需解析 APK 一次。"""
+    apk = Path(apk_path)
+    if not apk.exists():
+        return {"ok": False, "error": f"apk 不存在: {apk_path}"}
+
+    prepared = ensure_dex_index(str(apk))
+    if prepared.get("ok"):
+        result = query_index(apk, query)
+        result["index_reused"] = bool(prepared.get("reused"))
+        result["index_built"] = bool(prepared.get("built"))
+        if prepared.get("memory_limit_enforced") is not None:
+            result["memory_limit_enforced"] = prepared.get("memory_limit_enforced")
+        return result
+
+    # 构建索引失败时保留一次性 worker 查询兜底，避免升级后直接丢失旧能力。
+    import json as _json
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="reconbridge-dexkit-fallback-") as td:
+        td_path = Path(td)
+        req = td_path / "request.json"
+        resp = td_path / "response.json"
+        req.write_text(
+            _json.dumps(
+                {"operation": "search", "apk_path": str(apk), "query": query},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        if FROZEN:
+            cmd = [sys.executable, "--dex-worker", str(req), str(resp)]
+        else:
+            cmd = [sys.executable, "-m", "reconbridge_mcp.dex_worker", str(req), str(resp)]
+
+        p = run_limited(
+            cmd,
+            timeout=settings.timeout,
+            memory_mb=settings.dexkit_memory_mb,
+            env=os.environ.copy(),
+        )
+        if not resp.exists():
+            return {
+                **prepared,
+                "ok": False,
+                "error": prepared.get("error") or "DEX 索引与兜底查询均失败",
+                "fallback_exit": p.returncode,
+                "fallback_log_tail": p.log_tail,
+            }
+
+        try:
+            result = _json.loads(resp.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"兜底 worker 返回损坏: {exc}",
+                "index_error": prepared.get("error"),
+            }
+
+        result["backend"] = result.get("backend", "androguard-worker-fallback")
+        result["index_error"] = prepared.get("error")
+        result["index_reused"] = False
+        result["index_built"] = False
+        result["memory_limit_enforced"] = p.memory_limit_enforced
+        result["memory_limit_mb"] = settings.dexkit_memory_mb
         return result
 
 
