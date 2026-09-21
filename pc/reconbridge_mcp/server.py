@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import candidate, external, investigation, pipeline, runtime_path, scenario_path
+from . import branch_condition, candidate, external, investigation, pipeline, runtime_path, scenario_path
 
 mcp = FastMCP("reconbridge")
 
@@ -1217,8 +1217,8 @@ def diff_call_graph_scenarios(session_id: str, a: str, b: str) -> dict:
     if result.get("comparable"):
         if divergence.get("a_next") or divergence.get("b_next"):
             result["next_action"] = (
-                "优先 inspect_method/trace_target 检查首次分叉两侧的方法，"
-                "它们最可能承载场景条件判断或分支动作"
+                "下一步调用 analyze_scenario_divergence，自动回到公共前缀最后一个方法，"
+                "定位 if/switch/字段条件并生成 trace 探针计划"
             )
         else:
             result["next_action"] = (
@@ -1230,6 +1230,191 @@ def diff_call_graph_scenarios(session_id: str, a: str, b: str) -> dict:
         **result,
         "session_id": session_id,
         "package": state["package"],
+    }
+
+
+@mcp.tool()
+def analyze_scenario_divergence(
+    session_id: str,
+    a: str,
+    b: str,
+    auto_prepare_source: bool = True,
+    max_conditions: int = 20,
+    max_probe_items: int = 8,
+) -> dict:
+    """从 A/B 调用图场景首次分叉自动定位源码条件。
+
+    会取公共主线程前缀最后一个方法作为分支点，自动读取 JADX 方法体，结合 A/B 下一跳
+    对 if/else、switch、Kotlin when 和三元表达式排序，并给出只读 trace 探针建议。
+    """
+    try:
+        state = investigation.load(session_id, refresh=True)
+        scenario_a = investigation.load_call_scenario(session_id, a)
+        scenario_b = investigation.load_call_scenario(session_id, b)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    diff = scenario_path.diff_graph_scenarios(scenario_a, scenario_b)
+    if not diff.get("comparable"):
+        return {
+            **diff,
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": diff.get("error") or "两个场景不可比较",
+        }
+
+    divergence = diff.get("first_divergence") or {}
+    common_prefix = divergence.get("common_prefix") or []
+    if not common_prefix:
+        return {
+            **diff,
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "两个场景没有共同主线程前缀，无法确定源码分支点",
+            "next_action": "扩大调用图范围或确认两次操作确实从同一业务入口触发",
+        }
+
+    branch_label = str(common_prefix[-1])
+    branch_meta: dict[str, Any] | None = None
+    for item in scenario_a.get("hooked_methods") or []:
+        label = (
+            f"{candidate.normalize_class_name(str(item.get('class', '')))}."
+            f"{item.get('method', '')}"
+        )
+        if label == branch_label:
+            branch_meta = item
+            break
+
+    if branch_meta is None:
+        if "." not in branch_label:
+            return {
+                **diff,
+                "ok": False,
+                "session_id": session_id,
+                "package": state["package"],
+                "error": f"无法解析分支点方法: {branch_label}",
+            }
+        class_name, method_name = branch_label.rsplit(".", 1)
+        descriptor = ""
+    else:
+        class_name = candidate.normalize_class_name(
+            str(branch_meta.get("class", ""))
+        )
+        method_name = str(branch_meta.get("method", ""))
+        descriptor = str(branch_meta.get("descriptor", ""))
+
+    apk = state.get("primary_apk", "")
+    source_prepare: dict[str, Any] | None = None
+    if (
+        auto_prepare_source
+        and apk
+        and not state["artifacts"].get("jadx_dirs")
+    ):
+        source_prepare = external.decompile_apk(apk)
+        state = investigation.load(session_id, refresh=True)
+
+    context = investigation.method_context(
+        session_id,
+        class_name,
+        method_name,
+        descriptor=descriptor,
+        relation_limit=50,
+        include_source=True,
+    )
+    source = context.get("source") or {}
+    relations = context.get("relations") or {}
+    if not source.get("available"):
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "diff": diff,
+            "branch_point": {
+                "label": branch_label,
+                "class": class_name,
+                "method": method_name,
+                "descriptor": descriptor,
+            },
+            "source_prepare": source_prepare,
+            "method_context": context,
+            "error": "已定位首次分叉方法，但 JADX 源码不可用，无法分析条件表达式",
+            "next_action": "检查 JADX 反编译结果，或用 trace_target/trace_java 直接观测分支点方法",
+        }
+
+    ranked = branch_condition.rank_conditions(
+        str(source.get("text", "")),
+        divergence.get("a_next"),
+        divergence.get("b_next"),
+        class_fields=relations.get("class_fields") or [],
+        limit=max(1, min(int(max_conditions), 50)),
+    )
+    probe_plan = branch_condition.build_probe_plan(
+        class_name,
+        method_name,
+        ranked,
+        max_items=max(1, min(int(max_probe_items), 20)),
+    )
+    for item in probe_plan:
+        args = item.get("suggested_args") or {}
+        args["package"] = state["package"]
+        item["suggested_args"] = args
+
+    top = ranked[0] if ranked else None
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "scenario_divergence_condition",
+            "a": a,
+            "b": b,
+            "branch_point": branch_label,
+            "a_next": divergence.get("a_next"),
+            "b_next": divergence.get("b_next"),
+            "condition_count": len(ranked),
+            "top_condition": top.get("condition") if top else "",
+            "top_line": top.get("line") if top else None,
+            "top_score": top.get("score") if top else 0,
+        },
+    )
+
+    if top:
+        next_action = (
+            "优先按 probe_plan 观测排名第一条件涉及的字段/条件方法；"
+            "若 A/B 值确实不同，即可把分叉从方法级收敛到具体状态变量"
+        )
+    else:
+        next_action = (
+            "源码中没有识别到常规 if/switch/when/三元条件；"
+            "检查异常控制流、早返回、回调/异步状态，或对分支点使用 trace_target"
+        )
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "package": state["package"],
+        "a": a,
+        "b": b,
+        "branch_point": {
+            "label": branch_label,
+            "class": class_name,
+            "method": method_name,
+            "descriptor": descriptor,
+        },
+        "divergence": divergence,
+        "source_prepare": source_prepare,
+        "source": {
+            "path": source.get("path", ""),
+            "declaration_line": source.get("declaration_line"),
+            "start_line": source.get("start_line"),
+            "end_line": source.get("end_line"),
+        },
+        "top_condition": top,
+        "conditions": ranked,
+        "probe_plan": probe_plan,
+        "next_action": next_action,
     }
 
 
