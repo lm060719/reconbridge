@@ -28,6 +28,7 @@ def test_mcp_import_and_registration():
         "read_remote_file", "proc_info", "remote_shell", "decompile_apk",
         "dexkit_search", "ghidra_analyze", "hermes_decompile", "post_hook",
         "list_hooks", "runtime_hook_status", "runtime_state_get", "runtime_state_set",
+        "runtime_state_remove", "runtime_state_increment", "runtime_state_append",
         "runtime_state_clear", "runtime_event_emit", "runtime_context_status",
         "runtime_activity_action", "unhook", "collect_events", "capture_scenario",
         "list_scenarios", "diff_scenarios", "recent_events", "trace_java",
@@ -100,13 +101,16 @@ async def test_mcp_stdio_e2e():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) >= 61
+            assert len(tools) >= 64
             names = {t.name for t in tools}
             assert "device_status" in names
             assert "toolchain_status" in names
             assert "runtime_hook_status" in names
             assert "runtime_state_get" in names
             assert "runtime_state_set" in names
+            assert "runtime_state_remove" in names
+            assert "runtime_state_increment" in names
+            assert "runtime_state_append" in names
             assert "runtime_state_clear" in names
             assert "runtime_event_emit" in names
             assert "runtime_context_status" in names
