@@ -67,6 +67,16 @@ class HookEntry : IXposedHookLoadPackage {
 
         val runtimeState = RuntimeStateStore(pkg)
         val eventBus = RuntimeEventBus()
+        val contextRegistry = ContextRegistry(
+            packageName = pkg,
+            processName = lpparam.processName,
+        )
+        val lifecycleManager = LifecycleManager(
+            packageName = pkg,
+            contextRegistry = contextRegistry,
+            eventBus = eventBus,
+        )
+        lifecycleManager.start()
 
         val registry = HookRegistry(
             packageName = pkg,
@@ -81,6 +91,7 @@ class HookEntry : IXposedHookLoadPackage {
                     classLoader = loader,
                     runtimeState = runtimeState,
                     eventBus = eventBus,
+                    contextRuntime = contextRegistry,
                 )
             },
             onHookRemoved = { hookId ->
@@ -105,6 +116,14 @@ class HookEntry : IXposedHookLoadPackage {
             status.put(
                 "event_bus",
                 eventBus.snapshotJson(),
+            )
+            status.put(
+                "context_runtime",
+                contextRegistry.snapshotJson(),
+            )
+            status.put(
+                "lifecycle_runtime",
+                lifecycleManager.snapshotJson(),
             )
             io.sendRuntimeStatus(status.toString())
         }
@@ -203,6 +222,7 @@ class HookEntry : IXposedHookLoadPackage {
         classLoader: ClassLoader,
         runtimeState: RuntimeStateStore,
         eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
     ): HookInstallResult {
         return if (t.optString("kind", "java") == "runtime") {
             installEventHandlers(
@@ -211,6 +231,7 @@ class HookEntry : IXposedHookLoadPackage {
                 classLoader = classLoader,
                 runtimeState = runtimeState,
                 eventBus = eventBus,
+                contextRuntime = contextRuntime,
             )
         } else {
             installJavaHook(
@@ -220,6 +241,7 @@ class HookEntry : IXposedHookLoadPackage {
                 classLoader = classLoader,
                 runtimeState = runtimeState,
                 eventBus = eventBus,
+                contextRuntime = contextRuntime,
             )
         }
     }
@@ -235,6 +257,7 @@ class HookEntry : IXposedHookLoadPackage {
         classLoader: ClassLoader,
         runtimeState: RuntimeStateStore,
         eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
     ): HookInstallResult {
         val usingStrings = mutableListOf<String>()
         val usingArr = t.optJSONArray("using_strings")
@@ -296,6 +319,7 @@ class HookEntry : IXposedHookLoadPackage {
                             cl = classLoader,
                             runtimeState = runtimeState,
                             eventBus = eventBus,
+                            contextRuntime = contextRuntime,
                         )
                         handles.addAll(installed.handles)
                         members.addAll(installed.members)
@@ -316,6 +340,7 @@ class HookEntry : IXposedHookLoadPackage {
                 cl = classLoader,
                 runtimeState = runtimeState,
                 eventBus = eventBus,
+                contextRuntime = contextRuntime,
             )
         }
 
@@ -330,6 +355,7 @@ class HookEntry : IXposedHookLoadPackage {
             classLoader = classLoader,
             runtimeState = runtimeState,
             eventBus = eventBus,
+            contextRuntime = contextRuntime,
         )
     }
 
@@ -340,6 +366,7 @@ class HookEntry : IXposedHookLoadPackage {
         cl: ClassLoader,
         runtimeState: RuntimeStateStore,
         eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
     ): HookInstallResult {
         val className = t.optString("class")
         if (className.isEmpty()) {
@@ -353,6 +380,7 @@ class HookEntry : IXposedHookLoadPackage {
             classLoader = cl,
             runtimeState = runtimeState,
             eventBus = eventBus,
+            contextRuntime = contextRuntime,
             spec = t,
         )
 
@@ -435,6 +463,7 @@ class HookEntry : IXposedHookLoadPackage {
         classLoader: ClassLoader,
         runtimeState: RuntimeStateStore,
         eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
     ): HookInstallResult {
         return try {
             val eventPart = installEventHandlers(
@@ -443,6 +472,7 @@ class HookEntry : IXposedHookLoadPackage {
                 classLoader = classLoader,
                 runtimeState = runtimeState,
                 eventBus = eventBus,
+                contextRuntime = contextRuntime,
             )
             HookInstallResult(
                 handles = base.handles + eventPart.handles,
@@ -465,6 +495,7 @@ class HookEntry : IXposedHookLoadPackage {
         classLoader: ClassLoader,
         runtimeState: RuntimeStateStore,
         eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
     ): HookInstallResult {
         val definitions = mutableListOf<JSONObject>()
         val array = t.optJSONArray("on_event")
@@ -523,6 +554,7 @@ class HookEntry : IXposedHookLoadPackage {
                         runtimeState = runtimeState,
                         eventBus = eventBus,
                         runtimeEvent = event,
+                        contextRuntime = contextRuntime,
                     )
                     ActionExecutor.executeEventHandler(
                         ctx,
@@ -588,6 +620,7 @@ private class TraceCallback(
     private val classLoader: ClassLoader,
     private val runtimeState: RuntimeStateStore,
     private val eventBus: RuntimeEventBus,
+    private val contextRuntime: RuntimeContextProvider,
     spec: JSONObject,
 ) : XC_MethodHook() {
 
@@ -607,6 +640,7 @@ private class TraceCallback(
             hookId = id,
             runtimeState = runtimeState,
             eventBus = eventBus,
+            contextRuntime = contextRuntime,
         )
         // 先按原始输入出事件，再改参数/执行 before pipeline
         if (whenPhase == "before" || whenPhase == "both") emit(param, "before", withRet = false)
@@ -625,6 +659,7 @@ private class TraceCallback(
             hookId = id,
             runtimeState = runtimeState,
             eventBus = eventBus,
+            contextRuntime = contextRuntime,
         )
         try {
             ActionExecutor.executeActions(ctx, action, "after")
@@ -876,6 +911,7 @@ private class TraceCallback(
             hookId = id,
             runtimeState = runtimeState,
             eventBus = eventBus,
+            contextRuntime = contextRuntime,
         )
         return ActionExecutor.resolvePath(ctx, expr0)
     }
