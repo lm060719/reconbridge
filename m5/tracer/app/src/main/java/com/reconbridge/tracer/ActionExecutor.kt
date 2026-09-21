@@ -976,10 +976,11 @@ internal object ActionExecutor {
 
         when {
             expr.startsWith("state.") -> {
-                return ctx.runtimeState?.resolve(
+                val state = ctx.runtimeState ?: return MISSING
+                return state.resolve(
                     expr,
                     ctx.hookId,
-                ) ?: MISSING
+                )
             }
             expr == "event" ||
                 expr.startsWith("event.") ||
