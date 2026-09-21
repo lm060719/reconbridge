@@ -227,6 +227,61 @@ def test_runtime_path_records_observed_sequence_edges():
     assert runtime_edges[0]["delta_ms"] == 12.0
 
 
+def test_field_origin_records_writer_reader_and_source_nodes():
+    graph = evidence.new_graph()
+    context = {
+        "ok": True,
+        "field": {
+            "class": "com.example.PayManager",
+            "name": "premiumStatus",
+            "type": "Z",
+        },
+        "writers": [
+            {
+                "class": "com.example.PayManager",
+                "method": "loadState",
+                "descriptor": "()V",
+                "offset": 12,
+                "rank": 1,
+                "runtime_confirmed": True,
+                "runtime_hits": 2,
+                "assignments": [
+                    {
+                        "expression": 'preferences.getBoolean("vip", false)',
+                        "source_hints": [
+                            {
+                                "kind": "preferences",
+                                "confidence": 0.95,
+                                "reason": "来自偏好存储",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "readers": [
+            {
+                "class": "com.example.PayManager",
+                "method": "checkVip",
+                "descriptor": "()Z",
+                "offset": 24,
+            }
+        ],
+    }
+
+    evidence.record_field_origin(graph, context)
+
+    relations = {edge["relation"] for edge in graph["edges"]}
+    assert "writes_field" in relations
+    assert "read_by" in relations
+    assert "feeds_writer" in relations
+    assert any(
+        node.get("type") == "state_origin"
+        and node.get("kind") == "preferences"
+        for node in graph["nodes"].values()
+    )
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
