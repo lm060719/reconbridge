@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -234,15 +235,18 @@ static std::string read_whole_file(const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
-// 免重启热加（P0-2）：注入连接注册表 + 控制帧下发。
-// 每个注入连接注册进来（按主包名）；tracer 握手后发 'H' 帧声明"可热加"。
-// /hook 时若目标进程在跑且可热加，向其下发 'R'(reload) 控制帧（payload=新配置），
-// tracer 增量装新 target（只加不删），免 force-stop。native 层不发 'H'，不受影响。
+// LSPosed Runtime Phase 1：注入连接注册表 + 实时配置同步。
+// 每个 tracer 连接注册进来；'H' 声明支持 live reconcile，daemon 用 'R' 下发完整期望配置。
+// tracer 的 HookRegistry 据此执行 add/remove/replace，并通过 'S' 帧回报真实运行时状态。
+// native 层不发 'H'/'S'，仍保持原有下次启动/重启生效语义。
 // ---------------------------------------------------------------------------
 struct InjectConn {
     int fd;
     std::string base_pkg;
+    std::string process_name;
     bool reload_capable = false;
+    json runtime_status = nullptr;
+    int64_t status_updated_at = 0;
 };
 static std::mutex g_conn_mutex;
 static std::vector<std::shared_ptr<InjectConn>> g_conns;
@@ -260,7 +264,51 @@ static void reg_mark_reloadable(const std::shared_ptr<InjectConn>& c) {
     std::lock_guard<std::mutex> lk(g_conn_mutex);
     c->reload_capable = true;
 }
-// 向某包所有"可热加"连接下发 'R'(reload) 帧，payload=新配置 JSON。返回下发到的进程数。
+static int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+static void reg_update_status(const std::shared_ptr<InjectConn>& c, const std::string& payload) {
+    json status;
+    try {
+        status = json::parse(payload);
+    } catch (...) {
+        log_line("Tracer runtime status 解析失败：" + c->process_name);
+        return;
+    }
+    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    c->runtime_status = std::move(status);
+    c->status_updated_at = now_ms();
+}
+
+static json runtime_status_snapshot(const std::string& package_filter) {
+    json processes = json::array();
+    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    for (const auto& c : g_conns) {
+        if (!package_filter.empty() && c->base_pkg != package_filter)
+            continue;
+        json row = {
+            {"package", c->base_pkg},
+            {"process", c->process_name},
+            {"connected", true},
+            {"live_reconcile", c->reload_capable},
+            {"status_updated_at", c->status_updated_at}
+        };
+        if (!c->runtime_status.is_null())
+            row["runtime"] = c->runtime_status;
+        else
+            row["runtime"] = nullptr;
+        processes.push_back(std::move(row));
+    }
+    return {
+        {"count", processes.size()},
+        {"package", package_filter.empty() ? json(nullptr) : json(package_filter)},
+        {"processes", processes}
+    };
+}
+
+// 向某包所有支持 live reconcile 的 tracer 下发 'R'，payload=完整期望配置 JSON。
 static int hot_reload(const std::string& base_pkg, const std::string& cfg) {
     std::lock_guard<std::mutex> lk(g_conn_mutex);
     int n = 0;
@@ -309,8 +357,9 @@ static void inject_client(int fd) {
     auto conn = std::make_shared<InjectConn>();
     conn->fd = fd;
     conn->base_pkg = base_pkg;
+    conn->process_name = pkg;
     reg_add(conn);
-    // 回传通道：分帧 [type:1][len:4][payload]。'E'=事件JSON(广播)，'D'=内存 dump(落盘)，'H'=声明可热加
+    // 回传通道：'E'=事件，'D'=dump，'H'=声明 live reconcile，'S'=HookRegistry runtime status。
     while (true) {
         char type = 0;
         if (!sock_read_full(fd, &type, 1)) break;
@@ -319,8 +368,10 @@ static void inject_client(int fd) {
         std::string payload(len, 0);
         if (len && !sock_read_full(fd, &payload[0], len)) break;
         if (type == 'H') {
-            reg_mark_reloadable(conn);  // tracer 声明支持热加（native 层不发，故不受影响）
-            log_line("注入层声明可热加：" + pkg);
+            reg_mark_reloadable(conn);
+            log_line("Tracer 声明支持 live reconcile：" + pkg);
+        } else if (type == 'S') {
+            reg_update_status(conn, payload);
         } else if (type == 'E') {
             g_broadcaster.broadcast(payload);
         } else if (type == 'D') {
@@ -455,12 +506,12 @@ static void handle_hook(const Request& req, Response& res) {
         run_detached({"am", "force-stop", pkg});
         note = "配置已写入，并已 force-stop 目标以触发重新注入";
     } else {
-        // 免重启：向运行中的可热加进程下发 reload（native 层不响应，仍需下次启动）
+        // 免重启：向运行中的 tracer 下发“完整期望配置”，HookRegistry 会 reconcile add/remove/replace。
         hot = hot_reload(pkg, written);
         if (hot > 0)
-            note = "配置已写入，并已热注入到 " + std::to_string(hot) + " 个运行中进程（免重启）";
+            note = "配置已写入，并已实时同步到 " + std::to_string(hot) + " 个运行中进程";
         else
-            note = "配置已写入；无运行中的可热加进程，将在目标下次启动时生效";
+            note = "配置已写入；无运行中的 live reconcile 进程，将在目标下次启动时生效";
     }
     json installed = json::array();
     for (auto& t : body["targets"]) installed.push_back({{"id", t["id"]}});
@@ -481,15 +532,24 @@ static void handle_unhook(const Request& req, Response& res) {
         reply(res, 400, {{"error", "invalid package"}});
         return;
     }
+
     std::string p = hook_path(pkg);
+    json desired = {
+        {"package", pkg},
+        {"restart", false},
+        {"targets", json::array()}
+    };
+    bool config_existed = false;
+    std::string removed_id;
+
     if (body.contains("id") && body["id"].is_string()) {
-        // 只移除某个 target
-        std::string id = body["id"];
+        removed_id = body["id"].get<std::string>();
         std::ifstream in(p);
         if (!in.good()) {
             reply(res, 404, {{"error", "该包无 hook 配置"}});
             return;
         }
+
         json cfg;
         try {
             in >> cfg;
@@ -497,22 +557,57 @@ static void handle_unhook(const Request& req, Response& res) {
             reply(res, 500, {{"error", "配置损坏"}});
             return;
         }
+
+        config_existed = true;
         json kept = json::array();
-        for (auto& t : cfg["targets"])
-            if (t.value("id", "") != id) kept.push_back(t);
+        for (auto& t : cfg.value("targets", json::array()))
+            if (t.value("id", "") != removed_id) kept.push_back(t);
+
+        desired = cfg;
+        desired["package"] = pkg;
+        desired["restart"] = false;
+        desired["targets"] = kept;
+
         if (kept.empty()) {
             ::remove(p.c_str());
         } else {
-            cfg["targets"] = kept;
             std::ofstream out(p, std::ios::trunc);
-            out << cfg.dump(2);
+            out << desired.dump(2);
         }
-        reply(res, 200, {{"ok", true}, {"package", pkg}, {"removed_id", id}});
+    } else {
+        config_existed = (::remove(p.c_str()) == 0);
+    }
+
+    // 即使磁盘配置已被删除，也向仍连接的 tracer 下发 targets:[]，
+    // 让 HookRegistry 立即调用 XC_MethodHook.Unhook.unhook()。
+    int hot = hot_reload(pkg, desired.dump());
+    std::string note;
+    if (hot > 0)
+        note = "配置已移除，并已向 " + std::to_string(hot) + " 个运行中进程执行 live unhook";
+    else
+        note = "配置已移除；当前无运行中的 live reconcile 进程";
+
+    json result = {
+        {"ok", true},
+        {"package", pkg},
+        {"removed", config_existed},
+        {"hot_unhooked", hot},
+        {"note", note}
+    };
+    if (!removed_id.empty())
+        result["removed_id"] = removed_id;
+    reply(res, 200, result);
+}
+
+static void handle_runtime_status(const Request& req, Response& res) {
+    std::string pkg;
+    if (req.has_param("package"))
+        pkg = req.get_param_value("package");
+    if (!pkg.empty() && !valid_pkg(pkg)) {
+        reply(res, 400, {{"error", "invalid package"}});
         return;
     }
-    // 移除整个包
-    bool existed = (::remove(p.c_str()) == 0);
-    reply(res, 200, {{"ok", true}, {"package", pkg}, {"removed", existed}});
+    reply(res, 200, runtime_status_snapshot(pkg));
 }
 
 static void handle_hooks(const Request&, Response& res) {
@@ -652,6 +747,7 @@ void register_routes(httplib::Server& svr) {
     svr.Post("/hook", handle_hook);
     svr.Post("/unhook", handle_unhook);
     svr.Get("/hooks", handle_hooks);
+    svr.Get("/runtime_status", handle_runtime_status);
     svr.Post("/dump_dex", handle_dump_dex);
     svr.Get("/dumps", handle_dumps);
     svr.Get("/events", handle_events_sse);  // SSE
