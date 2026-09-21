@@ -512,6 +512,50 @@ class HookRegistryTest
     }
 
     @Test
+    fun removingInstalledHookWithPendingReplacementCleansLifecycleOnce()
+    {
+        val mainLoader = object : ClassLoader(null) {}
+        val cleanupIds = mutableListOf<String>()
+
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 753,
+            initialClassLoader = mainLoader,
+            onHookRemoved = { id ->
+                cleanupIds.add(id)
+            },
+        ) { spec, _ ->
+            if (spec.getString("class") == "plugin.Target") {
+                throw ClassNotFoundException("plugin.Target")
+            }
+            HookInstallResult(
+                handles = listOf(FakeHandle()),
+                members = listOf("Target.check()"),
+            )
+        }
+
+        registry.reconcile(
+            JSONArray().put(target("same"))
+        )
+
+        val replacement = target("same").apply {
+            put("class", "plugin.Target")
+        }
+        registry.reconcile(
+            JSONArray().put(replacement)
+        )
+
+        val waiting = registry.snapshotJson()
+        assertEquals(1, waiting.getInt("installed_count"))
+        assertEquals(1, waiting.getInt("pending_count"))
+
+        registry.reconcile(JSONArray())
+
+        assertEquals(listOf("same"), cleanupIds)
+    }
+
+    @Test
     fun fingerprintIsStableAcrossObjectKeyOrder()
     {
         val left = JSONObject().apply {
