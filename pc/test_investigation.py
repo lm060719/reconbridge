@@ -94,6 +94,64 @@ public class PayManager {
     assert "return true;" in result["text"]
 
 
+def test_call_graph_scenario_storage_is_session_scoped(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
+
+    pkg = "com.example.target"
+    apk_dir = tmp_path / pkg / "apk"
+    apk_dir.mkdir(parents=True)
+    (apk_dir / "base.apk").write_bytes(b"fake-apk")
+
+    state = investigation.create(pkg)
+    session_id = state["session_id"]
+
+    saved = investigation.save_call_scenario(
+        session_id,
+        "非会员",
+        {
+            "graph_fingerprint": "graph-1",
+            "hook_fingerprint": "hooks-1",
+            "analysis": {
+                "event_count": 3,
+                "observed_nodes": 3,
+                "primary_tid": 7,
+            },
+        },
+    )
+
+    assert saved["name"] == "非会员"
+    loaded = investigation.load_call_scenario(session_id, "非会员")
+    assert loaded["graph_fingerprint"] == "graph-1"
+
+    listed = investigation.list_call_scenarios(session_id)
+    assert len(listed) == 1
+    assert listed[0]["observed_nodes"] == 3
+
+    status = investigation.status(session_id)
+    assert status["call_scenario_count"] == 1
+
+
+def test_call_graph_scenario_rejects_unsafe_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
+
+    pkg = "com.example.target"
+    (tmp_path / pkg / "apk").mkdir(parents=True)
+    state = investigation.create(pkg)
+
+    try:
+        investigation.save_call_scenario(
+            state["session_id"],
+            "../escape",
+            {"analysis": {}},
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unsafe scenario name should be rejected")
+
+
 def test_investigation_rejects_invalid_session_id(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workdir", tmp_path)
     monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
