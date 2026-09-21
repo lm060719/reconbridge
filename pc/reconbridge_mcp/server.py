@@ -4500,6 +4500,73 @@ def runtime_state_set(
 
 
 @mcp.tool()
+def runtime_state_remove(
+    package: str,
+    key: str,
+    scope: str = "process",
+    hook_id: str = "",
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """删除在线 M5 Runtime State 的一个 key，并返回旧值。"""
+    return _runtime_command(
+        package,
+        "state_remove",
+        process=process,
+        timeout_ms=timeout_ms,
+        scope=scope,
+        key=key,
+        hook_id=hook_id,
+    )
+
+
+@mcp.tool()
+def runtime_state_increment(
+    package: str,
+    key: str,
+    delta: float = 1.0,
+    scope: str = "process",
+    hook_id: str = "",
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """原子增加在线 Runtime State 数值；不存在时从 0 开始。"""
+    return _runtime_command(
+        package,
+        "state_increment",
+        process=process,
+        timeout_ms=timeout_ms,
+        scope=scope,
+        key=key,
+        delta=float(delta),
+        hook_id=hook_id,
+    )
+
+
+@mcp.tool()
+def runtime_state_append(
+    package: str,
+    key: str,
+    value: Any,
+    scope: str = "process",
+    hook_id: str = "",
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """向在线 Runtime State 列表追加一个 JSON 值。"""
+    return _runtime_command(
+        package,
+        "state_append",
+        process=process,
+        timeout_ms=timeout_ms,
+        scope=scope,
+        key=key,
+        value=value,
+        hook_id=hook_id,
+    )
+
+
+@mcp.tool()
 def runtime_state_clear(
     package: str,
     scope: str = "process",
