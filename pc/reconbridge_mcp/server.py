@@ -2241,7 +2241,7 @@ def inspect_value_lineage(
         elif lineage.get("origin_paths"):
             next_action = (
                 "优先查看 origin_paths 中最长且 runtime_confirmed 节点最多的链；"
-                "需要确认真实数据流时可对链上关键方法继续 trace_target"
+                "下一步分别 verify_value_lineage 采集 A/B，再 compare_value_lineage_runtime 找最早真实值差异"
             )
         else:
             next_action = (
@@ -2298,8 +2298,8 @@ def inspect_value_lineage(
             "origin_kind": "condition_method",
             "lineage": lineage,
             "next_action": (
-                "查看 origin_paths；若某层出现 ambiguities，先解析接收者实际类型，"
-                "否则对链上 Repository/API/模型 getter 做 runtime trace 继续确认"
+                "查看 origin_paths；若某层出现 ambiguities，先解析接收者实际类型；"
+                "无歧义时分别 verify_value_lineage 采集 A/B 并比较链上返回值"
             ),
         }
 
