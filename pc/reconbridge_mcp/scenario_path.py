@@ -76,6 +76,19 @@ def graph_methods(
     return result
 
 
+def hook_fingerprint(methods: list[dict[str, Any]]) -> str:
+    rows = sorted(
+        (
+            int(item.get("node_id", -1)),
+            runtime_path.normalize_class_name(str(item.get("class", ""))),
+            str(item.get("method", "")),
+        )
+        for item in methods
+    )
+    raw = json.dumps(rows, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
 def _sort_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def key(event: dict[str, Any]) -> tuple[float, int]:
         try:
@@ -271,7 +284,14 @@ def diff_graph_scenarios(
     """对比同一静态调用图上的两次真实执行场景。"""
     fp_a = str(scenario_a.get("graph_fingerprint", ""))
     fp_b = str(scenario_b.get("graph_fingerprint", ""))
-    comparable = bool(fp_a and fp_a == fp_b)
+    hook_fp_a = str(scenario_a.get("hook_fingerprint", ""))
+    hook_fp_b = str(scenario_b.get("hook_fingerprint", ""))
+    comparable = bool(
+        fp_a
+        and fp_a == fp_b
+        and hook_fp_a
+        and hook_fp_a == hook_fp_b
+    )
 
     analysis_a = scenario_a.get("analysis") or {}
     analysis_b = scenario_b.get("analysis") or {}
@@ -354,6 +374,8 @@ def diff_graph_scenarios(
         "comparable": comparable,
         "graph_fingerprint_a": fp_a,
         "graph_fingerprint_b": fp_b,
+        "hook_fingerprint_a": hook_fp_a,
+        "hook_fingerprint_b": hook_fp_b,
         "a": scenario_a.get("name", ""),
         "b": scenario_b.get("name", ""),
         "common_nodes": len(nodes_a & nodes_b),
@@ -374,6 +396,6 @@ def diff_graph_scenarios(
         "error": (
             None
             if comparable
-            else "两个场景不是基于同一张静态调用图，无法可靠比较分支"
+            else "两个场景的静态调用图或 Hook 方法集合不一致，无法可靠比较分支"
         ),
     }
