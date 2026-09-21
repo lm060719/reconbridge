@@ -13,8 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .dex_index import index_status, method_call_graph, method_relations
-from . import evidence
+from .dex_index import field_relations, index_status, method_call_graph, method_relations
+from . import evidence, state_origin
 from .settings import settings
 
 _SESSION_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -419,6 +419,143 @@ def method_context(
     }
 
 
+def field_origin_context(
+    session_id: str,
+    class_name: str,
+    field_name: str,
+    field_type: str = "",
+    limit: int = 50,
+    include_source: bool = True,
+) -> dict[str, Any]:
+    """聚合字段读写 xref、writer 源码、运行时证据和来源分类。"""
+    state = load(session_id, refresh=True)
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {"ok": False, "error": "当前会话没有 APK"}
+
+    relations = field_relations(
+        apk,
+        class_name,
+        field_name,
+        field_type=field_type,
+        limit=limit,
+    )
+    if not relations.get("ok"):
+        return relations
+
+    runtime = evidence.runtime_method_stats(
+        state.get("evidence_graph") or evidence.new_graph()
+    )
+
+    def enrich_method(item: dict[str, Any], with_source: bool) -> dict[str, Any]:
+        row = dict(item)
+        normalized_class = _normalize_class_name(str(row.get("class", "")))
+        key = (normalized_class, str(row.get("method", "")))
+        stats = runtime.get(key, {})
+        row["class"] = normalized_class
+        row["runtime_confirmed"] = bool(stats.get("runtime_confirmed"))
+        row["runtime_hits"] = int(stats.get("runtime_hits", 0) or 0)
+        if with_source:
+            row["source"] = source_method_context(
+                session_id,
+                normalized_class,
+                str(row.get("method", "")),
+                context_lines=8,
+                max_chars=30_000,
+            )
+        return row
+
+    writers = [
+        enrich_method(item, include_source)
+        for item in (relations.get("writers") or [])[:limit]
+    ]
+    readers = [
+        enrich_method(item, False)
+        for item in (relations.get("readers") or [])[:limit]
+    ]
+    ranked_writers = state_origin.rank_field_writers(field_name, writers)
+
+    source_kinds: list[dict[str, Any]] = []
+    seen_kinds: set[str] = set()
+    for writer in ranked_writers:
+        hint = writer.get("best_source_hint")
+        if not isinstance(hint, dict):
+            continue
+        kind = str(hint.get("kind", ""))
+        if not kind or kind in seen_kinds:
+            continue
+        seen_kinds.add(kind)
+        source_kinds.append(
+            {
+                **hint,
+                "writer": (
+                    f"{writer.get('class', '')}.{writer.get('method', '')}"
+                ),
+                "writer_rank": writer.get("rank"),
+            }
+        )
+
+    return {
+        "ok": True,
+        "backend": relations.get("backend"),
+        "field": {
+            "class": _normalize_class_name(class_name),
+            "name": field_name,
+            "type": field_type or (
+                (relations.get("fields") or [{}])[0].get("type", "")
+            ),
+        },
+        "definitions": relations.get("fields", []),
+        "writer_count": len(ranked_writers),
+        "reader_count": len(readers),
+        "writers": ranked_writers,
+        "readers": readers,
+        "source_kinds": source_kinds,
+        "top_writer": ranked_writers[0] if ranked_writers else None,
+        "index_path": relations.get("index_path", ""),
+    }
+
+
+def condition_method_origin_context(
+    session_id: str,
+    class_name: str,
+    method_name: str,
+    descriptor: str = "",
+) -> dict[str, Any]:
+    """解释条件方法返回值从哪里计算出来。"""
+    context = method_context(
+        session_id,
+        class_name,
+        method_name,
+        descriptor=descriptor,
+        relation_limit=50,
+        include_source=True,
+    )
+    source = context.get("source") or {}
+    analysis = (
+        state_origin.analyze_condition_method_source(
+            str(source.get("text", ""))
+        )
+        if source.get("available")
+        else {
+            "return_count": 0,
+            "returns": [],
+            "source_hints": [],
+            "best_source_hint": None,
+        }
+    )
+    return {
+        "ok": bool(source.get("available")) or bool(
+            (context.get("relations") or {}).get("ok")
+        ),
+        "class": _normalize_class_name(class_name),
+        "method": method_name,
+        "descriptor": descriptor,
+        "context": context,
+        "value_source": analysis,
+    }
+
+
 def record_method_context_evidence(
     session_id: str,
     class_name: str,
@@ -435,6 +572,16 @@ def record_method_context_evidence(
         descriptor,
         context,
     )
+    save(state)
+
+
+def record_field_origin_evidence(
+    session_id: str,
+    context: dict[str, Any],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_field_origin(graph, context)
     save(state)
 
 
