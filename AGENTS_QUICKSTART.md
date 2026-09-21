@@ -43,11 +43,24 @@
 - `install.ps1` / `install.sh` 会把 reconbridge **注册到用户级**（`~/.claude.json` 的 `/mcpServers`，绝对路径指向你克隆仓库里的 venv 与 `pc/`），**任意文件夹的新会话都会自动加载**。新会话 = 重启 MCP server = 自动加载最新 `pc/reconbridge_mcp` 代码（含最新工具/修复）。
 - **前提**：① 别移动/删除仓库目录（用户级配置写死了它的 venv + `pc/` 绝对路径；仓库挪了就改 `~/.claude.json` 里对应两处路径）；② 手机已刷模块、端口已开、adb 连得上。
 - **第一步永远先** `device_status` 确认连得上（返回 `/health` 即 OK）。
-- 这些 MCP 工具在会话里可能是**延迟加载**的：先 `ToolSearch("select:mcp__reconbridge__device_status,...")` 拿到 schema 再调。
+- 已知目标包名后，**默认第二步是 `open_target(package_name)`**。之后围绕返回的 `session_id` 使用 `search_target` / `prepare_target` / `trace_target`；不要默认手工串原子工具。
+- 这些 MCP 工具在会话里可能是**延迟加载**的：优先加载 `device_status,open_target,search_target,prepare_target,trace_target,investigation_status,close_investigation`，特殊需求再拿原子工具 schema。
 
 ---
 
-## 3. 全部 MCP 工具（25 个）
+## 3. MCP 工具：默认高层入口 + 原子能力
+
+### 3.0 默认高层任务模式（优先）
+| 工具 | 用途 |
+|---|---|
+| `open_target(package_name, auto_pull=True, note="")` | 创建持久化分析会话；自动绑定本地 APK/JADX/so，本地没 APK 时默认尝试从设备拉取 |
+| `search_target(session_id, query, kind="auto", limit=20)` | 统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则走受内存限制且有持久缓存的 Androguard worker |
+| `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
+| `trace_target(session_id, class_name, method, ...)` | 会话化 Java trace；自动包名/游标/唯一 Hook，默认命中即返回并自动清理临时 Hook |
+| `investigation_status(session_id)` | 查看当前会话资产、发现记录、游标与临时 Hook |
+| `close_investigation(session_id, cleanup_hooks=True)` | 结束会话并默认清理目标 Hook |
+
+> **Agent 决策规则**：能用高层工具完成，就不要拆成多个原子调用。原子工具用于 native、高级 patch、协议调试和高层入口尚未覆盖的特殊场景。
 
 ### 3.1 设备原子能力（M1，7 个）
 | 工具 | 签名 | 用途 |
@@ -122,23 +135,26 @@
 
 ## 5. 典型工作流（示例包名/类名请替换成你的目标）
 
-**A. 摸清一个 App 的结构（侦察）**
+**A. 摸清一个 App 的结构（推荐）**
 ```
-device_status → list_packages(name_filter="关键字") → pull_apk("com.target.app")
-→ decompile_apk(base.apk) / dexkit_search(base.apk, {"find":"method","using_strings":[...]})
-→ (加壳/动态 dex) dump_dex(...) 或 pull_libs + ghidra_analyze
+device_status
+→ open_target("com.target.app")                 # 返回 session_id
+→ search_target(session_id, "会员")             # 默认先轻量定位，不先全量 JADX
+→ prepare_target(session_id)                    # 只有需要完整源码上下文时再做
+→ search_target(session_id, "premiumStatus")
 ```
+重复搜索同一个 APK/查询会直接命中持久缓存，不再重复启动 Androguard。
 
-**B. 定位并观测一个 Java 方法（LSPosed 开发前的侦察）**
+**B. 定位并观测一个 Java 方法（推荐）**
 ```
 # 先确保 Tracer 模块已启用且目标 App 在 LSPosed 作用域内
-trace_java(package="com.target.app",
-           class_name="com.target.Foo", method="doWork",
-           capture_args=[{"index":1,"render":"json","max":2000}],
-           fields=[{"target":"this","name":"mState","render":"tostring"}],
-           restart=True, seconds=30)
-# 手机上触发目标行为 → 秒级拿到参数/返回值/字段/调用顺序，无需建 APK
+trace_target(session_id,
+             class_name="com.target.Foo", method="doWork",
+             paths=[{"path":"args[1].payload","render":"deep"}],
+             seconds=30)
+# 默认命中即返回，并自动卸载这次临时 Hook
 ```
+复杂持续 Hook、篡改或原始协议调试再使用 `trace_java` / `patch_java` / `post_hook`。
 
 **C. 实时篡改验证（不写模块就试想法）**
 ```
@@ -209,6 +225,7 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 ## 8. 起手式（新会话照抄）
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
-2. 明确目标 App 包名（`list_packages`）。
-3. 侦察走 §5.A；要看/改 Java 行为走 §5.B/C（**先确认 Tracer 模块已在 LSPosed 启用并勾了该 App**）。
-4. 记住 §6 的坑，尤其 `restart:true`、采集时序、篡改后 `unhook`。
+2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
+3. 静态定位默认 `search_target`；需要完整源码才 `prepare_target`；候选方法运行时验证默认 `trace_target`。
+4. 只有 native、复杂 patch 或高层入口覆盖不了时，才退回原子工具。
+5. 结束时 `close_investigation`，默认清理目标 Hook。
