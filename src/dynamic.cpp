@@ -13,7 +13,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -43,6 +45,8 @@ static std::string g_base_dir;
 static std::string g_hooks_dir;
 static std::string g_events_log;
 static std::string g_dumps_dir;
+static std::string g_programs_dir;
+static std::mutex g_program_mutex;
 
 static void log_line(const std::string& s) {
     std::ofstream f(g_base_dir + "/daemon.log", std::ios::app);
@@ -502,6 +506,85 @@ static json send_runtime_command_to_conn(
     return response;
 }
 
+static json dispatch_runtime_command_internal(
+    const std::string& pkg,
+    const std::string& process,
+    json command,
+    int timeout_ms) {
+    if (timeout_ms < 200) timeout_ms = 200;
+    if (timeout_ms > 10000) timeout_ms = 10000;
+    command["_timeout_ms"] = timeout_ms;
+
+    std::vector<std::shared_ptr<InjectConn>> targets;
+    {
+        std::lock_guard<std::mutex> lk(g_conn_mutex);
+        for (const auto& conn : g_conns) {
+            if (conn->base_pkg != pkg || !conn->command_capable)
+                continue;
+            if (!process.empty() && conn->process_name != process)
+                continue;
+            targets.push_back(conn);
+        }
+    }
+
+    if (targets.empty()) {
+        return {
+            {"ok", false},
+            {"package", pkg},
+            {"process", process.empty() ? json(nullptr) : json(process)},
+            {"targeted", 0},
+            {"succeeded", 0},
+            {"op", command.value("op", "")},
+            {"error", "没有在线且支持 Runtime Command 的 Tracer 进程"}
+        };
+    }
+
+    std::vector<std::future<json>> futures;
+    futures.reserve(targets.size());
+    for (const auto& conn : targets) {
+        futures.push_back(std::async(
+            std::launch::async,
+            [conn, command, timeout_ms]() mutable {
+                return send_runtime_command_to_conn(
+                    conn,
+                    command,
+                    timeout_ms);
+            }));
+    }
+
+    json results = json::array();
+    size_t succeeded = 0;
+    for (auto& future : futures) {
+        json result;
+        try {
+            result = future.get();
+        } catch (const std::exception& e) {
+            result = {
+                {"ok", false},
+                {"error", e.what()}
+            };
+        } catch (...) {
+            result = {
+                {"ok", false},
+                {"error", "Runtime Command 未知异常"}
+            };
+        }
+        if (result.value("ok", false))
+            ++succeeded;
+        results.push_back(std::move(result));
+    }
+
+    return {
+        {"ok", succeeded > 0},
+        {"package", pkg},
+        {"process", process.empty() ? json(nullptr) : json(process)},
+        {"targeted", targets.size()},
+        {"succeeded", succeeded},
+        {"op", command.value("op", "")},
+        {"results", results}
+    };
+}
+
 static void inject_client(int fd) {
     uint32_t plen = 0;
     if (!sock_read_full(fd, &plen, 4) || plen == 0 || plen > 1024) { close(fd); return; }
@@ -632,6 +715,845 @@ static void reply(Response& res, int status, const json& j) {
 
 static std::string hook_path(const std::string& pkg) {
     return g_hooks_dir + "/" + pkg + ".json";
+}
+
+
+static bool valid_runtime_program_id(const std::string& value) {
+    if (value.empty() || value.size() > 64) return false;
+    for (char ch : value) {
+        if (!(isalnum((unsigned char)ch) || ch == '.' || ch == '_' || ch == '-'))
+            return false;
+    }
+    return true;
+}
+
+static std::string runtime_program_package_dir(const std::string& pkg) {
+    return g_programs_dir + "/" + pkg;
+}
+
+static std::string runtime_program_path(
+    const std::string& pkg,
+    const std::string& program_id) {
+    return runtime_program_package_dir(pkg) + "/" + program_id + ".json";
+}
+
+static bool read_json_file(const std::string& path, json& out) {
+    std::ifstream in(path);
+    if (!in.good()) return false;
+    try {
+        in >> out;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+static bool write_json_atomic(
+    const std::string& path,
+    const json& value) {
+    const std::string tmp =
+        path + ".tmp." + std::to_string((long long)getpid());
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        if (!out.good()) return false;
+        out << value.dump(2);
+        out.flush();
+        if (!out.good()) {
+            ::remove(tmp.c_str());
+            return false;
+        }
+    }
+    if (::rename(tmp.c_str(), path.c_str()) != 0) {
+        ::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+static std::string normalize_program_scope(
+    const std::string& raw) {
+    if (raw.empty() || raw == "global") return "process";
+    if (raw == "pkg") return "package";
+    return raw;
+}
+
+static bool normalize_runtime_program_manifest(
+    const json& input,
+    json& normalized,
+    std::string& error) {
+    if (!input.is_object()) {
+        error = "manifest 必须是 JSON object";
+        return false;
+    }
+
+    normalized = input;
+    const std::string id = normalized.value("id", "");
+    if (!valid_runtime_program_id(id)) {
+        error = "manifest.id 无效：仅允许 1-64 位字母数字 . _ -";
+        return false;
+    }
+
+    if (!normalized.contains("name"))
+        normalized["name"] = id;
+    if (!normalized.contains("version"))
+        normalized["version"] = "1";
+    if (!normalized["name"].is_string() ||
+        !normalized["version"].is_string()) {
+        error = "manifest.name / version 必须是字符串";
+        return false;
+    }
+
+    if (!normalized.contains("targets"))
+        normalized["targets"] = json::array();
+    if (!normalized["targets"].is_array()) {
+        error = "manifest.targets 必须是数组";
+        return false;
+    }
+    if (normalized["targets"].size() > 128) {
+        error = "manifest.targets 最多 128 项";
+        return false;
+    }
+
+    std::set<std::string> local_ids;
+    size_t target_index = 0;
+    for (auto& target : normalized["targets"]) {
+        if (!target.is_object()) {
+            error = "manifest.targets 每项必须是 object";
+            return false;
+        }
+        std::string local_id = target.value("id", "");
+        if (local_id.empty())
+            local_id = "t" + std::to_string(target_index);
+        if (!valid_runtime_program_id(local_id) ||
+            local_id == "__bootstrap") {
+            error = "target.id 无效或使用了保留 id __bootstrap";
+            return false;
+        }
+        if (!local_ids.insert(local_id).second) {
+            error = "manifest.targets 存在重复 id: " + local_id;
+            return false;
+        }
+        target["id"] = local_id;
+
+        const std::string kind = target.value("kind", "java");
+        if (kind != "java" && kind != "runtime") {
+            error = "Runtime Program target 仅支持 kind=java/runtime";
+            return false;
+        }
+        target["kind"] = kind;
+        ++target_index;
+    }
+
+    for (const char* key : {"state_init", "state_cleanup"}) {
+        if (!normalized.contains(key))
+            normalized[key] = json::array();
+        if (!normalized[key].is_array()) {
+            error = std::string("manifest.") + key + " 必须是数组";
+            return false;
+        }
+        if (normalized[key].size() > 128) {
+            error = std::string("manifest.") + key + " 最多 128 项";
+            return false;
+        }
+        for (auto& row : normalized[key]) {
+            if (!row.is_object()) {
+                error = std::string("manifest.") + key + " 每项必须是 object";
+                return false;
+            }
+            const std::string scope =
+                normalize_program_scope(row.value("scope", "process"));
+            if (scope != "process" && scope != "package") {
+                error = std::string("manifest.") + key +
+                    " 目前只支持 process/package scope";
+                return false;
+            }
+            const std::string state_key = row.value("key", "");
+            if (state_key.empty()) {
+                error = std::string("manifest.") + key + ".key 不能为空";
+                return false;
+            }
+            row["scope"] = scope;
+            if (std::string(key) == "state_init" &&
+                !row.contains("value")) {
+                row["value"] = nullptr;
+            }
+        }
+    }
+
+    if (normalized.dump().size() > (2u << 20)) {
+        error = "manifest 过大（上限 2 MiB）";
+        return false;
+    }
+    return true;
+}
+
+static std::string runtime_program_effective_target_id(
+    const std::string& program_id,
+    const std::string& local_id) {
+    return "rp:" + program_id + ":" + local_id;
+}
+
+static json runtime_program_targets(const json& record) {
+    json out = json::array();
+    if (!record.value("enabled", false))
+        return out;
+
+    const std::string program_id = record.value("id", "");
+    const int revision = record.value("revision", 0);
+    const json manifest = record.value("manifest", json::object());
+
+    for (const auto& source : manifest.value("targets", json::array())) {
+        if (!source.is_object()) continue;
+        json target = source;
+        const std::string local_id = target.value("id", "");
+        target["id"] =
+            runtime_program_effective_target_id(program_id, local_id);
+        target["__reconbridge_program"] = program_id;
+        target["__reconbridge_local_id"] = local_id;
+        target["__reconbridge_program_revision"] = revision;
+        out.push_back(std::move(target));
+    }
+
+    const json state_init =
+        manifest.value("state_init", json::array());
+    if (state_init.is_array() && !state_init.empty()) {
+        json actions = json::array();
+        for (const auto& row : state_init) {
+            if (!row.is_object()) continue;
+            json action = {
+                {"action", "set_state"},
+                {"scope", row.value("scope", "process")},
+                {"key", row.value("key", "")},
+                {"value", row.contains("value") ? row["value"] : json(nullptr)}
+            };
+            actions.push_back(std::move(action));
+        }
+
+        json bootstrap = {
+            {"kind", "runtime"},
+            {"id", runtime_program_effective_target_id(
+                program_id, "__bootstrap")},
+            {"__reconbridge_program", program_id},
+            {"__reconbridge_local_id", "__bootstrap"},
+            {"__reconbridge_program_revision", revision},
+            {"on_lifecycle", {
+                {"stage", "application_attached"},
+                {"actions", actions}
+            }}
+        };
+        out.push_back(std::move(bootstrap));
+    }
+
+    return out;
+}
+
+static std::vector<json> load_runtime_program_records(
+    const std::string& pkg) {
+    std::vector<json> records;
+    const std::string dir = runtime_program_package_dir(pkg);
+    DIR* d = opendir(dir.c_str());
+    if (!d) return records;
+
+    std::vector<std::string> names;
+    struct dirent* entry;
+    while ((entry = readdir(d)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.size() <= 5 ||
+            name.substr(name.size() - 5) != ".json")
+            continue;
+        names.push_back(std::move(name));
+    }
+    closedir(d);
+    std::sort(names.begin(), names.end());
+
+    for (const auto& name : names) {
+        json record;
+        if (read_json_file(dir + "/" + name, record) &&
+            record.is_object()) {
+            records.push_back(std::move(record));
+        }
+    }
+    return records;
+}
+
+static json compose_hook_config_with_runtime_programs(
+    const std::string& pkg,
+    const json& base_config) {
+    json result = base_config.is_object()
+        ? base_config
+        : json::object();
+    result["package"] = pkg;
+    result["restart"] = false;
+
+    json targets = json::array();
+    const json existing =
+        result.value("targets", json::array());
+    if (existing.is_array()) {
+        for (const auto& target : existing) {
+            if (!target.is_object()) continue;
+            if (target.contains("__reconbridge_program"))
+                continue;
+            targets.push_back(target);
+        }
+    }
+
+    for (const auto& record : load_runtime_program_records(pkg)) {
+        if (!record.value("enabled", false))
+            continue;
+        for (const auto& target : runtime_program_targets(record))
+            targets.push_back(target);
+    }
+    result["targets"] = std::move(targets);
+    return result;
+}
+
+static json runtime_program_materialize_locked(
+    const std::string& pkg) {
+    json base = json::object();
+    (void)read_json_file(hook_path(pkg), base);
+    json config =
+        compose_hook_config_with_runtime_programs(pkg, base);
+
+    ::mkdir(g_hooks_dir.c_str(), 0755);
+    if (!write_json_atomic(hook_path(pkg), config)) {
+        return {
+            {"ok", false},
+            {"error", "写入 materialized hook 配置失败"}
+        };
+    }
+
+    const std::string payload = config.dump(2);
+    const int hot = hot_reload(pkg, payload);
+    size_t program_targets = 0;
+    size_t manual_targets = 0;
+    for (const auto& target :
+         config.value("targets", json::array())) {
+        if (target.is_object() &&
+            target.contains("__reconbridge_program"))
+            ++program_targets;
+        else
+            ++manual_targets;
+    }
+
+    return {
+        {"ok", true},
+        {"hot_injected", hot},
+        {"manual_target_count", manual_targets},
+        {"program_target_count", program_targets},
+        {"total_target_count", manual_targets + program_targets}
+    };
+}
+
+static json runtime_program_state_apply(
+    const std::string& pkg,
+    const json& rows,
+    bool remove,
+    int timeout_ms) {
+    json results = json::array();
+    if (!rows.is_array())
+        return {{"attempted", 0}, {"results", results}};
+
+    for (const auto& row : rows) {
+        if (!row.is_object()) continue;
+        json command = {
+            {"op", remove ? "state_remove" : "state_set"},
+            {"scope", row.value("scope", "process")},
+            {"key", row.value("key", "")}
+        };
+        if (!remove) {
+            command["value"] =
+                row.contains("value") ? row["value"] : json(nullptr);
+        }
+        results.push_back(
+            dispatch_runtime_command_internal(
+                pkg,
+                "",
+                std::move(command),
+                timeout_ms));
+    }
+    return {
+        {"attempted", results.size()},
+        {"results", results}
+    };
+}
+
+static json runtime_program_record_summary(const json& record) {
+    const json manifest =
+        record.value("manifest", json::object());
+    json effective_ids = json::array();
+    for (const auto& target :
+         manifest.value("targets", json::array())) {
+        if (!target.is_object()) continue;
+        effective_ids.push_back(
+            runtime_program_effective_target_id(
+                record.value("id", ""),
+                target.value("id", "")));
+    }
+    if (!manifest.value("state_init", json::array()).empty()) {
+        effective_ids.push_back(
+            runtime_program_effective_target_id(
+                record.value("id", ""),
+                "__bootstrap"));
+    }
+
+    return {
+        {"id", record.value("id", "")},
+        {"package", record.value("package", "")},
+        {"revision", record.value("revision", 0)},
+        {"enabled", record.value("enabled", false)},
+        {"name", manifest.value("name", record.value("id", ""))},
+        {"version", manifest.value("version", "1")},
+        {"description", manifest.value("description", "")},
+        {"target_count", manifest.value("targets", json::array()).size()},
+        {"state_init_count", manifest.value("state_init", json::array()).size()},
+        {"state_cleanup_count", manifest.value("state_cleanup", json::array()).size()},
+        {"history_depth", record.value("history", json::array()).size()},
+        {"effective_target_ids", effective_ids},
+        {"installed_at", record.value("installed_at", (int64_t)0)},
+        {"updated_at", record.value("updated_at", (int64_t)0)},
+        {"manifest", manifest}
+    };
+}
+
+static void handle_runtime_program_install(
+    const Request& req,
+    Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (...) {
+        reply(res, 400, {{"error", "body 非合法 JSON"}});
+        return;
+    }
+    if (!body.is_object()) {
+        reply(res, 400, {{"error", "body 必须是 JSON object"}});
+        return;
+    }
+
+    const std::string pkg = body.value("package", "");
+    if (!valid_pkg(pkg)) {
+        reply(res, 400, {{"error", "invalid or missing package"}});
+        return;
+    }
+    if (!body.contains("manifest") ||
+        !body["manifest"].is_object()) {
+        reply(res, 400, {{"error", "缺少 manifest object"}});
+        return;
+    }
+
+    json manifest;
+    std::string error;
+    if (!normalize_runtime_program_manifest(
+            body["manifest"], manifest, error)) {
+        reply(res, 400, {{"error", error}});
+        return;
+    }
+
+    const std::string id = manifest.value("id", "");
+    const std::string mode = body.value("mode", "install");
+    if (mode != "install" && mode != "replace") {
+        reply(res, 400, {{"error", "mode 仅支持 install/replace"}});
+        return;
+    }
+
+    const int timeout_ms = std::max(
+        200,
+        std::min(body.value("timeout_ms", 3000), 10000));
+    const bool restart = body.value("restart", false);
+
+    json old_record;
+    json record;
+    json materialized;
+    bool had_old = false;
+    {
+        std::lock_guard<std::mutex> lk(g_program_mutex);
+        const std::string pkg_dir =
+            runtime_program_package_dir(pkg);
+        ::mkdir(g_programs_dir.c_str(), 0755);
+        ::mkdir(pkg_dir.c_str(), 0755);
+
+        had_old = read_json_file(
+            runtime_program_path(pkg, id),
+            old_record);
+
+        if (mode == "install" && had_old) {
+            reply(res, 409, {{
+                "error",
+                "Runtime Program 已存在；请使用 replace"
+            }});
+            return;
+        }
+        if (mode == "replace" && !had_old) {
+            reply(res, 404, {{
+                "error",
+                "Runtime Program 不存在；请先 install"
+            }});
+            return;
+        }
+
+        if (had_old && body.contains("expected_revision")) {
+            const int expected =
+                body.value("expected_revision", -1);
+            if (expected != old_record.value("revision", 0)) {
+                reply(res, 409, {
+                    {"error", "revision 冲突"},
+                    {"expected_revision", expected},
+                    {"current_revision",
+                     old_record.value("revision", 0)}
+                });
+                return;
+            }
+        }
+
+        json history = had_old
+            ? old_record.value("history", json::array())
+            : json::array();
+        if (!history.is_array())
+            history = json::array();
+
+        if (had_old) {
+            history.push_back({
+                {"revision", old_record.value("revision", 0)},
+                {"enabled", old_record.value("enabled", false)},
+                {"manifest", old_record.value(
+                    "manifest", json::object())},
+                {"updated_at", old_record.value(
+                    "updated_at", (int64_t)0)}
+            });
+            while (history.size() > 5)
+                history.erase(history.begin());
+        }
+
+        const bool enabled = body.contains("enable")
+            ? body.value("enable", true)
+            : (had_old
+                ? old_record.value("enabled", true)
+                : true);
+        const int revision =
+            had_old ? old_record.value("revision", 0) + 1 : 1;
+        const int64_t timestamp = now_ms();
+
+        record = {
+            {"schema", 1},
+            {"package", pkg},
+            {"id", id},
+            {"revision", revision},
+            {"enabled", enabled},
+            {"manifest", manifest},
+            {"history", history},
+            {"installed_at", had_old
+                ? old_record.value("installed_at", timestamp)
+                : timestamp},
+            {"updated_at", timestamp}
+        };
+
+        if (!write_json_atomic(
+                runtime_program_path(pkg, id),
+                record)) {
+            reply(res, 500, {{
+                "error",
+                "写入 Runtime Program 记录失败"
+            }});
+            return;
+        }
+
+        materialized =
+            runtime_program_materialize_locked(pkg);
+    }
+
+    json cleanup = json::object();
+    if (had_old &&
+        old_record.value("enabled", false) &&
+        !restart) {
+        cleanup = runtime_program_state_apply(
+            pkg,
+            old_record.value("manifest", json::object())
+                .value("state_cleanup", json::array()),
+            true,
+            timeout_ms);
+    }
+
+    json state_init = json::object();
+    if (record.value("enabled", false) && !restart) {
+        state_init = runtime_program_state_apply(
+            pkg,
+            manifest.value("state_init", json::array()),
+            false,
+            timeout_ms);
+    }
+
+    if (restart)
+        run_detached({"am", "force-stop", pkg});
+
+    reply(res, 200, {
+        {"ok", materialized.value("ok", false)},
+        {"mode", mode},
+        {"program", runtime_program_record_summary(record)},
+        {"materialized", materialized},
+        {"state_cleanup", cleanup},
+        {"state_init", state_init},
+        {"restart_requested", restart},
+        {"note", restart
+            ? "Program 已持久化；目标下次启动会通过 bootstrap 自动初始化 State"
+            : "Program 已持久化并尝试 live reconcile；在线进程同时应用 state_init"}
+    });
+}
+
+static void handle_runtime_program_toggle(
+    const Request& req,
+    Response& res,
+    bool enabled) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (...) {
+        reply(res, 400, {{"error", "body 非合法 JSON"}});
+        return;
+    }
+
+    const std::string pkg = body.value("package", "");
+    const std::string id = body.value("id", "");
+    if (!valid_pkg(pkg) || !valid_runtime_program_id(id)) {
+        reply(res, 400, {{"error", "package 或 id 无效"}});
+        return;
+    }
+
+    const int timeout_ms = std::max(
+        200,
+        std::min(body.value("timeout_ms", 3000), 10000));
+    const bool restart = body.value("restart", false);
+
+    json record;
+    json materialized;
+    {
+        std::lock_guard<std::mutex> lk(g_program_mutex);
+        if (!read_json_file(
+                runtime_program_path(pkg, id),
+                record)) {
+            reply(res, 404, {{
+                "error",
+                "Runtime Program 不存在"
+            }});
+            return;
+        }
+        record["enabled"] = enabled;
+        record["updated_at"] = now_ms();
+        if (!write_json_atomic(
+                runtime_program_path(pkg, id),
+                record)) {
+            reply(res, 500, {{
+                "error",
+                "写入 Runtime Program 状态失败"
+            }});
+            return;
+        }
+        materialized =
+            runtime_program_materialize_locked(pkg);
+    }
+
+    json state_result = json::object();
+    if (!restart) {
+        const json manifest =
+            record.value("manifest", json::object());
+        state_result = runtime_program_state_apply(
+            pkg,
+            manifest.value(
+                enabled ? "state_init" : "state_cleanup",
+                json::array()),
+            !enabled,
+            timeout_ms);
+    }
+    if (restart)
+        run_detached({"am", "force-stop", pkg});
+
+    reply(res, 200, {
+        {"ok", materialized.value("ok", false)},
+        {"program", runtime_program_record_summary(record)},
+        {"materialized", materialized},
+        {enabled ? "state_init" : "state_cleanup",
+         state_result},
+        {"restart_requested", restart}
+    });
+}
+
+static void handle_runtime_program_enable(
+    const Request& req,
+    Response& res) {
+    handle_runtime_program_toggle(req, res, true);
+}
+
+static void handle_runtime_program_disable(
+    const Request& req,
+    Response& res) {
+    handle_runtime_program_toggle(req, res, false);
+}
+
+static void handle_runtime_program_rollback(
+    const Request& req,
+    Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (...) {
+        reply(res, 400, {{"error", "body 非合法 JSON"}});
+        return;
+    }
+
+    const std::string pkg = body.value("package", "");
+    const std::string id = body.value("id", "");
+    if (!valid_pkg(pkg) || !valid_runtime_program_id(id)) {
+        reply(res, 400, {{"error", "package 或 id 无效"}});
+        return;
+    }
+
+    const int timeout_ms = std::max(
+        200,
+        std::min(body.value("timeout_ms", 3000), 10000));
+    const bool restart = body.value("restart", false);
+
+    json current;
+    json restored;
+    json materialized;
+    int restored_from_revision = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_program_mutex);
+        if (!read_json_file(
+                runtime_program_path(pkg, id),
+                current)) {
+            reply(res, 404, {{
+                "error",
+                "Runtime Program 不存在"
+            }});
+            return;
+        }
+        json history =
+            current.value("history", json::array());
+        if (!history.is_array() || history.empty()) {
+            reply(res, 409, {{
+                "error",
+                "没有可回滚的历史版本"
+            }});
+            return;
+        }
+
+        const json previous = history.back();
+        history.erase(history.end() - 1);
+        restored_from_revision =
+            previous.value("revision", 0);
+
+        restored = current;
+        restored["revision"] =
+            current.value("revision", 0) + 1;
+        restored["enabled"] =
+            previous.value("enabled", true);
+        restored["manifest"] =
+            previous.value("manifest", json::object());
+        restored["history"] = history;
+        restored["updated_at"] = now_ms();
+        restored["rollback_from_revision"] =
+            current.value("revision", 0);
+        restored["restored_from_revision"] =
+            restored_from_revision;
+
+        if (!write_json_atomic(
+                runtime_program_path(pkg, id),
+                restored)) {
+            reply(res, 500, {{
+                "error",
+                "写入 rollback 结果失败"
+            }});
+            return;
+        }
+        materialized =
+            runtime_program_materialize_locked(pkg);
+    }
+
+    json cleanup = json::object();
+    json state_init = json::object();
+    if (!restart) {
+        if (current.value("enabled", false)) {
+            cleanup = runtime_program_state_apply(
+                pkg,
+                current.value("manifest", json::object())
+                    .value("state_cleanup", json::array()),
+                true,
+                timeout_ms);
+        }
+        if (restored.value("enabled", false)) {
+            state_init = runtime_program_state_apply(
+                pkg,
+                restored.value("manifest", json::object())
+                    .value("state_init", json::array()),
+                false,
+                timeout_ms);
+        }
+    }
+    if (restart)
+        run_detached({"am", "force-stop", pkg});
+
+    reply(res, 200, {
+        {"ok", materialized.value("ok", false)},
+        {"program", runtime_program_record_summary(restored)},
+        {"materialized", materialized},
+        {"state_cleanup", cleanup},
+        {"state_init", state_init},
+        {"restored_from_revision", restored_from_revision},
+        {"restart_requested", restart}
+    });
+}
+
+static void handle_runtime_program_status(
+    const Request& req,
+    Response& res) {
+    std::string pkg;
+    std::string id;
+    if (req.has_param("package"))
+        pkg = req.get_param_value("package");
+    if (req.has_param("id"))
+        id = req.get_param_value("id");
+
+    if (!valid_pkg(pkg)) {
+        reply(res, 400, {{"error", "invalid or missing package"}});
+        return;
+    }
+    if (!id.empty() && !valid_runtime_program_id(id)) {
+        reply(res, 400, {{"error", "invalid program id"}});
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(g_program_mutex);
+    if (!id.empty()) {
+        json record;
+        if (!read_json_file(
+                runtime_program_path(pkg, id),
+                record)) {
+            reply(res, 404, {{
+                "error",
+                "Runtime Program 不存在"
+            }});
+            return;
+        }
+        reply(res, 200, {
+            {"count", 1},
+            {"package", pkg},
+            {"programs", json::array({
+                runtime_program_record_summary(record)
+            })}
+        });
+        return;
+    }
+
+    json programs = json::array();
+    for (const auto& record :
+         load_runtime_program_records(pkg)) {
+        programs.push_back(
+            runtime_program_record_summary(record));
+    }
+    reply(res, 200, {
+        {"count", programs.size()},
+        {"package", pkg},
+        {"programs", programs}
+    });
 }
 
 static void handle_hook(const Request& req, Response& res) {
@@ -1056,6 +1978,11 @@ void register_routes(httplib::Server& svr) {
     svr.Get("/hooks", handle_hooks);
     svr.Get("/runtime_status", handle_runtime_status);
     svr.Post("/runtime_command", handle_runtime_command);
+    svr.Post("/runtime_program/install", handle_runtime_program_install);
+    svr.Post("/runtime_program/enable", handle_runtime_program_enable);
+    svr.Post("/runtime_program/disable", handle_runtime_program_disable);
+    svr.Post("/runtime_program/rollback", handle_runtime_program_rollback);
+    svr.Get("/runtime_programs", handle_runtime_program_status);
     svr.Post("/dump_dex", handle_dump_dex);
     svr.Get("/dumps", handle_dumps);
     svr.Get("/events", handle_events_sse);  // SSE
@@ -1305,8 +2232,10 @@ void init(const std::string& base_dir) {
     g_hooks_dir = base_dir + "/hooks";
     g_events_log = base_dir + "/events.log";
     g_dumps_dir = base_dir + "/dumps";
+    g_programs_dir = base_dir + "/runtime_programs";
     ::mkdir(g_hooks_dir.c_str(), 0755);
     ::mkdir(g_dumps_dir.c_str(), 0755);
+    ::mkdir(g_programs_dir.c_str(), 0755);
     // 确保 events.log 存在（保留旧的 file-tail 兜底路径）
     { std::ofstream f(g_events_log, std::ios::app); }
     std::thread(events_watcher).detach();
