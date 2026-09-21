@@ -54,7 +54,8 @@
 | 工具 | 用途 |
 |---|---|
 | `open_target(package_name, auto_pull=True, note="")` | 创建持久化分析会话；自动绑定本地 APK/JADX/so，本地没 APK 时默认尝试从设备拉取 |
-| `search_target(session_id, query, kind="auto", limit=20)` | 统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则走受内存限制且有持久缓存的 Androguard worker |
+| `search_target(session_id, query, kind="auto", limit=20)` | 统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
+| `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
 | `trace_target(session_id, class_name, method, ...)` | 会话化 Java trace；自动包名/游标/唯一 Hook，默认命中即返回并自动清理临时 Hook |
 | `investigation_status(session_id)` | 查看当前会话资产、发现记录、游标与临时 Hook |
@@ -139,11 +140,12 @@
 ```
 device_status
 → open_target("com.target.app")                 # 返回 session_id
-→ search_target(session_id, "会员")             # 默认先轻量定位，不先全量 JADX
+→ prepare_index(session_id)                    # 可选：连续搜索很多次时先预热一次
+→ search_target(session_id, "会员")             # 直接查 SQLite 索引，不先全量 JADX
 → prepare_target(session_id)                    # 只有需要完整源码上下文时再做
 → search_target(session_id, "premiumStatus")
 ```
-重复搜索同一个 APK/查询会直接命中持久缓存，不再重复启动 Androguard。
+同一个 APK 的索引只需构建一次；之后即使换不同关键词/类名/方法名，也直接查 SQLite，不再重复启动 Androguard。APK 文件发生变化后索引会自动失效并重建。
 
 **B. 定位并观测一个 Java 方法（推荐）**
 ```
