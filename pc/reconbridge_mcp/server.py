@@ -701,6 +701,10 @@ def main() -> None:
     # 其余情况照常起 stdio MCP server。
     import sys
     args = sys.argv[1:]
+    if "--dex-worker" in args:
+        from . import dex_worker
+        idx = args.index("--dex-worker")
+        raise SystemExit(dex_worker.main(args[idx + 1:]))
     if "--serve" in args:
         from . import webconsole
         raise SystemExit(webconsole.main(args))
