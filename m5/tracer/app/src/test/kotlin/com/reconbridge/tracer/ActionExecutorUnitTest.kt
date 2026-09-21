@@ -516,7 +516,7 @@ class ActionExecutorUnitTest
                     put("key", "screen")
                     put(
                         "value",
-                        "${activity.screen}:${lifecycle.activity_state}",
+                        "\${activity.screen}:\${lifecycle.activity_state}",
                     )
                 }
             ),
