@@ -94,6 +94,7 @@ internal class HookRegistry(
     private val pid: Int,
     initialClassLoader: ClassLoader,
     private val installer: (JSONObject, ClassLoader) -> HookInstallResult,
+    private val onHookRemoved: (String) -> Unit = {},
 )
 {
     private val lock = Any()
@@ -135,6 +136,7 @@ internal class HookRegistry(
             for (id in removedInstalledIds) {
                 val old = installed.remove(id) ?: continue
                 safeUnhook(old)
+                onHookRemoved(id)
                 removed++
             }
 
@@ -143,6 +145,9 @@ internal class HookRegistry(
             }
             for (id in removedPendingIds) {
                 pending.remove(id)
+                if (!installed.containsKey(id)) {
+                    onHookRemoved(id)
+                }
             }
 
             for ((id, spec) in desired) {
@@ -289,10 +294,16 @@ internal class HookRegistry(
         synchronized(lock) {
             val count = installed.size
             val rows = installed.values.toList()
+            val removedIds = (
+                installed.keys + pending.keys
+            ).toSet()
             installed.clear()
             pending.clear()
             for (row in rows) {
                 safeUnhook(row)
+            }
+            for (id in removedIds) {
+                onHookRemoved(id)
             }
             lastSyncAt = System.currentTimeMillis()
             return count
