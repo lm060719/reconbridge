@@ -97,3 +97,6 @@ Phase 5 远程 Runtime 控制优先使用 `runtime_state_get/set/remove/incremen
 
 ## 更深的细节
 完整一页纸（全工具签名、协议、部署、更多坑）见仓库 `AGENTS_QUICKSTART.md`；在线安装用户见 GitHub：https://github.com/lm060719/reconbridge （`AGENTS_QUICKSTART.md`）。
+
+
+- **Runtime Program Package（M5 Phase 7）**：跨设备/跨 PC 分享 Program 时，优先用 `runtime_program_export` 生成 Ed25519 签名 `.rbprog.json`，用 `runtime_program_verify_package` 验证哈希/签名/permissions/allowed_packages，再用 `runtime_program_import` 安装。默认只接受 trusted signer；`runtime_program_trust_signer` 前应先核对公钥指纹。daemon 会再次扫描 manifest 权限，不能靠绕过 PC 隐藏高风险 Action。
