@@ -160,11 +160,13 @@ class HookEntry : IXposedHookLoadPackage {
             result.added > 0 ||
             result.replaced > 0 ||
             result.removed > 0 ||
+            result.pending > 0 ||
             result.failed > 0
         ) {
             log(
                 "[$pkg] $stage added=${result.added} replaced=${result.replaced} " +
-                    "removed=${result.removed} unchanged=${result.unchanged} failed=${result.failed}"
+                    "removed=${result.removed} unchanged=${result.unchanged} " +
+                    "pending=${result.pending} failed=${result.failed}"
             )
         } else {
             vlog("[$pkg] $stage 无变化 unchanged=${result.unchanged}")
