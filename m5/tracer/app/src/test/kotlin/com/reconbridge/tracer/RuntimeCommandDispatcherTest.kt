@@ -159,6 +159,91 @@ class RuntimeCommandDispatcherTest
     }
 
     @Test
+    fun stateIncrementAppendAndRemoveRoundTrip()
+    {
+        val dispatcher = dispatcher()
+
+        val increment1 = execute(
+            dispatcher,
+            "inc-1",
+            "state_increment",
+        ) {
+            put("key", "counter")
+            put("delta", 2.5)
+        }
+        assertEquals(
+            2.5,
+            increment1.getJSONObject("result").getDouble("value"),
+            0.0001,
+        )
+
+        val increment2 = execute(
+            dispatcher,
+            "inc-2",
+            "state_increment",
+        ) {
+            put("key", "counter")
+            put("delta", -0.5)
+        }
+        assertEquals(
+            2.0,
+            increment2.getJSONObject("result").getDouble("value"),
+            0.0001,
+        )
+
+        val append1 = execute(
+            dispatcher,
+            "append-1",
+            "state_append",
+        ) {
+            put("key", "items")
+            put("value", JSONObject().put("id", 1))
+        }
+        assertEquals(
+            1,
+            append1.getJSONObject("result")
+                .getJSONArray("value")
+                .length(),
+        )
+
+        val append2 = execute(
+            dispatcher,
+            "append-2",
+            "state_append",
+        ) {
+            put("key", "items")
+            put("value", "second")
+        }
+        val list = append2.getJSONObject("result")
+            .getJSONArray("value")
+        assertEquals(2, list.length())
+        assertEquals("second", list.getString(1))
+
+        val removed = execute(
+            dispatcher,
+            "remove-1",
+            "state_remove",
+        ) {
+            put("key", "counter")
+        }.getJSONObject("result")
+        assertTrue(removed.getBoolean("removed"))
+        assertEquals(
+            2.0,
+            removed.getDouble("old_value"),
+            0.0001,
+        )
+
+        val get = execute(
+            dispatcher,
+            "get-removed",
+            "state_get",
+        ) {
+            put("key", "counter")
+        }.getJSONObject("result")
+        assertFalse(get.getBoolean("exists"))
+    }
+
+    @Test
     fun remoteThreadScopeIsRejected()
     {
         val result = execute(
