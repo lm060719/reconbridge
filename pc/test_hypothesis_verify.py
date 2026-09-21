@@ -1,7 +1,7 @@
 """Root Cause 最小假设实验测试。"""
 from __future__ import annotations
 
-from reconbridge_mcp import hypothesis_verify
+from reconbridge_mcp import hypothesis_verify, server
 
 
 def _candidate():
@@ -41,6 +41,46 @@ def _context():
             ]
         },
     }
+
+
+def test_saved_hypothesis_candidate_pins_same_rank_across_scenarios(monkeypatch):
+    monkeypatch.setattr(
+        server.investigation,
+        "load_call_scenario",
+        lambda session_id, scenario_name: {
+            "root_cause_hypothesis_captures": {
+                "old": {
+                    "saved_at": 100,
+                    "candidate": {
+                        "rank": 1,
+                        "candidate_type": "method",
+                        "candidate_key": "method:Old#check()Z",
+                        "class": "Old",
+                        "method": "check",
+                    },
+                },
+                "new": {
+                    "saved_at": 200,
+                    "candidate": {
+                        "rank": 1,
+                        "candidate_type": "method",
+                        "candidate_key": "method:Repo#isVip()Z",
+                        "class": "Repo",
+                        "method": "isVip",
+                    },
+                },
+            }
+        },
+    )
+
+    selected = server._saved_hypothesis_candidate_for_rank(
+        "abc123abc123",
+        "非会员",
+        1,
+    )
+
+    assert selected is not None
+    assert selected["candidate_key"] == "method:Repo#isVip()Z"
 
 
 def test_descriptor_parser_generates_precise_java_params():
