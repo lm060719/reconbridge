@@ -3,6 +3,7 @@ package com.reconbridge.tracer
 import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.util.Log
+import org.json.JSONObject
 import java.io.EOFException
 import java.io.InputStream
 import java.io.OutputStream
@@ -38,6 +39,9 @@ private fun logI(msg: String) {
  *   client -> [type:1='H'][len:4 LE=0]      （声明支持实时配置同步；native 层不发）
  *   server -> [type:1='R'][len:4 LE][cfg]   （下发完整期望配置，tracer reconcile add/remove/replace）
  *   client -> [type:1='S'][len:4 LE][json]  （当前进程 HookRegistry 真实运行时状态）
+ *   client -> [type:1='K'][len:4 LE=0]       （声明支持 Runtime Command Phase 5）
+ *   server -> [type:1='C'][len:4 LE][json]   （下发 Runtime Command）
+ *   client -> [type:1='A'][len:4 LE][json]   （Runtime Command Ack）
  *
  * 所有整数为小端（守护进程按原生内存布局收发，arm64 = LE）。
  */
@@ -54,12 +58,19 @@ class InjectSocket private constructor(
      * daemon 下发的 'R' 完整配置。HookEntry 收到后由 HookRegistry 计算 add/remove/replace。
      * 只有 tracer 调用本方法，故 native 层不会被 daemon 下发 'R'。
      */
-    fun enableHotReload(onReload: (String) -> Unit) {
+    fun enableHotReload(
+        onReload: (String) -> Unit,
+        onCommand: ((String) -> String)? = null,
+    ) {
         synchronized(writeLock) {
             if (!alive) return
             try {
                 output.write('H'.code)
                 output.write(le32(0))
+                if (onCommand != null) {
+                    output.write('K'.code)
+                    output.write(le32(0))
+                }
                 output.flush()
             } catch (t: Throwable) {
                 alive = false
@@ -84,7 +95,32 @@ class InjectSocket private constructor(
                         } catch (t: Throwable) {
                             logW("热加处理异常: $t")
                         }
-
+                    } else if (
+                        type == 'C'.code &&
+                        onCommand != null
+                    ) {
+                        val command = String(
+                            buf,
+                            Charsets.UTF_8,
+                        )
+                        val ack = try {
+                            onCommand(command)
+                        } catch (t: Throwable) {
+                            JSONObject().apply {
+                                put("request_id", "")
+                                put("ok", false)
+                                put("op", "")
+                                put(
+                                    "error",
+                                    "Runtime command 异常: " + t,
+                                )
+                            }.toString()
+                        }
+                        sendFrame(
+                            'A',
+                            ack,
+                            noisy = false,
+                        )
                     }
                     // 其它类型忽略（前向兼容）
                 }
