@@ -103,7 +103,7 @@ class HookEntry : IXposedHookLoadPackage {
 
         watcher = ClassLoaderWatcher(
             shouldResolveClass = { className ->
-                registry.pendingClassNames().contains(className)
+                registry.isPendingClass(className)
             },
             onLoaderAvailable = { loader, source ->
                 val sync = registry.onLoaderAvailable(
