@@ -465,6 +465,17 @@ def call_graph_context(
     return graph
 
 
+def record_runtime_path_evidence(
+    session_id: str,
+    path: dict[str, Any],
+    analysis: dict[str, Any],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_runtime_path(graph, path, analysis)
+    save(state)
+
+
 def source_search(session_id: str, query: str, limit: int = 20) -> dict[str, Any]:
     """对已有 JADX 源码做轻量流式文本搜索，不把完整源码读入内存。"""
     state = load(session_id, refresh=True)
