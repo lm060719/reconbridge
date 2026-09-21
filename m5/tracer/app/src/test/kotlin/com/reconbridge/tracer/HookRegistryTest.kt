@@ -355,6 +355,54 @@ class HookRegistryTest
     }
 
     @Test
+    fun reconcileContinuesToOtherKnownLoaderAfterNonClassError()
+    {
+        val mainLoader = object : ClassLoader(null) {}
+        val pluginLoader = object : ClassLoader(null) {}
+        val installedHandle = FakeHandle()
+
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 852,
+            initialClassLoader = mainLoader,
+        ) { _, loader ->
+            if (loader === mainLoader) {
+                throw NoSuchMethodException("wrong version")
+            }
+            if (loader === pluginLoader) {
+                HookInstallResult(
+                    handles = listOf(installedHandle),
+                    members = listOf("plugin.Target.check()"),
+                )
+            } else {
+                throw ClassNotFoundException()
+            }
+        }
+
+        registry.onLoaderAvailable(
+            pluginLoader,
+            "pre-known-plugin-loader",
+        )
+
+        val target = target("multi").apply {
+            put("class", "plugin.Target")
+        }
+        val result = registry.reconcile(
+            JSONArray().put(target)
+        )
+
+        assertEquals(1, result.added)
+        assertEquals(0, result.failed)
+        assertEquals(0, result.pending)
+
+        val snapshot = registry.snapshotJson()
+        assertEquals(1, snapshot.getInt("installed_count"))
+        val hook = snapshot.getJSONArray("hooks").getJSONObject(0)
+        assertEquals("cl2", hook.getString("class_loader_id"))
+    }
+
+    @Test
     fun fingerprintIsStableAcrossObjectKeyOrder()
     {
         val left = JSONObject().apply {
