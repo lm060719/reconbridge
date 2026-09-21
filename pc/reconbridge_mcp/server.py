@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import branch_condition, candidate, external, investigation, pipeline, runtime_path, scenario_path
+from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, runtime_path, scenario_path
 
 mcp = FastMCP("reconbridge")
 
@@ -1414,6 +1414,430 @@ def analyze_scenario_divergence(
         "top_condition": top,
         "conditions": ranked,
         "probe_plan": probe_plan,
+        "next_action": next_action,
+    }
+
+
+def _select_divergence_probe(
+    analysis: dict[str, Any],
+    condition_rank: int,
+    probe_index: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[dict[str, Any]]]:
+    conditions = analysis.get("conditions") or []
+    condition_rank = max(1, int(condition_rank))
+    condition = next(
+        (item for item in conditions if int(item.get("rank", 0) or 0) == condition_rank),
+        None,
+    )
+    if condition is None:
+        return None, None, []
+
+    executable = [
+        item
+        for item in (analysis.get("probe_plan") or [])
+        if int(item.get("condition_rank", 0) or 0) == condition_rank
+        and item.get("tool")
+    ]
+    if not executable:
+        return condition, None, []
+
+    probe_index = max(0, min(int(probe_index), len(executable) - 1))
+    probe = dict(executable[probe_index])
+    probe["condition_type"] = condition.get("type", "")
+    probe["branch_orientation"] = condition.get("branch_orientation", "")
+    probe["a_next_method"] = condition.get("a_next_method", "")
+    probe["b_next_method"] = condition.get("b_next_method", "")
+    return condition, probe, executable
+
+
+def _run_divergence_probe(
+    session_id: str,
+    state: dict[str, Any],
+    scenario_name: str,
+    probe: dict[str, Any],
+    seconds: float = 15.0,
+    max_events: int = 120,
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+) -> dict[str, Any]:
+    kind = str(probe.get("kind", ""))
+    class_name = str(probe.get("class", ""))
+    method_name = str(probe.get("method", ""))
+    if kind not in {"field", "condition_method"}:
+        return {
+            "ok": False,
+            "error": f"当前探针类型不可自动执行: {kind}",
+        }
+    if not class_name or not method_name:
+        return {
+            "ok": False,
+            "error": "探针缺少 class/method",
+        }
+
+    probe_key = condition_probe.probe_fingerprint(probe)
+    safe_scenario = re.sub(r"[^A-Za-z0-9_]", "_", scenario_name)[:16] or "scenario"
+    safe_method = re.sub(r"[^A-Za-z0-9_]", "_", method_name)[:20] or "method"
+    hook_id = f"rbcp_{session_id}_{probe_key[:8]}_{safe_scenario}_{safe_method}"
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    investigation.add_temporary_hook(session_id, hook_id)
+    try:
+        if kind == "field":
+            result = trace_java(
+                package=state["package"],
+                class_name=class_name,
+                method=method_name,
+                capture_args=[],
+                fields=[
+                    {
+                        "target": "this",
+                        "name": str(probe.get("field", "")),
+                        "render": "tostring",
+                    }
+                ],
+                this="class",
+                ret=False,
+                when="before",
+                stack=False,
+                hook_id=hook_id,
+                restart=restart,
+                seconds=max(0.5, float(seconds)),
+                max_events=max(1, min(int(max_events), 500)),
+                include_recent=True,
+                since_seq=cursor,
+                hot=hot,
+            )
+        else:
+            result = trace_java(
+                package=state["package"],
+                class_name=class_name,
+                method=method_name,
+                capture_args=[],
+                this="class",
+                ret=True,
+                when="after",
+                stack=False,
+                hook_id=hook_id,
+                restart=restart,
+                seconds=max(0.5, float(seconds)),
+                max_events=max(1, min(int(max_events), 500)),
+                include_recent=True,
+                since_seq=cursor,
+                hot=hot,
+            )
+    finally:
+        if cleanup:
+            try:
+                unhook(state["package"], hook_id)
+            finally:
+                investigation.remove_temporary_hook(session_id, hook_id)
+
+    events = result.get("events", [])
+    summary = condition_probe.summarize_values(events, probe)
+
+    try:
+        latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    if events:
+        investigation.record_trace_evidence(
+            session_id,
+            class_name,
+            method_name,
+            events,
+        )
+
+    capture = {
+        "scenario": scenario_name,
+        "captured_at": int(time.time() * 1000),
+        "probe_fingerprint": probe_key,
+        "probe": probe,
+        "summary": summary,
+        "hook_id": hook_id,
+        "event_cursor": latest,
+    }
+    saved = investigation.save_condition_probe(
+        session_id,
+        scenario_name,
+        probe_key,
+        capture,
+    )
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "divergence_condition_probe",
+            "scenario": scenario_name,
+            "kind": kind,
+            "class": class_name,
+            "method": method_name,
+            "field": probe.get("field", ""),
+            "condition": probe.get("condition", ""),
+            "samples": summary.get("sample_count", 0),
+            "stable": summary.get("stable", False),
+            "stable_value": (
+                (summary.get("stable_value") or {}).get("canonical")
+                if summary.get("stable")
+                else None
+            ),
+        },
+    )
+
+    return {
+        "ok": True,
+        "scenario": scenario_name,
+        "probe_fingerprint": probe_key,
+        "probe": probe,
+        "summary": summary,
+        "saved": saved,
+        "posted": result.get("posted"),
+        "event_count": len(events),
+        "event_cursor": latest,
+        "cleanup": cleanup,
+    }
+
+
+@mcp.tool()
+def capture_divergence_probe(
+    session_id: str,
+    a: str,
+    b: str,
+    capture_for: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    seconds: float = 15.0,
+    max_events: int = 120,
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+) -> dict:
+    """采集 A/B 首次分叉条件的一个运行时值探针。
+
+    capture_for 必须等于 a 或 b。字段探针会在分支点方法 before 读取 this.field；
+    条件方法探针会在 after 捕获返回值。第二侧采完后若另一侧已有同一探针，会自动附带比较结果。
+    """
+    if capture_for not in {a, b}:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "error": "capture_for 必须等于场景 a 或 b",
+        }
+
+    analysis = analyze_scenario_divergence(
+        session_id,
+        a,
+        b,
+        auto_prepare_source=True,
+        max_conditions=max(20, int(condition_rank)),
+        max_probe_items=20,
+    )
+    if not analysis.get("ok"):
+        return analysis
+
+    condition, probe, executable = _select_divergence_probe(
+        analysis,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+    )
+    if condition is None:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": analysis.get("package"),
+            "error": f"找不到 condition_rank={condition_rank}",
+            "available_conditions": analysis.get("conditions", [])[:20],
+        }
+    if probe is None:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": analysis.get("package"),
+            "error": "该条件没有可安全自动执行的探针",
+            "condition": condition,
+            "probe_plan": [
+                item
+                for item in (analysis.get("probe_plan") or [])
+                if int(item.get("condition_rank", 0) or 0) == int(condition_rank)
+            ],
+            "next_action": "对象接收者条件需要先解析实际类型；也可手工 trace 分支点或对应对象方法",
+        }
+
+    state = investigation.load(session_id, refresh=True)
+    result = _run_divergence_probe(
+        session_id,
+        state,
+        capture_for,
+        probe,
+        seconds=seconds,
+        max_events=max_events,
+        restart=restart,
+        hot=hot,
+        cleanup=cleanup,
+    )
+    result.update(
+        {
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "capture_for": capture_for,
+            "condition": condition,
+            "selected_probe_index": max(
+                0,
+                min(int(probe_index), max(0, len(executable) - 1)),
+            ),
+        }
+    )
+
+    probe_key = result.get("probe_fingerprint", "")
+    if result.get("ok") and probe_key:
+        other_name = b if capture_for == a else a
+        other = investigation.load_condition_probe(
+            session_id,
+            other_name,
+            probe_key,
+        )
+        current = investigation.load_condition_probe(
+            session_id,
+            capture_for,
+            probe_key,
+        )
+        if other and current:
+            capture_a = current if capture_for == a else other
+            capture_b = current if capture_for == b else other
+            comparison = condition_probe.compare_captures(
+                capture_a,
+                capture_b,
+                branch_orientation=str(condition.get("branch_orientation", "")),
+            )
+            result["comparison"] = comparison
+
+    return result
+
+
+@mcp.tool()
+def compare_divergence_probes(
+    session_id: str,
+    a: str,
+    b: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+) -> dict:
+    """比较已经采集的 A/B 条件探针值，并判断是否与源码 true/false 分支方向一致。"""
+    analysis = analyze_scenario_divergence(
+        session_id,
+        a,
+        b,
+        auto_prepare_source=True,
+        max_conditions=max(20, int(condition_rank)),
+        max_probe_items=20,
+    )
+    if not analysis.get("ok"):
+        return analysis
+
+    condition, probe, executable = _select_divergence_probe(
+        analysis,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+    )
+    if condition is None or probe is None:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": analysis.get("package"),
+            "error": "所选条件没有可比较的自动探针",
+            "condition": condition,
+            "probe_plan": analysis.get("probe_plan", []),
+        }
+
+    probe_key = condition_probe.probe_fingerprint(probe)
+    capture_a = investigation.load_condition_probe(session_id, a, probe_key)
+    capture_b = investigation.load_condition_probe(session_id, b, probe_key)
+    missing = [
+        name
+        for name, capture in ((a, capture_a), (b, capture_b))
+        if capture is None
+    ]
+    if missing:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": analysis.get("package"),
+            "a": a,
+            "b": b,
+            "condition": condition,
+            "probe": probe,
+            "probe_fingerprint": probe_key,
+            "missing": missing,
+            "error": "尚未完成两侧同一条件探针采集",
+            "next_action": (
+                "分别调用 capture_divergence_probe，capture_for="
+                + " / ".join(missing)
+            ),
+        }
+
+    comparison = condition_probe.compare_captures(
+        capture_a,
+        capture_b,
+        branch_orientation=str(condition.get("branch_orientation", "")),
+    )
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "divergence_condition_probe_comparison",
+            "a": a,
+            "b": b,
+            "condition": condition.get("condition", ""),
+            "condition_line": condition.get("line"),
+            "probe_kind": probe.get("kind", ""),
+            "probe_field": probe.get("field", ""),
+            "probe_method": probe.get("method", ""),
+            "status": comparison.get("status"),
+            "evidence_level": comparison.get("evidence_level"),
+            "a_value": (
+                ((comparison.get("a") or {}).get("value") or {}).get("canonical")
+            ),
+            "b_value": (
+                ((comparison.get("b") or {}).get("value") or {}).get("canonical")
+            ),
+        },
+    )
+
+    if comparison.get("status") == "branch_orientation_confirmed":
+        next_action = (
+            "该条件的运行时值与 A/B 源码分支方向一致；可继续 inspect_method/trace_target "
+            "追查这个状态值是在哪里被赋值或计算出来的"
+        )
+    elif comparison.get("status") == "values_differ":
+        next_action = (
+            "A/B 值稳定且不同，但当前条件不是可直接验证方向的布尔分支；"
+            "结合 switch/when case 或继续追该字段来源"
+        )
+    elif comparison.get("status") == "same_value":
+        next_action = (
+            "该探针两边值相同，优先换 condition_rank/probe_index 检查同一分叉点的其他条件依赖"
+        )
+    else:
+        next_action = (
+            "当前证据不足或存在冲突；增加采集次数、检查触发时机，或手工 trace 条件依赖"
+        )
+
+    return {
+        **comparison,
+        "session_id": session_id,
+        "package": analysis.get("package"),
+        "condition": condition,
+        "probe": probe,
+        "selected_probe_index": max(
+            0,
+            min(int(probe_index), max(0, len(executable) - 1)),
+        ),
         "next_action": next_action,
     }
 
