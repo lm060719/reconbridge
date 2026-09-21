@@ -130,6 +130,43 @@ def summarize_values(
     stable = len(distinct_values) == 1 and bool(values)
     stable_value = distinct_values[0] if stable else None
 
+    phase_values: dict[str, list[dict[str, Any]]] = {}
+    for item in values:
+        phase = str(item.get("phase") or "unknown")
+        phase_values.setdefault(phase, []).append(item)
+
+    phases: dict[str, Any] = {}
+    for phase, items in phase_values.items():
+        phase_distinct: dict[str, dict[str, Any]] = {}
+        for item in items:
+            key = f"{item['type']}:{item['canonical']}"
+            phase_distinct.setdefault(
+                key,
+                {
+                    "type": item["type"],
+                    "value": item["value"],
+                    "canonical": item["canonical"],
+                },
+            )
+        phase_rows = list(phase_distinct.values())
+        phases[phase] = {
+            "sample_count": len(items),
+            "distinct_count": len(phase_rows),
+            "stable": len(phase_rows) == 1 and bool(items),
+            "stable_value": phase_rows[0] if len(phase_rows) == 1 else None,
+        }
+
+    before = phases.get("before") or {}
+    after = phases.get("after") or {}
+    before_after_consistent = False
+    if before.get("stable") and after.get("stable"):
+        before_value = before.get("stable_value") or {}
+        after_value = after.get("stable_value") or {}
+        before_after_consistent = (
+            before_value.get("type") == after_value.get("type")
+            and before_value.get("canonical") == after_value.get("canonical")
+        )
+
     return {
         "probe_fingerprint": probe_fingerprint(probe),
         "sample_count": len(values),
@@ -137,6 +174,8 @@ def summarize_values(
         "stable": stable,
         "stable_value": stable_value,
         "distinct_values": distinct_values[:20],
+        "phases": phases,
+        "before_after_consistent": before_after_consistent,
         "samples": [
             {
                 "type": item["type"],
@@ -144,6 +183,7 @@ def summarize_values(
                 "canonical": item["canonical"],
                 "ts": item.get("ts"),
                 "tid": item.get("tid"),
+                "phase": item.get("phase"),
             }
             for item in values[:20]
         ],
@@ -208,15 +248,28 @@ def compare_captures(
             status = "branch_orientation_conflict"
             explanation = "A/B 布尔值与源码推断的 true/false 分支方向不一致，需要检查反编译控制流或采集时机"
 
-    evidence_level = (
-        "direct"
-        if status == "branch_orientation_confirmed"
-        else "correlated"
-        if status == "values_differ"
-        else "conflicting"
-        if status == "branch_orientation_conflict"
-        else "inconclusive"
-    )
+    probe = capture_a.get("probe") or {}
+    probe_kind = str(probe.get("kind", ""))
+    if status == "branch_orientation_confirmed":
+        if probe_kind == "condition_method":
+            evidence_level = "direct"
+            explanation += "；该值来自条件方法返回值"
+        elif (
+            probe_kind == "field"
+            and summary_a.get("before_after_consistent")
+            and summary_b.get("before_after_consistent")
+        ):
+            evidence_level = "strong_correlated"
+            explanation += "；字段在两侧场景的方法入口/出口均保持同一稳定值"
+        else:
+            evidence_level = "correlated"
+            explanation += "；字段值来自方法边界观测，不等同于源码条件行的瞬时求值"
+    elif status == "values_differ":
+        evidence_level = "correlated"
+    elif status == "branch_orientation_conflict":
+        evidence_level = "conflicting"
+    else:
+        evidence_level = "inconclusive"
 
     return {
         "ok": comparable,
