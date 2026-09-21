@@ -65,7 +65,7 @@ description: >-
 ## 原子工具（高级/兜底用途，签名详见各工具描述）
 - **设备原子能力（7）**：`device_status` `list_packages` `pull_apk` `pull_libs` `read_remote_file` `proc_info` `remote_shell`（白名单）
 - **静态反编译（5）**：`decompile_apk`(jadx) `dexkit_search`(androguard 后端) `ghidra_analyze` `hermes_decompile`(RN Hermes) `toolchain_status`
-- **动态 hook / 事件 / Runtime 状态（M3/M5/M4）**：`post_hook` `list_hooks`（磁盘期望配置） `runtime_hook_status`（运行中 M5 HookRegistry 真实状态） `unhook`（M5 live remove） `collect_events` `recent_events`（环形缓冲事后补捞） `dump_dex`(脱壳) `list_dumps`
+- **动态 hook / 事件 / Runtime 状态（M3/M5/M4）**：`post_hook` `list_hooks`（磁盘期望配置） `runtime_hook_status`（运行中 M5 HookRegistry + ClassLoaderRegistry：installed/pending/loader/watcher） `unhook`（M5 live remove，pending 也同步移除） `collect_events` `recent_events`（环形缓冲事后补捞） `dump_dex`(脱壳) `list_dumps`
 - **Java trace / 篡改（LSPosed，M5）**：`trace_java`（读 this/参数/返回值/字段/栈；支持 `capture.paths` 挖嵌套字段 + `render:"deep"` 对象图） `patch_java`（`replace_args` / `replace_return` / `mutate_return` 返回值深层字段篡改 / `condition` 条件判断 / `${...}` 模板变量 / `skip_original` 以及 Action Pipeline：`call_method`, `set_field`, `construct`, `eval_js`, `eval_dex`, `exec_shell`, `before/after_actions`）
 - **场景 / 产出物**：`capture_scenario` `diff_scenarios` `list_scenarios` `list_artifacts` `list_dumps`
 
@@ -75,14 +75,14 @@ description: >-
 默认：`open_target` → `investigate(goal=...)` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage → verify_value_lineage A/B → compare_value_lineage_runtime → rank_root_causes → verify_root_cause_hypothesis A/B → compare_root_cause_hypothesis`。字段条件可先用 `verify_condition_writer` 确认真实 writer。根因假设实验会反向加权/降权排名：入口一致而输出不同才支持内部产生；入口已不同则把方向推回上游。DEX v3 持久化字段 read/write xref；Lineage 对同名 callee 保守处理。对象接收者先解析实际类型；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
-默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 通过 HookRegistry live unhook 自动清理。持续 patch 时可用 `runtime_hook_status(package)` 核对当前进程真正装着哪些 Hook；只有需要复杂字段抓取/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
+默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 通过 HookRegistry live unhook 自动清理。持续 patch 时可用 `runtime_hook_status(package)` 核对当前进程真正装着哪些 Hook。若显式目标类还没进入任何已知 ClassLoader，状态会是 `pending_class`，不是失败；优先触发插件/动态 DEX 加载并观察 pending→installed。只有需要复杂字段抓取/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
 
 **C. 场景差分** —— 「A 操作与 B 操作为什么行为不同」
 装 hook → `capture_scenario("A")` 做操作 A → `capture_scenario("B")` 做操作 B → `diff_scenarios("A","B")` 拿方法级差异（只在 A / 只在 B / 参数不同）。
 
 ## 顶级坑（踩过血的，务必记住）
 1. **LSPosed tracer 有作用域**：`trace_java`/`patch_java` 只在 LSPosed 里**勾了作用域的那些包**内生效。目标不在作用域 → hook 装不上，且不报错。
-2. **首个 hook 先让 M5 Tracer 上线，之后全量 reconcile**：首发最稳妥仍用 `restart:true`。Tracer 已连接后，`hot=True` / `restart:false` 会同步完整期望配置，HookRegistry 可 live add/remove/replace；同 ID 改配置会即时替换，`unhook` 会即时卸载。用 `runtime_hook_status` 核对真实状态。native M3 仍不支持这套 live 生命周期。
+2. **首个 hook 先让 M5 Tracer 上线，之后全量 reconcile**：首发最稳妥仍用 `restart:true`。Tracer 已连接后，`hot=True` / `restart:false` 会同步完整期望配置，HookRegistry 可 live add/remove/replace；显式类当前不存在会进入 pending，BaseDexClassLoader / loadClass watcher 后续自动补装。同 ID 改配置会即时替换，`unhook` 会即时卸载 installed 并删除 pending。用 `runtime_hook_status` 核对 installed_count / pending_count / class_loaders / class_loader_watch。native M3 仍不支持这套 live 生命周期。
 3. **native 是广域注入，tracer 是单包**：daemon.log 里刷屏「注入层已连接」是 native（Zygisk）层，不是 tracer。native tag=`ReconBridge`，tracer tag=`ReconTracer`。
 4. **logcat 可能被压制**：MIUI/HyperOS 会压第三方 App 的 logcat，`ReconTracer` 抓不到 tag **不代表 hook 没装**——是红鲱鱼，以事件流/命中数为准。
 5. **稀疏事件靠环形缓冲**：偶发命中的方法别只等 SSE，用 `recent_events` / `collect_events(include_recent=True)` 事后补捞，避免空窗期提前返回收 0。
