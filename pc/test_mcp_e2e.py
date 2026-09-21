@@ -34,7 +34,8 @@ def test_mcp_import_and_registration():
         "prepare_target", "search_target", "investigate", "inspect_method",
         "inspect_call_graph", "verify_call_path", "capture_call_graph_scenario",
         "list_call_graph_scenarios", "diff_call_graph_scenarios",
-        "rank_candidates", "verify_candidates", "trace_target", "evidence_graph",
+        "analyze_scenario_divergence", "rank_candidates", "verify_candidates",
+        "trace_target", "evidence_graph",
         "explain_evidence", "close_investigation",
     }
     assert expected.issubset(tool_names)
@@ -91,7 +92,7 @@ async def test_mcp_stdio_e2e():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) >= 43
+            assert len(tools) >= 44
             names = {t.name for t in tools}
             assert "device_status" in names
             assert "toolchain_status" in names
@@ -105,6 +106,7 @@ async def test_mcp_stdio_e2e():
             assert "capture_call_graph_scenario" in names
             assert "list_call_graph_scenarios" in names
             assert "diff_call_graph_scenarios" in names
+            assert "analyze_scenario_divergence" in names
             assert "rank_candidates" in names
             assert "verify_candidates" in names
             assert "trace_target" in names
