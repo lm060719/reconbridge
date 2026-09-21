@@ -383,6 +383,23 @@ static json nullable(const char* type, const json& def = nullptr) {
     return p;
 }
 
+static json any_json(const json& def = nullptr) {
+    json p = {{
+        "anyOf",
+        json::array({
+            json{{"type", "string"}},
+            json{{"type", "number"}},
+            json{{"type", "integer"}},
+            json{{"type", "boolean"}},
+            json{{"type", "object"}},
+            json{{"type", "array"}},
+            json{{"type", "null"}}
+        })
+    }};
+    if (!def.is_null()) p["default"] = def;
+    return p;
+}
+
 static json schema(json properties = json::object(), json required = json::array()) {
     json s = {{"type", "object"}, {"properties", std::move(properties)}};
     if (!required.empty()) s["required"] = std::move(required);
@@ -429,7 +446,24 @@ static const json& tools() {
                     {"package", "key"})),
         tool("runtime_state_set", "直接写入在线 M5 Runtime State。",
              schema({{"package", prop("string")}, {"key", prop("string")},
-                     {"value", json::object()}, {"scope", prop("string", "process")},
+                     {"value", any_json()}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key", "value"})),
+        tool("runtime_state_remove", "删除在线 M5 Runtime State 的一个 key 并返回旧值。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"scope", prop("string", "process")}, {"hook_id", prop("string", "")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key"})),
+        tool("runtime_state_increment", "原子增加在线 M5 Runtime State 数值。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"delta", prop("number", 1.0)}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key"})),
+        tool("runtime_state_append", "向在线 M5 Runtime State 列表追加 JSON 值。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"value", any_json()}, {"scope", prop("string", "process")},
                      {"hook_id", prop("string", "")}, {"process", prop("string", "")},
                      {"timeout_ms", prop("integer", 3000)}},
                     {"package", "key", "value"})),
