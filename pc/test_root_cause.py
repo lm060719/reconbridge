@@ -203,6 +203,85 @@ def test_same_runtime_value_penalizes_method_priority():
     )
 
 
+def test_hypothesis_internal_generation_boosts_candidate():
+    lineage = {
+        "origin_paths": [_path()],
+        "ambiguities": [],
+        "unresolved_calls": [],
+    }
+    comparison = _runtime_comparison()
+    key = "method:com.example.Repo#isVipEnabled()Z"
+
+    baseline = root_cause.rank_root_causes(
+        lineage,
+        runtime_comparison=comparison,
+        limit=5,
+    )
+    verified = root_cause.rank_root_causes(
+        lineage,
+        runtime_comparison=comparison,
+        hypothesis_results={
+            key: {
+                "status": "internal_generation_supported",
+                "score_adjustment": 30,
+                "explanation": "入口一致而输出不同",
+                "input_coverage_complete": True,
+                "differing_inputs": [],
+                "differing_outputs": [{"name": "return"}],
+            }
+        },
+        limit=5,
+    )
+
+    assert verified["top_candidate"]["method"] == "isVipEnabled"
+    assert (
+        verified["top_candidate"]["score"]
+        > baseline["top_candidate"]["score"]
+    )
+    assert (
+        verified["top_candidate"]["evidence_level"]
+        == "hypothesis_internal_supported"
+    )
+
+
+def test_hypothesis_upstream_difference_demotes_candidate():
+    lineage = {
+        "origin_paths": [_path()],
+        "ambiguities": [],
+        "unresolved_calls": [],
+    }
+    comparison = _runtime_comparison()
+    key = "method:com.example.Repo#isVipEnabled()Z"
+
+    result = root_cause.rank_root_causes(
+        lineage,
+        runtime_comparison=comparison,
+        hypothesis_results={
+            key: {
+                "status": "upstream_input_difference",
+                "score_adjustment": -30,
+                "explanation": "入口参数已经不同",
+                "input_coverage_complete": True,
+                "differing_inputs": [{"name": "args[0]"}],
+                "differing_outputs": [{"name": "return"}],
+            }
+        },
+        limit=5,
+    )
+
+    repo = next(
+        item for item in result["candidates"]
+        if item.get("method") == "isVipEnabled"
+    )
+    assert repo["evidence_level"] == "hypothesis_upstream"
+    assert any(
+        part["key"] == "root_cause_hypothesis"
+        and part["points"] == -30
+        for part in repo["score_breakdown"]
+    )
+    assert "上游" in repo["next_action"]
+
+
 def test_path_support_rewards_candidate_present_in_multiple_paths():
     first = _path()
     second = _path(origin_kind="network_or_repository", confidence=0.82)
