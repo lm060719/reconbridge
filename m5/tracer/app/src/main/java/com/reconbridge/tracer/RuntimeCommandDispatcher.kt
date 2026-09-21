@@ -1,8 +1,15 @@
 package com.reconbridge.tracer
 
+import android.app.Activity
+import android.os.Handler
+import android.os.Looper
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.LinkedHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Runtime Phase 5：处理 daemon 从现有注入 socket 直接下发的交互命令。
@@ -271,6 +278,30 @@ internal class RuntimeCommandDispatcher(
                 "activity_action.actions 必须是数组"
             )
 
+        val execute = {
+            executeActivityActions(
+                activity,
+                actions,
+            )
+        }
+
+        return if (activity is Activity) {
+            runActivityActionOnMainThread(
+                activity,
+                command,
+                execute,
+            )
+        } else {
+            // JVM 单元测试 / fake RuntimeContextProvider 不依赖 Android Looper。
+            execute()
+        }
+    }
+
+    private fun executeActivityActions(
+        activity: Any,
+        actions: JSONArray,
+    ): JSONObject
+    {
         val ctx = ActionContext(
             param = null,
             classLoader = classLoader,
@@ -303,8 +334,65 @@ internal class RuntimeCommandDispatcher(
         return JSONObject().apply {
             put("activity_class", activity.javaClass.name)
             put("executed", actions.length())
+            put("main_thread", activity is Activity)
             put("registers", registers)
         }
+    }
+
+    private fun runActivityActionOnMainThread(
+        activity: Activity,
+        command: JSONObject,
+        block: () -> JSONObject,
+    ): JSONObject
+    {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return block()
+        }
+
+        val timeoutMs = command.optLong(
+            "_timeout_ms",
+            3000L,
+        ).coerceIn(200L, 10000L)
+        val waitMs = (timeoutMs - 150L).coerceAtLeast(100L)
+        val handler = Handler(Looper.getMainLooper())
+        val latch = CountDownLatch(1)
+        val cancelled = AtomicBoolean(false)
+        val result = AtomicReference<JSONObject?>()
+        val error = AtomicReference<Throwable?>()
+
+        val runnable = Runnable {
+            try {
+                if (!cancelled.get()) {
+                    result.set(block())
+                }
+            } catch (t: Throwable) {
+                error.set(t)
+            } finally {
+                latch.countDown()
+            }
+        }
+
+        if (!handler.post(runnable)) {
+            throw IllegalStateException(
+                "无法把 Activity Action 调度到主线程"
+            )
+        }
+
+        if (!latch.await(waitMs, TimeUnit.MILLISECONDS)) {
+            cancelled.set(true)
+            handler.removeCallbacks(runnable)
+            throw IllegalStateException(
+                "Activity Action 主线程执行超时"
+            )
+        }
+
+        error.get()?.let {
+            throw it
+        }
+        return result.get()
+            ?: throw IllegalStateException(
+                "Activity Action 未返回结果"
+            )
     }
 
     private fun remoteScope(command: JSONObject): String
