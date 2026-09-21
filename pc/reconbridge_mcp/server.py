@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, runtime_path, scenario_path
+from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, runtime_path, scenario_path, writer_probe
 
 mcp = FastMCP("reconbridge")
 
@@ -1839,6 +1839,339 @@ def compare_divergence_probes(
             min(int(probe_index), max(0, len(executable) - 1)),
         ),
         "next_action": next_action,
+    }
+
+
+@mcp.tool()
+def inspect_condition_origin(
+    session_id: str,
+    a: str,
+    b: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_limit: int = 30,
+) -> dict:
+    """从已确认的 A/B 分叉条件继续追踪字段 writer/readers 或条件方法返回值来源。"""
+    analysis = analyze_scenario_divergence(
+        session_id,
+        a,
+        b,
+        auto_prepare_source=True,
+        max_conditions=max(20, int(condition_rank)),
+        max_probe_items=20,
+    )
+    if not analysis.get("ok"):
+        return analysis
+
+    condition, probe, executable = _select_divergence_probe(
+        analysis,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+    )
+    if condition is None or probe is None:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": analysis.get("package"),
+            "error": "所选条件没有可自动追踪的安全探针",
+            "condition": condition,
+            "probe_plan": analysis.get("probe_plan", []),
+        }
+
+    state = investigation.load(session_id, refresh=True)
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "当前会话没有 APK",
+        }
+
+    prepared = external.ensure_dex_index(apk)
+    if not prepared.get("ok"):
+        return {
+            **prepared,
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+        }
+
+    kind = str(probe.get("kind", ""))
+    if kind == "field":
+        origin = investigation.field_origin_context(
+            session_id,
+            str(probe.get("class", "")),
+            str(probe.get("field", "")),
+            limit=max(1, min(int(writer_limit), 100)),
+            include_source=True,
+        )
+        if origin.get("ok"):
+            investigation.record_field_origin_evidence(session_id, origin)
+
+        top_writer = origin.get("top_writer") if origin.get("ok") else None
+        next_action = (
+            "调用 verify_condition_writer 对排名靠前的 writer 做 before/after 字段值验证，"
+            "确认谁在真实行为里改变了该状态"
+            if top_writer
+            else "静态索引没有找到 writer；检查字段是否由 native/反射/序列化框架写入"
+        )
+        investigation.add_discovery(
+            session_id,
+            {
+                "type": "condition_field_origin",
+                "a": a,
+                "b": b,
+                "field": probe.get("field", ""),
+                "class": probe.get("class", ""),
+                "writers": origin.get("writer_count", 0),
+                "readers": origin.get("reader_count", 0),
+                "top_writer": (
+                    f"{top_writer.get('class', '')}.{top_writer.get('method', '')}"
+                    if isinstance(top_writer, dict)
+                    else ""
+                ),
+            },
+        )
+        return {
+            "ok": bool(origin.get("ok")),
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "condition": condition,
+            "probe": probe,
+            "selected_probe_index": max(
+                0,
+                min(int(probe_index), max(0, len(executable) - 1)),
+            ),
+            "origin_kind": "field",
+            "field_origin": origin,
+            "next_action": next_action,
+        }
+
+    if kind == "condition_method":
+        origin = investigation.condition_method_origin_context(
+            session_id,
+            str(probe.get("class", "")),
+            str(probe.get("method", "")),
+        )
+        context = origin.get("context") or {}
+        if context:
+            investigation.record_method_context_evidence(
+                session_id,
+                str(probe.get("class", "")),
+                str(probe.get("method", "")),
+                "",
+                context,
+            )
+        investigation.add_discovery(
+            session_id,
+            {
+                "type": "condition_method_origin",
+                "a": a,
+                "b": b,
+                "class": probe.get("class", ""),
+                "method": probe.get("method", ""),
+                "best_source": (
+                    (origin.get("value_source") or {}).get("best_source_hint")
+                    or {}
+                ).get("kind", ""),
+            },
+        )
+        return {
+            "ok": bool(origin.get("ok")),
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "condition": condition,
+            "probe": probe,
+            "origin_kind": "condition_method",
+            "method_origin": origin,
+            "next_action": (
+                "优先检查 return 表达式与 callees；若返回值来自对象字段或 repository/API，"
+                "继续 inspect_method 对对应 callee 展开来源"
+            ),
+        }
+
+    return {
+        "ok": False,
+        "session_id": session_id,
+        "package": state["package"],
+        "condition": condition,
+        "probe": probe,
+        "error": f"暂不支持自动追踪的 probe kind: {kind}",
+    }
+
+
+@mcp.tool()
+def verify_condition_writer(
+    session_id: str,
+    a: str,
+    b: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_rank: int = 1,
+    seconds: float = 15.0,
+    max_events: int = 160,
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+) -> dict:
+    """动态验证字段 writer 是否真的在一次行为中改变已确认的分叉条件字段。"""
+    origin_result = inspect_condition_origin(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_limit=max(30, int(writer_rank)),
+    )
+    if not origin_result.get("ok"):
+        return origin_result
+    if origin_result.get("origin_kind") != "field":
+        return {
+            **origin_result,
+            "ok": False,
+            "error": "verify_condition_writer 仅用于字段条件；条件方法请继续追其 return/callee 来源",
+        }
+
+    field_origin = origin_result.get("field_origin") or {}
+    writers = field_origin.get("writers") or []
+    writer_rank = max(1, int(writer_rank))
+    writer = next(
+        (item for item in writers if int(item.get("rank", 0) or 0) == writer_rank),
+        None,
+    )
+    if writer is None:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": origin_result.get("package"),
+            "error": f"找不到 writer_rank={writer_rank}",
+            "writers": writers[:20],
+        }
+
+    field = field_origin.get("field") or {}
+    field_class = candidate.normalize_class_name(str(field.get("class", "")))
+    writer_class = candidate.normalize_class_name(str(writer.get("class", "")))
+    field_name = str(field.get("name", ""))
+    if writer_class != field_class:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": origin_result.get("package"),
+            "field": field,
+            "writer": writer,
+            "error": (
+                "该 writer 不属于字段声明类，自动 this.field 观测可能读取错误对象；"
+                "当前只自动验证同类实例字段 writer"
+            ),
+            "next_action": "查看 writer 源码确认目标对象来源后，再用 trace_java paths/fields 手工指定",
+        }
+
+    state = investigation.load(session_id, refresh=True)
+    safe_method = re.sub(
+        r"[^A-Za-z0-9_]",
+        "_",
+        str(writer.get("method", "")),
+    )[:24] or "writer"
+    safe_field = re.sub(
+        r"[^A-Za-z0-9_]",
+        "_",
+        field_name,
+    )[:20] or "field"
+    hook_id = f"rbwr_{session_id}_{writer_rank}_{safe_method}_{safe_field}"
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    investigation.add_temporary_hook(session_id, hook_id)
+    try:
+        result = trace_java(
+            package=state["package"],
+            class_name=writer_class,
+            method=str(writer.get("method", "")),
+            capture_args=[],
+            fields=[
+                {
+                    "target": "this",
+                    "name": field_name,
+                    "render": "tostring",
+                }
+            ],
+            this="class",
+            ret=False,
+            when="both",
+            stack=False,
+            hook_id=hook_id,
+            restart=restart,
+            seconds=max(0.5, float(seconds)),
+            max_events=max(2, min(int(max_events), 600)),
+            include_recent=True,
+            since_seq=cursor,
+            hot=hot,
+        )
+    finally:
+        if cleanup:
+            try:
+                unhook(state["package"], hook_id)
+            finally:
+                investigation.remove_temporary_hook(session_id, hook_id)
+
+    events = result.get("events", [])
+    change = writer_probe.analyze_writer_events(events, field_name)
+
+    try:
+        latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    if events:
+        investigation.record_trace_evidence(
+            session_id,
+            writer_class,
+            str(writer.get("method", "")),
+            events,
+        )
+
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "condition_writer_verification",
+            "field": field_name,
+            "writer": f"{writer_class}.{writer.get('method', '')}",
+            "writer_rank": writer_rank,
+            "paired_calls": change.get("paired_calls", 0),
+            "changed_calls": change.get("changed_calls", 0),
+            "changed": change.get("changed", False),
+        },
+    )
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "package": state["package"],
+        "a": a,
+        "b": b,
+        "condition": origin_result.get("condition"),
+        "probe": origin_result.get("probe"),
+        "field": field,
+        "writer": writer,
+        "writer_rank": writer_rank,
+        "change": change,
+        "event_cursor": latest,
+        "posted": result.get("posted"),
+        "cleanup": cleanup,
+        "next_action": (
+            "该 writer 已观测到字段值变化；结合 writer.assignments/source_hints 继续追右值调用来源"
+            if change.get("changed")
+            else "本轮未观测到字段变化；确认已触发对应场景，或尝试下一个 writer_rank"
+        ),
     }
 
 
