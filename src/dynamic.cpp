@@ -826,6 +826,9 @@ static void handle_runtime_command(const Request& req, Response& res) {
         return;
     }
 
+    // 只给 Tracer 内部调度使用；Activity Action 据此控制主线程同步等待上限。
+    command["_timeout_ms"] = timeout_ms;
+
     std::vector<std::shared_ptr<InjectConn>> targets;
     {
         std::lock_guard<std::mutex> lk(g_conn_mutex);
