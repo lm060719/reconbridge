@@ -586,6 +586,8 @@ private class TraceCallback(
     private val io: InjectSocket,
     private val pkg: String,
     private val classLoader: ClassLoader,
+    private val runtimeState: RuntimeStateStore,
+    private val eventBus: RuntimeEventBus,
     spec: JSONObject,
 ) : XC_MethodHook() {
 
@@ -598,7 +600,14 @@ private class TraceCallback(
     private val tamper = action != null
 
     override fun beforeHookedMethod(param: MethodHookParam) {
-        val ctx = ActionContext(param, classLoader, pkg)
+        val ctx = ActionContext(
+            param = param,
+            classLoader = classLoader,
+            pkg = pkg,
+            hookId = id,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+        )
         // 先按原始输入出事件，再改参数/执行 before pipeline
         if (whenPhase == "before" || whenPhase == "both") emit(param, "before", withRet = false)
         try {
@@ -609,7 +618,14 @@ private class TraceCallback(
     }
 
     override fun afterHookedMethod(param: MethodHookParam) {
-        val ctx = ActionContext(param, classLoader, pkg)
+        val ctx = ActionContext(
+            param = param,
+            classLoader = classLoader,
+            pkg = pkg,
+            hookId = id,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+        )
         try {
             ActionExecutor.executeActions(ctx, action, "after")
         } catch (t: Throwable) {
@@ -853,7 +869,14 @@ private class TraceCallback(
      * @return 解析到的原始对象（可能为 null=字段本就是 null）；无法解析返回哨兵 MISSING。
      */
     private fun resolvePath(param: MethodHookParam, expr0: String): Any? {
-        val ctx = ActionContext(param, classLoader, pkg)
+        val ctx = ActionContext(
+            param = param,
+            classLoader = classLoader,
+            pkg = pkg,
+            hookId = id,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+        )
         return ActionExecutor.resolvePath(ctx, expr0)
     }
 
