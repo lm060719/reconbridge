@@ -65,19 +65,29 @@ class HookEntry : IXposedHookLoadPackage {
         traceVerbose = cfg.optBoolean("debug", false)
         vlog("[$pkg] 取到配置 ${cfgText.length} 字节 debug=$traceVerbose")
 
+        val runtimeState = RuntimeStateStore(pkg)
+        val eventBus = RuntimeEventBus()
+
         val registry = HookRegistry(
             packageName = pkg,
             processName = lpparam.processName,
             pid = Process.myPid(),
             initialClassLoader = lpparam.classLoader,
-        ) { target, loader ->
-            installJavaHook(
-                lpparam = lpparam,
-                io = io,
-                t = target,
-                classLoader = loader,
-            )
-        }
+            installer = { target, loader ->
+                installRuntimeTarget(
+                    lpparam = lpparam,
+                    io = io,
+                    t = target,
+                    classLoader = loader,
+                    runtimeState = runtimeState,
+                    eventBus = eventBus,
+                )
+            },
+            onHookRemoved = { hookId ->
+                runtimeState.clearHook(hookId)
+                eventBus.clearOwner(hookId)
+            },
+        )
 
         lateinit var watcher: ClassLoaderWatcher
 
@@ -87,6 +97,14 @@ class HookEntry : IXposedHookLoadPackage {
             status.put(
                 "class_loader_watch",
                 watcher.snapshotJson(),
+            )
+            status.put(
+                "runtime_state",
+                runtimeState.snapshotJson(),
+            )
+            status.put(
+                "event_bus",
+                eventBus.snapshotJson(),
             )
             io.sendRuntimeStatus(status.toString())
         }
