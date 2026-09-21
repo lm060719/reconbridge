@@ -76,6 +76,13 @@ class HookEntry : IXposedHookLoadPackage {
             contextRegistry = contextRegistry,
             eventBus = eventBus,
         )
+        val commandDispatcher = RuntimeCommandDispatcher(
+            packageName = pkg,
+            classLoader = lpparam.classLoader,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+            contextRuntime = contextRegistry,
+        )
 
         val registry = HookRegistry(
             packageName = pkg,
@@ -124,6 +131,7 @@ class HookEntry : IXposedHookLoadPackage {
                 "lifecycle_runtime",
                 lifecycleManager.snapshotJson(),
             )
+            status.put("runtime_command_supported", true)
             io.sendRuntimeStatus(status.toString())
         }
 
@@ -178,19 +186,31 @@ class HookEntry : IXposedHookLoadPackage {
 
         // daemon 下发的是“完整期望配置”。每次 reload 都做 reconcile；
         // 找不到类的 target 会进入 pending，并由 ClassLoaderWatcher 后续自动补装。
-        io.enableHotReload { newCfgText ->
-            try {
-                val newCfg = JSONObject(newCfgText)
-                traceVerbose = newCfg.optBoolean("debug", traceVerbose)
-                val newTargets = newCfg.optJSONArray("targets") ?: JSONArray()
-                val sync = registry.reconcile(newTargets)
-                logSyncResult(pkg, "实时同步", sync)
-                watcher.setPendingEnabled(registry.hasPending())
+        io.enableHotReload(
+            onReload = { newCfgText ->
+                try {
+                    val newCfg = JSONObject(newCfgText)
+                    traceVerbose = newCfg.optBoolean(
+                        "debug",
+                        traceVerbose,
+                    )
+                    val newTargets = newCfg.optJSONArray(
+                        "targets"
+                    ) ?: JSONArray()
+                    val sync = registry.reconcile(newTargets)
+                    logSyncResult(pkg, "实时同步", sync)
+                    watcher.setPendingEnabled(registry.hasPending())
+                    publishRuntimeStatus()
+                } catch (t: Throwable) {
+                    log("[$pkg] 实时配置同步失败: $t")
+                }
+            },
+            onCommand = { commandText ->
+                val ack = commandDispatcher.execute(commandText)
                 publishRuntimeStatus()
-            } catch (t: Throwable) {
-                log("[$pkg] 实时配置同步失败: $t")
-            }
-        }
+                ack
+            },
+        )
     }
 
     private fun logSyncResult(
