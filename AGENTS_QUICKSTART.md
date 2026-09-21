@@ -43,8 +43,8 @@
 - `install.ps1` / `install.sh` 会把 reconbridge **注册到用户级**（`~/.claude.json` 的 `/mcpServers`，绝对路径指向你克隆仓库里的 venv 与 `pc/`），**任意文件夹的新会话都会自动加载**。新会话 = 重启 MCP server = 自动加载最新 `pc/reconbridge_mcp` 代码（含最新工具/修复）。
 - **前提**：① 别移动/删除仓库目录（用户级配置写死了它的 venv + `pc/` 绝对路径；仓库挪了就改 `~/.claude.json` 里对应两处路径）；② 手机已刷模块、端口已开、adb 连得上。
 - **第一步永远先** `device_status` 确认连得上（返回 `/health` 即 OK）。
-- 已知目标包名后，**默认第二步是 `open_target(package_name)`**。之后围绕返回的 `session_id` 使用 `search_target` / `prepare_target` / `trace_target`；不要默认手工串原子工具。
-- 这些 MCP 工具在会话里可能是**延迟加载**的：优先加载 `device_status,open_target,search_target,prepare_target,trace_target,investigation_status,close_investigation`，特殊需求再拿原子工具 schema。
+- 已知目标包名后，**默认第二步是 `open_target(package_name)`**，第三步优先直接 `investigate(session_id, goal=...)`。只有需要手工控制调查阶段时再拆成 `search_target / rank_candidates / verify_candidates / explain_evidence`。
+- 这些 MCP 工具在会话里可能是**延迟加载**的：优先加载 `device_status,open_target,investigate,trace_target,investigation_status,close_investigation`，特殊需求再拿原子工具 schema。
 
 ---
 
@@ -54,7 +54,8 @@
 | 工具 | 用途 |
 |---|---|
 | `open_target(package_name, auto_pull=True, note="")` | 创建持久化分析会话；自动绑定本地 APK/JADX/so，本地没 APK 时默认尝试从设备拉取 |
-| `search_target(session_id, query, kind="auto", limit=20)` | 统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
+| `investigate(session_id, goal, verify_runtime=True, top_n=5, seconds=15, ...)` | **默认首选**：自然语言目标自动执行关键词规划、索引、多词候选排序、批量运行时验证和证据汇总；运行时失败自动保留静态结果 |
+| `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
 | `rank_candidates(session_id, query, limit=10, pool_limit=80)` | 综合字符串 xref、方法名/类名、历史 Evidence Graph 生成带 score/reasons 的候选排序 |
@@ -144,13 +145,11 @@
 ```
 device_status
 → open_target("com.target.app")                 # 返回 session_id
-→ prepare_index(session_id)                    # 可选：连续搜索很多次时先预热一次
-→ search_target(session_id, "会员")             # 直接查 SQLite 索引，不先全量 JADX
+→ investigate(session_id, goal="找到会员状态判断方法", top_n=5)
+# ↑ 自动：关键词规划 → SQLite 索引 → 多词候选合并 → 批量 Hook → 证据汇总
+# 如果此轮需要 runtime 验证，在采集窗口里触发一次目标行为即可
 → prepare_target(session_id)                    # 只有需要完整源码上下文时再做
-→ search_target(session_id, "premiumStatus")
-→ rank_candidates(session_id, "premiumStatus")
-→ verify_candidates(session_id, "premiumStatus", top_n=5)  # 触发一次目标行为
-→ explain_evidence(session_id, "premiumStatus")
+→ trace_target(session_id, "com.target.PayManager", "checkVip")  # 已明确方法后精细抓参数/字段
 ```
 同一个 APK 的索引只需构建一次；之后即使换不同关键词/类名/方法名，也直接查 SQLite，不再重复启动 Androguard。候选排序会优先利用字符串 xref 与已有运行时证据；批量验证只需要一次行为触发。搜索和 trace 结果会自动沉淀进 Evidence Graph，APK 文件发生变化后索引会自动失效并重建。
 
@@ -235,6 +234,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 静态定位默认 `search_target`；需要完整源码才 `prepare_target`；候选方法运行时验证默认 `trace_target`。
-4. 只有 native、复杂 patch 或高层入口覆盖不了时，才退回原子工具。
+3. 默认直接 `investigate(session_id, goal=...)`；需要完整源码才 `prepare_target`；已明确具体方法后再 `trace_target` 做精细观测。
+4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
