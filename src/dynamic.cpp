@@ -413,6 +413,86 @@ static int hot_reload(const std::string& base_pkg, const std::string& cfg) {
     return n;
 }
 
+static std::atomic<uint64_t> g_runtime_command_seq{1};
+
+static json send_runtime_command_to_conn(
+    const std::shared_ptr<InjectConn>& c,
+    json command,
+    int timeout_ms) {
+    const uint64_t seq = g_runtime_command_seq.fetch_add(1);
+    const std::string request_id =
+        "rcmd_" + std::to_string(now_ms()) + "_" + std::to_string(seq);
+    command["request_id"] = request_id;
+
+    auto waiter = std::make_shared<RuntimeCommandWaiter>();
+    {
+        std::lock_guard<std::mutex> lk(c->command_mutex);
+        c->command_waiters[request_id] = waiter;
+    }
+
+    const std::string payload = command.dump();
+    const uint32_t len = static_cast<uint32_t>(payload.size());
+    char hdr[5];
+    hdr[0] = 'C';
+    memcpy(hdr + 1, &len, 4);
+
+    bool sent = false;
+    {
+        std::lock_guard<std::mutex> write_lk(c->write_mutex);
+        if (c->alive) {
+            sent = sock_write_full(c->fd, hdr, sizeof(hdr)) &&
+                   (len == 0 || sock_write_full(
+                       c->fd,
+                       payload.data(),
+                       payload.size()));
+        }
+    }
+
+    if (!sent) {
+        std::lock_guard<std::mutex> lk(c->command_mutex);
+        c->command_waiters.erase(request_id);
+        return {
+            {"ok", false},
+            {"request_id", request_id},
+            {"error", "Runtime Command 发送失败"}
+        };
+    }
+
+    json response;
+    {
+        std::unique_lock<std::mutex> lk(waiter->m);
+        const bool ready = waiter->cv.wait_for(
+            lk,
+            std::chrono::milliseconds(timeout_ms),
+            [&] { return waiter->done; });
+        if (!ready) {
+            response = {
+                {"ok", false},
+                {"request_id", request_id},
+                {"error", "Runtime Command Ack 超时"}
+            };
+        } else {
+            response = waiter->response;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(c->command_mutex);
+        c->command_waiters.erase(request_id);
+    }
+
+    if (!response.is_object()) {
+        response = {
+            {"ok", false},
+            {"request_id", request_id},
+            {"error", "Runtime Command Ack 格式无效"}
+        };
+    }
+    response["package"] = c->base_pkg;
+    response["process"] = c->process_name;
+    return response;
+}
+
 static void inject_client(int fd) {
     uint32_t plen = 0;
     if (!sock_read_full(fd, &plen, 4) || plen == 0 || plen > 1024) { close(fd); return; }
