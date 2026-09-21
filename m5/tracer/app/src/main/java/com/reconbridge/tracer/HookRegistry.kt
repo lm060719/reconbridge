@@ -146,7 +146,10 @@ internal class HookRegistry(
             }
             for (id in removedPendingIds) {
                 pending.remove(id)
-                if (!installed.containsKey(id)) {
+                if (
+                    !installed.containsKey(id) &&
+                    !removedInstalledIds.contains(id)
+                ) {
                     onHookRemoved(id)
                 }
             }
