@@ -111,7 +111,8 @@ internal class HookRegistry(
 
             for (index in 0 until targets.length()) {
                 val target = targets.optJSONObject(index) ?: continue
-                if (target.optString("kind", "native") != "java") {
+                val kind = target.optString("kind", "native")
+                if (kind != "java" && kind != "runtime") {
                     continue
                 }
 
