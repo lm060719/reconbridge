@@ -4429,6 +4429,163 @@ def runtime_hook_status(package: str = "") -> dict:
     return client.get_json("/runtime_status", params=params)
 
 
+def _runtime_command(
+    package: str,
+    op: str,
+    *,
+    process: str = "",
+    timeout_ms: int = 3000,
+    **payload: Any,
+) -> dict:
+    _validate_package_name(package)
+    body: dict[str, Any] = {
+        "package": package,
+        "timeout_ms": max(200, min(int(timeout_ms), 10000)),
+        "command": {
+            "op": op,
+            **payload,
+        },
+    }
+    if process:
+        body["process"] = process
+    return client.post_json("/runtime_command", body)
+
+
+@mcp.tool()
+def runtime_state_get(
+    package: str,
+    key: str,
+    scope: str = "process",
+    hook_id: str = "",
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """直接读取在线 M5 Runtime State，不创建临时 Hook。
+
+    scope 支持 process/package/hook；hook scope 需传 hook_id。
+    多进程 App 未传 process 时会分别返回每个在线 Runtime 的结果。
+    """
+    return _runtime_command(
+        package,
+        "state_get",
+        process=process,
+        timeout_ms=timeout_ms,
+        scope=scope,
+        key=key,
+        hook_id=hook_id,
+    )
+
+
+@mcp.tool()
+def runtime_state_set(
+    package: str,
+    key: str,
+    value: Any,
+    scope: str = "process",
+    hook_id: str = "",
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """直接写入在线 M5 Runtime State；支持 JSON 标量、对象和数组。"""
+    return _runtime_command(
+        package,
+        "state_set",
+        process=process,
+        timeout_ms=timeout_ms,
+        scope=scope,
+        key=key,
+        value=value,
+        hook_id=hook_id,
+    )
+
+
+@mcp.tool()
+def runtime_state_clear(
+    package: str,
+    scope: str = "process",
+    hook_id: str = "",
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """清空在线 Runtime 的一个 State scope；hook scope 需指定 hook_id。"""
+    return _runtime_command(
+        package,
+        "state_clear",
+        process=process,
+        timeout_ms=timeout_ms,
+        scope=scope,
+        hook_id=hook_id,
+    )
+
+
+@mcp.tool()
+def runtime_event_emit(
+    package: str,
+    name: str,
+    payload: Optional[dict[str, Any]] = None,
+    source_hook: str = "__remote__",
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """从 PC 直接向在线 M5 Runtime EventBus 发事件。
+
+    payload 会作为真实结构化对象进入 event.*；现有 on_event/on_lifecycle 订阅之外的
+    自定义监听器可立即同步响应并修改 Runtime State。
+    """
+    return _runtime_command(
+        package,
+        "event_emit",
+        process=process,
+        timeout_ms=timeout_ms,
+        name=name,
+        payload=payload or {},
+        source_hook=source_hook,
+    )
+
+
+@mcp.tool()
+def runtime_context_status(
+    package: str,
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """实时读取目标进程当前 Application/Context/Activity/Lifecycle 状态。"""
+    return _runtime_command(
+        package,
+        "context_status",
+        process=process,
+        timeout_ms=timeout_ms,
+    )
+
+
+@mcp.tool()
+def runtime_activity_action(
+    package: str,
+    actions: list[dict[str, Any]],
+    process: str = "",
+    timeout_ms: int = 3000,
+) -> dict:
+    """在当前 Activity 上直接执行现有 Action Pipeline，不创建 Java Hook。
+
+    actions 示例：[{"action":"call_method","target":"activity","method":"finish"}]。
+    也可读写 state、emit_event、调用其它对象；当前没有 Activity 时会明确返回错误。
+    """
+    if not isinstance(actions, list) or not all(
+        isinstance(item, dict) for item in actions
+    ):
+        return {
+            "ok": False,
+            "error": "actions 必须是 JSON object 列表",
+        }
+    return _runtime_command(
+        package,
+        "activity_action",
+        process=process,
+        timeout_ms=timeout_ms,
+        actions=actions,
+    )
+
+
 @mcp.tool()
 def unhook(package: str, hook_id: str = "") -> dict:
     """移除某包 hook；运行中的 M5 Tracer 会立即 live unhook。
