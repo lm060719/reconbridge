@@ -115,6 +115,20 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(caller_method_id, callee_method_id)
         );
 
+        CREATE TABLE field_reads (
+            field_id INTEGER NOT NULL,
+            method_id INTEGER NOT NULL,
+            offset INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(field_id, method_id, offset)
+        );
+
+        CREATE TABLE field_writes (
+            field_id INTEGER NOT NULL,
+            method_id INTEGER NOT NULL,
+            offset INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(field_id, method_id, offset)
+        );
+
         CREATE INDEX idx_classes_name ON classes(name);
         CREATE INDEX idx_methods_name ON methods(method_name);
         CREATE INDEX idx_methods_class ON methods(class_name);
@@ -125,6 +139,10 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_xrefs_method ON string_method_xrefs(method_id);
         CREATE INDEX idx_calls_caller ON method_calls(caller_method_id);
         CREATE INDEX idx_calls_callee ON method_calls(callee_method_id);
+        CREATE INDEX idx_field_reads_field ON field_reads(field_id);
+        CREATE INDEX idx_field_reads_method ON field_reads(method_id);
+        CREATE INDEX idx_field_writes_field ON field_writes(field_id);
+        CREATE INDEX idx_field_writes_method ON field_writes(method_id);
         """
     )
 
@@ -159,6 +177,8 @@ def build_index(apk_path: str, index_path: str) -> dict[str, Any]:
         "strings": 0,
         "string_method_xrefs": 0,
         "method_calls": 0,
+        "field_reads": 0,
+        "field_writes": 0,
     }
 
     try:
@@ -268,6 +288,45 @@ def build_index(apk_path: str, index_path: str) -> dict[str, Any]:
                             (caller_id, callee_id),
                         )
 
+            def ensure_method_id(method_analysis) -> int | None:
+                method = _method_row(method_analysis)
+                key = (
+                    method["class"],
+                    method["method"],
+                    method["descriptor"],
+                )
+                existing = method_ids.get(key)
+                if existing is not None:
+                    return existing
+
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO methods(
+                        class_name, method_name, descriptor, access
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        method["class"],
+                        method["method"],
+                        method["descriptor"],
+                        method["access"],
+                    ),
+                )
+                counts["methods"] += max(0, cur.rowcount)
+                row_id = conn.execute(
+                    """
+                    SELECT id
+                    FROM methods
+                    WHERE class_name = ? AND method_name = ? AND descriptor = ?
+                    """,
+                    key,
+                ).fetchone()
+                if not row_id:
+                    return None
+                method_id = int(row_id[0])
+                method_ids[key] = method_id
+                return method_id
+
             for item in analysis.find_fields(classname=".*", fieldname=".*"):
                 row = _field_row(item)
                 cur = conn.execute(
@@ -278,6 +337,52 @@ def build_index(apk_path: str, index_path: str) -> dict[str, Any]:
                     (row["class"], row["field"], row["type"]),
                 )
                 counts["fields"] += max(0, cur.rowcount)
+                field_row = conn.execute(
+                    """
+                    SELECT id
+                    FROM fields
+                    WHERE class_name = ? AND field_name = ? AND type = ?
+                    """,
+                    (row["class"], row["field"], row["type"]),
+                ).fetchone()
+                if not field_row:
+                    continue
+                field_id = int(field_row[0])
+
+                for relation, table, counter in (
+                    ("get_xref_read", "field_reads", "field_reads"),
+                    ("get_xref_write", "field_writes", "field_writes"),
+                ):
+                    if not hasattr(item, relation):
+                        continue
+                    try:
+                        xrefs = getattr(item, relation)(withoffset=True)
+                    except TypeError:
+                        try:
+                            xrefs = getattr(item, relation)()
+                        except Exception:
+                            continue
+                    except Exception:
+                        continue
+
+                    for xref in xrefs:
+                        if len(xref) < 2:
+                            continue
+                        method_id = ensure_method_id(xref[1])
+                        if method_id is None:
+                            continue
+                        try:
+                            offset = int(xref[2]) if len(xref) >= 3 else 0
+                        except (TypeError, ValueError):
+                            offset = 0
+                        cur = conn.execute(
+                            f"""
+                            INSERT OR IGNORE INTO {table}(field_id, method_id, offset)
+                            VALUES (?, ?, ?)
+                            """,
+                            (field_id, method_id, offset),
+                        )
+                        counts[counter] += max(0, cur.rowcount)
 
             for string_analysis in analysis.find_strings(".*"):
                 value = str(string_analysis.get_value())
