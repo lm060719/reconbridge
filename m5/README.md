@@ -17,7 +17,9 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
   - `HookRegistry.kt` —— 保存真实 Xposed Unhook handle，维护 installed / pending 双状态，支持 live add/remove/replace。
   - `ClassLoaderRegistry.kt` —— 弱引用记录主/插件/动态 ClassLoader，避免阻止可卸载插件 loader 被 GC。
   - `ClassLoaderWatcher.kt` —— 常驻监听 BaseDexClassLoader 创建；仅在存在 pending 时临时监听 `ClassLoader.loadClass`。
-  - `ActionExecutor.kt` —— 动作流水线执行器（调用 Java 方法、修改/读取字段、构造对象、执行 JS/DEX 片段、执行 shell 命令、组合 before/after callback）。
+  - `RuntimeStateStore.kt` —— 跨 Hook 共享状态，支持 process/package/hook/thread 作用域、原子计数和有界追加列表。
+  - `RuntimeEventBus.kt` —— 进程内同步事件总线；Hook 可 emit，runtime target 可订阅并执行 Action Pipeline，带递归深度保护。
+  - `ActionExecutor.kt` —— 动作流水线执行器；除 Java 调用/字段/JS/DEX/shell 外，支持 State 读写与 Event → Action。
   - `InjectSocket.kt` —— 复刻 M3 的 `@reconbridge_inject` 抽象 socket 分帧协议。
 - `ReconBridge-Tracer.apk` —— 预编译产物（debug 自签名，可直接安装）。
 - `JAVA_HOOK_PROTOCOL.md` —— 下发配置 / 事件格式 / Action Pipeline / HookRegistry / 动态 ClassLoader 协议。
@@ -28,6 +30,7 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
 3. PC（MCP）：`trace_java(package="com.miui.voiceassist", class_name="r70.a", method="sendStreamData", args_render="json", restart=True, seconds=20)`，然后唤起目标行为。
    - 字符串特征定位混淆方法：使用 `using_strings=["sendStream"]` 参数，m5 会在 App 进程中自动扫描 DEX 结构，反查并挂载匹配的方法（无需预先定位混淆类名）。
    - 实时篡改与回调：`patch_java(...)`（支持改参数、改返回值、返回值深层字段/Map key篡改 `mutate_return`、条件检查 `condition`、模板变量 `${...}` 及 Action Pipeline，支持 `hot=True` 免重启热加）。
+   - 跨 Hook 状态/事件：在 action 中使用 `set_state/get_state/increment_state/append_state/emit_event`；另一个 Java Hook 或 `kind:"runtime"` target 可通过 `state.* / event.*` 条件与模板响应。
    - 或手工：`post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`。
 
 ## 构建
@@ -37,4 +40,4 @@ cd m5/tracer && ./gradlew.bat :app:assembleDebug
 （仓库在非 ASCII 路径，`gradle.properties` 里已加 `android.overridePathCheck=true`；内置 Rhino JS 引擎，支持脚本动态计算。）
 
 ## 边界与能力
-支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、**pending hook + 动态 ClassLoader Watch**、`runtime_hook_status` 查询 installed/pending/loader 真实状态、实时篡改（参数/返回值覆盖/Skip原方法/深层字段与 Map key 篡改）、条件执行、`after` 阶段返回值 Path 读写、**Action Pipeline**（调用 Java 方法/改写字段/构造对象/Rhino JS片段/DEX动态执行/shell命令）及模板变量 `${...}`。显式 `class` 目标如果当前所有已知 loader 都找不到类，会进入 pending；后续 Dex/Path/InMemoryDexClassLoader 出现或目标类经 `loadClass` 返回后自动补装。需 LSPosed 并在管理器里勾选作用域。详见 `JAVA_HOOK_PROTOCOL.md`。
+支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、**pending hook + 动态 ClassLoader Watch**、**Runtime State + Event Bus**、实时篡改和完整 Action Pipeline。State 提供 process/package/hook/thread 四种作用域；不同 Hook 可通过 `${state.process.xxx}` / `condition.path=state.hook.xxx` 共享状态，也可用 `emit_event` 驱动另一个 `kind:"runtime"` 或 Java target 的 `on_event` 动作。Hook-scope 状态会随真正 unhook 清理，同 ID replace 会保留；Event Bus 同步分发并限制递归深度。显式 `class` 目标若当前所有已知 loader 都找不到类会进入 pending，后续动态 loader 出现后自动补装。需 LSPosed 并在管理器里勾选作用域。详见 `JAVA_HOOK_PROTOCOL.md`。
