@@ -2,6 +2,7 @@ package com.reconbridge.tracer
 
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
+import org.json.JSONObject
 
 /**
  * 监听 Android 动态 ClassLoader。
