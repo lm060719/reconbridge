@@ -9,7 +9,9 @@ import re
 from typing import Any
 
 _LINE_PREFIX_RE = re.compile(r"^\s*\d+\s*\|\s?")
-_CALL_RE = re.compile(r"(?:(?:[A-Za-z_$][\w$]*\.)*)([A-Za-z_$][\w$]*)\s*\(")
+_CALL_SITE_RE = re.compile(
+    r"((?:[A-Za-z_$][\w$]*\.)*[A-Za-z_$][\w$]*)\s*\("
+)
 _IDENT_RE = re.compile(r"\b[A-Za-z_$][A-Za-z0-9_$]*\b")
 _KEYWORDS = {
     "if", "else", "switch", "case", "default", "return", "throw", "new",
@@ -39,14 +41,28 @@ def _simple_method(label: str | None) -> str:
     return str(label).rsplit(".", 1)[-1]
 
 
-def _calls(text: str) -> list[str]:
-    out: list[str] = []
-    for match in _CALL_RE.finditer(text or ""):
-        name = match.group(1)
-        if name in _KEYWORDS or name in out:
+def _call_sites(text: str) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for match in _CALL_SITE_RE.finditer(text or ""):
+        expression = match.group(1)
+        name = expression.rsplit(".", 1)[-1]
+        if name in _KEYWORDS or expression in seen:
             continue
-        out.append(name)
+        seen.add(expression)
+        receiver = expression.rsplit(".", 1)[0] if "." in expression else ""
+        out.append(
+            {
+                "expression": expression,
+                "receiver": receiver,
+                "method": name,
+            }
+        )
     return out
+
+
+def _calls(text: str) -> list[str]:
+    return [item["method"] for item in _call_sites(text)]
 
 
 def _identifiers(text: str) -> list[str]:
@@ -161,6 +177,7 @@ def _extract_if_candidates(
                 "condition": condition,
                 "identifiers": _identifiers(condition),
                 "condition_calls": _calls(condition),
+                "condition_call_sites": _call_sites(condition),
                 "true_calls": _calls(true_body),
                 "false_calls": _calls(false_body),
                 "true_preview": " ".join(true_body.strip().split())[:600],
@@ -208,6 +225,7 @@ def _extract_switch_candidates(
                 "condition": expr,
                 "identifiers": _identifiers(expr),
                 "condition_calls": _calls(expr),
+                "condition_call_sites": _call_sites(expr),
                 "branches": branches,
             }
         )
@@ -284,6 +302,7 @@ def _extract_ternary_candidates(
                 "condition": condition,
                 "identifiers": _identifiers(condition),
                 "condition_calls": _calls(condition),
+                "condition_call_sites": _call_sites(condition),
                 "true_calls": _calls(match.group("yes")),
                 "false_calls": _calls(match.group("no")),
                 "true_preview": match.group("yes").strip()[:500],
@@ -462,26 +481,52 @@ def build_probe_plan(
             if len(out) >= max_items:
                 return out
 
-        for called in condition.get("condition_calls") or []:
-            key = ("method", called)
+        call_sites = condition.get("condition_call_sites") or [
+            {"expression": called, "receiver": "", "method": called}
+            for called in condition.get("condition_calls") or []
+        ]
+        for site in call_sites:
+            called = str(site.get("method", ""))
+            receiver = str(site.get("receiver", ""))
+            if not called:
+                continue
+            key = ("method", str(site.get("expression", called)))
             if key in seen:
                 continue
             seen.add(key)
-            out.append(
-                {
-                    "kind": "condition_method",
-                    "condition_rank": condition.get("rank"),
-                    "condition_line": condition.get("line"),
-                    "condition": condition.get("condition", ""),
-                    "class": class_name,
-                    "method": called,
-                    "tool": "trace_target",
-                    "suggested_args": {
-                        "class_name": class_name,
+
+            same_class = receiver in {"", "this", "super"}
+            if same_class:
+                out.append(
+                    {
+                        "kind": "condition_method",
+                        "condition_rank": condition.get("rank"),
+                        "condition_line": condition.get("line"),
+                        "condition": condition.get("condition", ""),
+                        "expression": site.get("expression", called),
+                        "class": class_name,
                         "method": called,
-                    },
-                }
-            )
+                        "tool": "trace_target",
+                        "suggested_args": {
+                            "class_name": class_name,
+                            "method": called,
+                        },
+                    }
+                )
+            else:
+                out.append(
+                    {
+                        "kind": "condition_call_expression",
+                        "condition_rank": condition.get("rank"),
+                        "condition_line": condition.get("line"),
+                        "condition": condition.get("condition", ""),
+                        "expression": site.get("expression", called),
+                        "receiver": receiver,
+                        "method": called,
+                        "tool": None,
+                        "note": "接收者不是 this/super，需先解析接收者实际类型后再 Hook",
+                    }
+                )
             if len(out) >= max_items:
                 return out
     return out
