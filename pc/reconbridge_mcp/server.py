@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import candidate, external, investigation, pipeline
+from . import candidate, external, investigation, pipeline, runtime_path
 
 mcp = FastMCP("reconbridge")
 
@@ -286,6 +286,158 @@ def _verify_ranked_candidates(
         "event_count": len(events),
         "events": events[:100],
         "event_cursor": latest,
+        "cleanup": cleanup,
+        "error": collect_error or None,
+    }
+
+
+def _verify_static_call_path(
+    session_id: str,
+    state: dict[str, Any],
+    path: dict[str, Any],
+    seconds: float = 15.0,
+    max_events: int = 400,
+    max_hooks: int = 12,
+    restart: bool = True,
+    hot: bool = False,
+    stack: bool = False,
+    cleanup: bool = True,
+) -> dict:
+    """一次性观测代表路径上的方法入口，并还原真实执行时间线。"""
+    methods = runtime_path.path_methods(path, max_hooks=max_hooks)
+    if not methods:
+        return {
+            "ok": False,
+            "error": "代表路径里没有可动态验证的 Java 方法",
+            "analysis": {},
+            "events": [],
+        }
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    targets: list[dict[str, Any]] = []
+    hook_ids: list[str] = []
+    hook_map: dict[str, dict[str, Any]] = {}
+
+    for index, item in enumerate(methods, 1):
+        safe_class = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            item["class"].rsplit(".", 1)[-1],
+        )[:18] or "class"
+        safe_method = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            item["method"],
+        )[:22] or "method"
+        hook_id = f"rbp_{session_id}_{index}_{safe_class}_{safe_method}"
+        hook_ids.append(hook_id)
+        hook_map[hook_id] = item
+        investigation.add_temporary_hook(session_id, hook_id)
+
+        # 路径顺序必须看方法入口；after 会让嵌套调用天然逆序。
+        targets.append(
+            {
+                "kind": "java",
+                "id": hook_id,
+                "class": item["class"],
+                "method": item["method"],
+                "capture": {
+                    "this": "class",
+                    "when": "before",
+                    "all_args": False,
+                    "stack": stack,
+                },
+            }
+        )
+
+    config: dict[str, Any] = {
+        "package": state["package"],
+        "restart": bool(restart and not hot),
+        "debug": False,
+        "targets": targets,
+    }
+    if hot:
+        config["restart"] = False
+        config["mode"] = "append"
+
+    posted: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    collect_error = ""
+
+    try:
+        posted = client.post_json("/hook", config)
+        events = client.collect_sse(
+            seconds=max(0.5, float(seconds)),
+            max_events=max(1, min(int(max_events), 2000)),
+            fold_stack=True,
+            include_recent=True,
+            since_seq=cursor,
+        )
+    except Exception as exc:
+        collect_error = str(exc)
+    finally:
+        if cleanup:
+            for hook_id in hook_ids:
+                try:
+                    unhook(state["package"], hook_id)
+                except Exception:
+                    pass
+                finally:
+                    investigation.remove_temporary_hook(session_id, hook_id)
+
+    try:
+        latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    analysis = runtime_path.analyze_path(path, events, hook_map)
+
+    # 每个路径节点的事件继续进入通用 Evidence Graph。
+    for hook_id, meta in hook_map.items():
+        matched = [
+            event
+            for event in events
+            if (
+                str(event.get("hook_id", "")) == hook_id
+                or (
+                    candidate.normalize_class_name(str(event.get("class", ""))) == meta["class"]
+                    and str(event.get("method", "")) == meta["method"]
+                )
+            )
+        ]
+        if matched:
+            investigation.record_trace_evidence(
+                session_id,
+                meta["class"],
+                meta["method"],
+                matched,
+            )
+
+    investigation.record_runtime_path_evidence(session_id, path, analysis)
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "runtime_call_path",
+            "path": path.get("text", ""),
+            "events": analysis.get("event_count", 0),
+            "node_coverage": analysis.get("node_coverage", 0),
+            "edge_coverage": analysis.get("edge_coverage", 0),
+            "full_path_observed": analysis.get("full_path_observed", False),
+        },
+    )
+
+    return {
+        "ok": not bool(collect_error),
+        "posted": posted,
+        "analysis": analysis,
+        "events": events[:200],
+        "event_cursor": latest,
+        "hooked_methods": methods,
         "cleanup": cleanup,
         "error": collect_error or None,
     }
