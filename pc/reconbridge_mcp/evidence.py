@@ -799,6 +799,52 @@ def record_runtime_lineage(
             )
 
 
+def record_root_cause_ranking(
+    graph: dict[str, Any],
+    ranking: dict[str, Any],
+) -> None:
+    """把根因排序结果回写到对应方法/来源节点。"""
+    if not ranking.get("ok"):
+        return
+
+    for candidate in (ranking.get("candidates") or [])[:20]:
+        candidate_type = str(candidate.get("candidate_type", ""))
+        attrs = {
+            "root_cause_rank": int(candidate.get("rank", 0) or 0),
+            "root_cause_score": int(candidate.get("score", 0) or 0),
+            "root_cause_raw_score": int(candidate.get("raw_score", 0) or 0),
+            "root_cause_evidence_level": str(
+                candidate.get("evidence_level", "")
+            ),
+            "root_cause_reasons": [
+                str(item.get("reason", ""))
+                for item in (candidate.get("score_breakdown") or [])[:10]
+                if item.get("reason")
+            ],
+            "root_cause_next_action": str(
+                candidate.get("next_action", "")
+            )[:1000],
+        }
+
+        if candidate_type == "method":
+            method_node(
+                graph,
+                str(candidate.get("class", "")),
+                str(candidate.get("method", "")),
+                str(candidate.get("descriptor", "")),
+                **attrs,
+            )
+        elif candidate_type == "origin":
+            origin_node(
+                graph,
+                str(candidate.get("kind", "unknown")),
+                str(candidate.get("label", "来源")),
+                confidence=float(candidate.get("confidence", 0) or 0),
+                expression=str(candidate.get("expression", ""))[:1000],
+                **attrs,
+            )
+
+
 def summary(graph: dict[str, Any]) -> dict[str, Any]:
     _ensure(graph)
     type_counts: dict[str, int] = {}
