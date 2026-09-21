@@ -1382,8 +1382,8 @@ def analyze_scenario_divergence(
 
     if top:
         next_action = (
-            "优先按 probe_plan 观测排名第一条件涉及的字段/条件方法；"
-            "若 A/B 值确实不同，即可把分叉从方法级收敛到具体状态变量"
+            "分别调用 capture_divergence_probe 采集场景 A/B 的同一探针；"
+            "第二侧采完会自动比较，也可用 compare_divergence_probes 重算"
         )
     else:
         next_action = (
