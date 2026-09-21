@@ -65,7 +65,7 @@ description: >-
 ## 原子工具（高级/兜底用途，签名详见各工具描述）
 - **设备原子能力（7）**：`device_status` `list_packages` `pull_apk` `pull_libs` `read_remote_file` `proc_info` `remote_shell`（白名单）
 - **静态反编译（5）**：`decompile_apk`(jadx) `dexkit_search`(androguard 后端) `ghidra_analyze` `hermes_decompile`(RN Hermes) `toolchain_status`
-- **动态 hook / 事件 / Runtime 状态（M3/M5/M4）**：`post_hook` `list_hooks`（磁盘期望配置） `runtime_hook_status`（运行中 M5：installed/pending/loader/watcher + Runtime State + Event Bus + Context/Lifecycle） `unhook`（M5 live remove，pending/事件订阅/hook-scope state 同步清理） `collect_events` `recent_events`（环形缓冲事后补捞） `dump_dex`(脱壳) `list_dumps`
+- **动态 hook / 事件 / Runtime 状态（M3/M5/M4）**：`post_hook` `list_hooks`（磁盘期望配置） `runtime_hook_status`（运行中 M5：installed/pending/loader/watcher + Runtime State + Event Bus + Context/Lifecycle） `runtime_state_get/set/remove/increment/append/clear` `runtime_event_emit` `runtime_context_status` `runtime_activity_action` `runtime_program_install/replace/enable/disable/rollback/status` `unhook`（只管理手工 Hook；Program 用 Program API） `collect_events` `recent_events`（环形缓冲事后补捞） `dump_dex`(脱壳) `list_dumps`
 - **Java trace / 篡改（LSPosed，M5）**：`trace_java`（读 this/参数/返回值/字段/栈；支持 `capture.paths` 挖嵌套字段 + `render:"deep"` 对象图） `patch_java` / `post_hook`（Action Pipeline 支持 State/Event；模板/条件还可直接读 `application/context/activity/lifecycle.*`；`kind:"runtime"` 可用 `on_event` 或 `on_lifecycle` 做事件/Activity 生命周期触发）
 - **场景 / 产出物**：`capture_scenario` `diff_scenarios` `list_scenarios` `list_artifacts` `list_dumps`
 
@@ -75,7 +75,7 @@ description: >-
 默认：`open_target` → `investigate(goal=...)` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage → verify_value_lineage A/B → compare_value_lineage_runtime → rank_root_causes → verify_root_cause_hypothesis A/B → compare_root_cause_hypothesis`。字段条件可先用 `verify_condition_writer` 确认真实 writer。根因假设实验会反向加权/降权排名：入口一致而输出不同才支持内部产生；入口已不同则把方向推回上游。DEX v3 持久化字段 read/write xref；Lineage 对同名 callee 保守处理。对象接收者先解析实际类型；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
-Phase 5 远程 Runtime 控制优先使用 `runtime_state_get/runtime_state_set/runtime_state_clear/runtime_event_emit/runtime_context_status/runtime_activity_action`，不要为了读写 State、主动发 Event 或操作当前 Activity 临时造 Java Hook。多进程 App 若只想操作一个进程，显式传 `process`；不传会对所有在线 Runtime Command-capable 进程分别执行。远程命令不支持 thread scope，因为 socket 命令线程不能代表业务 Hook 的 ThreadLocal。
+Phase 5 远程 Runtime 控制优先使用 `runtime_state_get/set/remove/increment/append/clear`、`runtime_event_emit`、`runtime_context_status`、`runtime_activity_action`，不要为了读写 State、主动发 Event 或操作当前 Activity 临时造 Java Hook。验证通过、需要长期保存的一组 Hook/State/Event/Lifecycle 逻辑，优先固化成 Phase 6 Runtime Program，而不是继续堆裸 post_hook。多进程 App 若只想操作一个进程，显式传 `process`；不传会对所有在线 Runtime Command-capable 进程分别执行。远程命令不支持 thread scope，因为 socket 命令线程不能代表业务 Hook 的 ThreadLocal。
 
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 通过 HookRegistry live unhook 自动清理。持续 patch 若存在跨 Hook 状态，优先用 Runtime State + Event Bus；若逻辑依赖“进入某 Activity / Application 已就绪 / 当前 Context”，优先用 `kind:"runtime"/on_lifecycle`，Action 里直接访问 `application/context/activity/lifecycle.*`，不要再额外 Hook 每个 Activity 子类的 onResume。用 `runtime_hook_status(package)` 核对 installed/pending、state/event、`context_runtime` 和 `lifecycle_runtime`。
 
