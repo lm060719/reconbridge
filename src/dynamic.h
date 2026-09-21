@@ -11,7 +11,7 @@ namespace dynamic {
 void init(const std::string& base_dir);
 
 // 在每次新建 httplib::Server 时调用，注册 /hook /unhook /hooks /runtime_status
-// /runtime_command /events(SSE) 等动态路由。
+// /runtime_command /runtime_program/* /runtime_programs /events(SSE) 等动态路由。
 void register_routes(httplib::Server& svr);
 
 // HTTP 服务开始监听时调用：在 http_port+1 起一个极简 WS 服务（/events）。
