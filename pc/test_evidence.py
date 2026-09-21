@@ -451,6 +451,71 @@ def test_runtime_value_lineage_records_sequence_and_field_change():
     )
 
 
+def test_root_cause_ranking_annotations_are_written_to_evidence_nodes():
+    graph = evidence.new_graph()
+    ranking = {
+        "ok": True,
+        "candidates": [
+            {
+                "rank": 1,
+                "candidate_type": "method",
+                "class": "com.example.Repo",
+                "method": "isVipEnabled",
+                "descriptor": "()Z",
+                "label": "com.example.Repo.isVipEnabled()Z",
+                "score": 88,
+                "raw_score": 88,
+                "evidence_level": "runtime_divergence",
+                "score_breakdown": [
+                    {
+                        "key": "first_stable_runtime_difference",
+                        "points": 45,
+                        "reason": "这是最早稳定值差异",
+                    }
+                ],
+                "next_action": "检查参数",
+            },
+            {
+                "rank": 2,
+                "candidate_type": "origin",
+                "kind": "preferences",
+                "label": "来自偏好存储",
+                "confidence": 0.95,
+                "expression": 'preferences.getBoolean("vip", false)',
+                "score": 29,
+                "raw_score": 29,
+                "evidence_level": "static_source",
+                "score_breakdown": [
+                    {
+                        "key": "static_origin_confidence",
+                        "points": 24,
+                        "reason": "静态来源分类置信度 0.95",
+                    }
+                ],
+                "next_action": "搜索 preference key",
+            },
+        ],
+    }
+
+    evidence.record_root_cause_ranking(graph, ranking)
+
+    method = next(
+        node for node in graph["nodes"].values()
+        if node.get("type") == "method"
+    )
+    assert method["root_cause_rank"] == 1
+    assert method["root_cause_score"] == 88
+    assert method["root_cause_evidence_level"] == "runtime_divergence"
+    assert "最早稳定值差异" in method["root_cause_reasons"][0]
+
+    origin = next(
+        node for node in graph["nodes"].values()
+        if node.get("type") == "state_origin"
+    )
+    assert origin["root_cause_rank"] == 2
+    assert origin["root_cause_score"] == 29
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
