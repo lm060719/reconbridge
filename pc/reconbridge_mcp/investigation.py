@@ -1015,6 +1015,17 @@ def record_value_lineage_evidence(
     save(state)
 
 
+def record_runtime_lineage_evidence(
+    session_id: str,
+    path: dict[str, Any],
+    analysis: dict[str, Any],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_runtime_lineage(graph, path, analysis)
+    save(state)
+
+
 def call_graph_context(
     session_id: str,
     class_name: str,
@@ -1139,6 +1150,50 @@ def load_condition_probe(
     return dict(probe) if isinstance(probe, dict) else None
 
 
+def save_runtime_lineage_capture(
+    session_id: str,
+    scenario_name: str,
+    lineage_key: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """把压缩后的 Runtime Value Lineage 结果写回对应场景文件。"""
+    load(session_id)
+    path = _call_scenario_path(session_id, scenario_name)
+    if not path.exists():
+        raise FileNotFoundError(f"call graph scenario not found: {scenario_name}")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    captures = data.setdefault("runtime_lineage_captures", {})
+    captures[lineage_key] = {
+        **payload,
+        "saved_at": _now_ms(),
+    }
+    data["runtime_lineage_updated_at"] = _now_ms()
+
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return {
+        "scenario": scenario_name,
+        "lineage_key": lineage_key,
+        "path": str(path),
+        "capture_count": len(captures),
+    }
+
+
+def load_runtime_lineage_capture(
+    session_id: str,
+    scenario_name: str,
+    lineage_key: str,
+) -> dict[str, Any] | None:
+    data = load_call_scenario(session_id, scenario_name)
+    capture = (data.get("runtime_lineage_captures") or {}).get(lineage_key)
+    return dict(capture) if isinstance(capture, dict) else None
+
+
 def load_call_scenario(session_id: str, name: str) -> dict[str, Any]:
     load(session_id)
     path = _call_scenario_path(session_id, name)
@@ -1168,6 +1223,9 @@ def list_call_scenarios(session_id: str) -> list[dict[str, Any]]:
                 "observed_nodes": int((data.get("analysis") or {}).get("observed_nodes", 0) or 0),
                 "primary_tid": (data.get("analysis") or {}).get("primary_tid"),
                 "condition_probe_count": len(data.get("condition_probes") or {}),
+                "runtime_lineage_capture_count": len(
+                    data.get("runtime_lineage_captures") or {}
+                ),
                 "path": str(path),
             }
         )
