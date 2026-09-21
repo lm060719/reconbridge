@@ -569,3 +569,32 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 确认真实链路。若比较两个行为，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage → verify_value_lineage A/B → compare_value_lineage_runtime → rank_root_causes → verify_root_cause_hypothesis A/B → compare_root_cause_hypothesis`。字段条件可先用 `verify_condition_writer` 确认真正 writer；最终优先看验证后的 Top 1～3，而不是只看“最早观察到差异”的节点。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
+
+
+### Runtime Program 签名包（Phase 7）
+
+需要分享/迁移 Program 时，不要直接复制 daemon 内部 JSON；使用 PC MCP：
+
+```text
+runtime_program_export(
+    "com.example.app",
+    "vip_debug",
+    allowed_packages=["com.example.app"]
+)
+# → .rbprog.json + payload_sha256 + Ed25519 signer key_id
+
+runtime_program_verify_package(
+    "vip_debug-r3.rbprog.json",
+    target_package="com.example.app"
+)
+
+runtime_program_signer_status()
+runtime_program_trust_signer("<对方 public_key_b64>", label="team-a")
+
+runtime_program_import(
+    "com.example.app",
+    "vip_debug-r3.rbprog.json"
+)
+```
+
+默认 import 只接受 trusted signer。签名有效但 signer 未信任时先核对 key_id / public key，再显式 trust；不要用 `allow_untrusted=true` 代替正常信任流程。签名覆盖 allowed_packages、permissions 和完整 manifest。daemon 在安装时还会独立扫描 permissions；少声明 `eval_dex / shell.root / java.field_write / hook.tamper` 等能力会直接拒绝。
