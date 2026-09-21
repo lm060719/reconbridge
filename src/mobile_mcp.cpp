@@ -761,6 +761,9 @@ static json invoke_tool(const std::string& name, const json& a) {
     if (
         name == "runtime_state_get" ||
         name == "runtime_state_set" ||
+        name == "runtime_state_remove" ||
+        name == "runtime_state_increment" ||
+        name == "runtime_state_append" ||
         name == "runtime_state_clear" ||
         name == "runtime_event_emit" ||
         name == "runtime_context_status" ||
@@ -777,6 +780,29 @@ static json invoke_tool(const std::string& name, const json& a) {
         } else if (name == "runtime_state_set") {
             command = {
                 {"op", "state_set"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")},
+                {"value", a.contains("value") ? a["value"] : json(nullptr)}
+            };
+        } else if (name == "runtime_state_remove") {
+            command = {
+                {"op", "state_remove"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_state_increment") {
+            command = {
+                {"op", "state_increment"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"delta", a.value("delta", 1.0)},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_state_append") {
+            command = {
+                {"op", "state_append"},
                 {"scope", a.value("scope", "process")},
                 {"key", a.value("key", "")},
                 {"hook_id", a.value("hook_id", "")},
