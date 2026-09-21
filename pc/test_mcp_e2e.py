@@ -27,7 +27,7 @@ def test_mcp_import_and_registration():
         "device_status", "list_packages", "pull_apk", "pull_libs",
         "read_remote_file", "proc_info", "remote_shell", "decompile_apk",
         "dexkit_search", "ghidra_analyze", "hermes_decompile", "post_hook",
-        "list_hooks", "unhook", "collect_events", "capture_scenario",
+        "list_hooks", "runtime_hook_status", "unhook", "collect_events", "capture_scenario",
         "list_scenarios", "diff_scenarios", "recent_events", "trace_java",
         "patch_java", "dump_dex", "list_dumps", "list_artifacts",
         "toolchain_status", "open_target", "investigation_status", "prepare_index",
@@ -98,10 +98,11 @@ async def test_mcp_stdio_e2e():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) >= 54
+            assert len(tools) >= 55
             names = {t.name for t in tools}
             assert "device_status" in names
             assert "toolchain_status" in names
+            assert "runtime_hook_status" in names
             assert "open_target" in names
             assert "search_target" in names
             assert "prepare_index" in names
