@@ -2915,7 +2915,8 @@ def rank_root_causes(
         )
     elif top.get("is_first_runtime_difference"):
         next_action = (
-            "排名第一节点就是 A/B 最早稳定值差异；优先检查它的入参、对象字段和返回构造逻辑"
+            "排名第一节点就是 A/B 最早稳定值差异；下一步分别调用 "
+            "verify_root_cause_hypothesis 采集 A/B，验证差异是在方法内部产生还是入口已不同"
         )
     elif top.get("is_writer") and top.get("writer_changed"):
         next_action = (
