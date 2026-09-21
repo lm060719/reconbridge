@@ -69,17 +69,73 @@ class HookEntry : IXposedHookLoadPackage {
             packageName = pkg,
             processName = lpparam.processName,
             pid = Process.myPid(),
-        ) { target ->
-            installJavaHook(lpparam, io, target)
+            initialClassLoader = lpparam.classLoader,
+        ) { target, loader ->
+            installJavaHook(
+                lpparam = lpparam,
+                io = io,
+                t = target,
+                classLoader = loader,
+            )
         }
+
+        lateinit var watcher: ClassLoaderWatcher
+
+        fun publishRuntimeStatus()
+        {
+            val status = registry.snapshotJson()
+            status.put(
+                "class_loader_watch",
+                watcher.snapshotJson(),
+            )
+            io.sendRuntimeStatus(status.toString())
+        }
+
+        fun afterDynamicResolution(
+            stage: String,
+            result: HookSyncResult,
+        )
+        {
+            logSyncResult(pkg, stage, result)
+            watcher.setPendingEnabled(registry.hasPending())
+            publishRuntimeStatus()
+        }
+
+        watcher = ClassLoaderWatcher(
+            shouldResolveClass = { className ->
+                registry.pendingClassNames().contains(className)
+            },
+            onLoaderAvailable = { loader, source ->
+                val sync = registry.onLoaderAvailable(
+                    loader,
+                    source,
+                )
+                afterDynamicResolution(
+                    "发现动态 ClassLoader",
+                    sync,
+                )
+            },
+            onClassLoaded = { loader, className ->
+                val sync = registry.onClassLoaded(
+                    loader,
+                    className,
+                )
+                afterDynamicResolution(
+                    "pending 类已加载",
+                    sync,
+                )
+            },
+        )
+        watcher.start()
 
         val initialTargets = cfg.optJSONArray("targets") ?: JSONArray()
         val initial = registry.reconcile(initialTargets)
         logSyncResult(pkg, "初始同步", initial)
-        io.sendRuntimeStatus(registry.snapshotJson().toString())
+        watcher.setPendingEnabled(registry.hasPending())
+        publishRuntimeStatus()
 
-        // daemon 下发的是“完整期望配置”。每次 reload 都做 reconcile，
-        // 因而同一条通道同时具备 live add / remove / replace，而不再只是增量追加。
+        // daemon 下发的是“完整期望配置”。每次 reload 都做 reconcile；
+        // 找不到类的 target 会进入 pending，并由 ClassLoaderWatcher 后续自动补装。
         io.enableHotReload { newCfgText ->
             try {
                 val newCfg = JSONObject(newCfgText)
@@ -87,7 +143,8 @@ class HookEntry : IXposedHookLoadPackage {
                 val newTargets = newCfg.optJSONArray("targets") ?: JSONArray()
                 val sync = registry.reconcile(newTargets)
                 logSyncResult(pkg, "实时同步", sync)
-                io.sendRuntimeStatus(registry.snapshotJson().toString())
+                watcher.setPendingEnabled(registry.hasPending())
+                publishRuntimeStatus()
             } catch (t: Throwable) {
                 log("[$pkg] 实时配置同步失败: $t")
             }
@@ -123,6 +180,7 @@ class HookEntry : IXposedHookLoadPackage {
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
         t: JSONObject,
+        classLoader: ClassLoader,
     ): HookInstallResult {
         val usingStrings = mutableListOf<String>()
         val usingArr = t.optJSONArray("using_strings")
@@ -157,7 +215,12 @@ class HookEntry : IXposedHookLoadPackage {
                     if (!t.has("params")) {
                         subT.put("params", JSONArray(m.paramTypes))
                     }
-                    val installed = installExplicitJavaHook(lpparam, io, subT)
+                    val installed = installExplicitJavaHook(
+                        lpparam,
+                        io,
+                        subT,
+                        classLoader,
+                    )
                     handles.addAll(installed.handles)
                     members.addAll(installed.members)
                 } catch (th: Throwable) {
@@ -167,15 +230,20 @@ class HookEntry : IXposedHookLoadPackage {
             return HookInstallResult(handles, members)
         }
 
-        return installExplicitJavaHook(lpparam, io, t)
+        return installExplicitJavaHook(
+            lpparam,
+            io,
+            t,
+            classLoader,
+        )
     }
 
     private fun installExplicitJavaHook(
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
         t: JSONObject,
+        cl: ClassLoader,
     ): HookInstallResult {
-        val cl = lpparam.classLoader
         val className = t.optString("class")
         if (className.isEmpty()) {
             return HookInstallResult(emptyList(), emptyList())
