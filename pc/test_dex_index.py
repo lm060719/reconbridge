@@ -90,6 +90,7 @@ def test_dex_index_supports_all_search_modes(tmp_path, monkeypatch):
         {"find": "method", "using_strings": ["会员"]},
     )
     assert xref_result["results"][0]["method"] == "openPaywall"
+    assert xref_result["results"][0]["matched_string"] == "会员已过期"
     assert xref_result["backend"] == "sqlite-index"
 
 
