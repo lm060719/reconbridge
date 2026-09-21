@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, root_cause, runtime_lineage, runtime_path, scenario_path, writer_probe
+from . import branch_condition, candidate, condition_probe, external, hypothesis_verify, investigation, pipeline, root_cause, runtime_lineage, runtime_path, scenario_path, writer_probe
 
 mcp = FastMCP("reconbridge")
 
@@ -2800,6 +2800,7 @@ def rank_root_causes(
     max_depth: int = 4,
     max_nodes: int = 60,
     limit: int = 5,
+    include_hypothesis: bool = True,
 ) -> dict:
     """综合静态来源、Runtime Lineage 与 writer 变化，对根因节点做可解释排序。
 
@@ -2860,9 +2861,15 @@ def rank_root_causes(
         if comparison.get("comparable"):
             runtime_comparison = comparison
 
+    hypothesis_results = (
+        investigation.root_cause_hypothesis_results(session_id)
+        if include_hypothesis
+        else {}
+    )
     ranking = root_cause.rank_root_causes(
         lineage,
         runtime_comparison=runtime_comparison,
+        hypothesis_results=hypothesis_results,
         selected_path_index=path_index,
         limit=max(1, min(int(limit), 20)),
     )
@@ -2931,7 +2938,583 @@ def rank_root_causes(
         "runtime_available": bool(runtime_comparison),
         "missing_runtime": missing_runtime,
         "runtime_comparison": runtime_comparison,
+        "hypothesis_results_applied": len(hypothesis_results),
         "next_action": next_action,
+    }
+
+
+def _capture_root_cause_hypothesis(
+    session_id: str,
+    state: dict[str, Any],
+    scenario_name: str,
+    plan: dict[str, Any],
+    seconds: float = 15.0,
+    quiet_ms: int = 1200,
+    max_events: int = 200,
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+) -> dict[str, Any]:
+    class_name = str(plan.get("class", ""))
+    method_name = str(plan.get("method", ""))
+    if not class_name or not method_name:
+        return {"ok": False, "error": "假设实验缺少 class/method"}
+
+    fingerprint = str(plan.get("hypothesis_fingerprint", ""))
+    safe_scenario = re.sub(
+        r"[^A-Za-z0-9_]",
+        "_",
+        scenario_name,
+    )[:16] or "scenario"
+    safe_method = re.sub(
+        r"[^A-Za-z0-9_]",
+        "_",
+        method_name,
+    )[:20] or "method"
+    hook_id = (
+        f"rbhyp_{session_id}_{fingerprint[:8]}_"
+        f"{safe_scenario}_{safe_method}"
+    )
+
+    capture: dict[str, Any] = {
+        "this": "class",
+        "when": "both",
+        "stack": False,
+    }
+
+    arg_specs = []
+    for item in plan.get("capture_args") or []:
+        arg_specs.append(
+            {
+                "index": int(item.get("index", 0)),
+                "render": str(item.get("render", "tostring")),
+                "max": int(item.get("max", 3000) or 3000),
+            }
+        )
+    if arg_specs:
+        capture["args"] = arg_specs
+    elif not bool(
+        (plan.get("input_coverage") or {}).get("descriptor_parsed")
+    ):
+        capture["all_args"] = True
+    else:
+        capture["all_args"] = False
+
+    fields = []
+    for item in plan.get("capture_fields") or []:
+        fields.append(
+            {
+                "target": "this",
+                "name": str(item.get("name", "")),
+                "render": str(item.get("render", "tostring")),
+                "max": int(item.get("max", 2500) or 2500),
+            }
+        )
+    if fields:
+        capture["fields"] = fields
+
+    if plan.get("capture_return"):
+        capture["ret"] = {
+            "capture": True,
+            "render": str(plan.get("return_render", "tostring")),
+            "max": 5000,
+        }
+
+    target: dict[str, Any] = {
+        "kind": "java",
+        "id": hook_id,
+        "class": class_name,
+        "method": method_name,
+        "capture": capture,
+    }
+    params = plan.get("params")
+    if isinstance(params, list):
+        target["params"] = params
+
+    config: dict[str, Any] = {
+        "package": state["package"],
+        "restart": bool(restart and not hot),
+        "debug": False,
+        "targets": [target],
+    }
+    if hot:
+        config["restart"] = False
+        config["mode"] = "append"
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    investigation.add_temporary_hook(session_id, hook_id)
+    posted: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    collect_error = ""
+    try:
+        posted = client.post_json("/hook", config)
+        events = client.collect_sse(
+            seconds=max(0.5, float(seconds)),
+            max_events=max(2, min(int(max_events), 800)),
+            fold_stack=True,
+            include_recent=True,
+            since_seq=cursor,
+            quiet_ms=max(0, int(quiet_ms)),
+        )
+    except Exception as exc:
+        collect_error = str(exc)
+    finally:
+        if cleanup:
+            try:
+                unhook(state["package"], hook_id)
+            except Exception:
+                pass
+            finally:
+                investigation.remove_temporary_hook(
+                    session_id,
+                    hook_id,
+                )
+
+    try:
+        latest = int(
+            client.get_recent(limit=0).get("latest_seq", cursor)
+            or cursor
+        )
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    matched = [
+        event
+        for event in events
+        if (
+            str(event.get("hook_id", "")) == hook_id
+            or (
+                candidate.normalize_class_name(
+                    str(event.get("class", ""))
+                ) == class_name
+                and str(event.get("method", "")) == method_name
+            )
+        )
+    ]
+    analysis = hypothesis_verify.analyze_capture(
+        matched,
+        plan,
+    )
+    if matched:
+        investigation.record_trace_evidence(
+            session_id,
+            class_name,
+            method_name,
+            matched,
+        )
+
+    payload = {
+        "scenario": scenario_name,
+        "captured_at": int(time.time() * 1000),
+        "hypothesis_fingerprint": fingerprint,
+        "candidate_key": plan.get("candidate_key", ""),
+        "candidate": plan.get("candidate", {}),
+        "plan": {
+            "class": class_name,
+            "method": method_name,
+            "descriptor": plan.get("descriptor", ""),
+            "overload_precision": plan.get(
+                "overload_precision",
+                "",
+            ),
+            "capture_args": plan.get("capture_args", []),
+            "capture_fields": plan.get("capture_fields", []),
+            "capture_return": bool(plan.get("capture_return")),
+            "return_render": plan.get("return_render", ""),
+            "input_coverage": plan.get("input_coverage", {}),
+        },
+        "analysis": analysis,
+    }
+    saved = investigation.save_root_cause_hypothesis_capture(
+        session_id,
+        scenario_name,
+        fingerprint,
+        payload,
+    )
+
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "root_cause_hypothesis_capture",
+            "scenario": scenario_name,
+            "candidate_key": plan.get("candidate_key", ""),
+            "candidate": (
+                f"{class_name}.{method_name}"
+            ),
+            "before_count": analysis.get("before_count", 0),
+            "after_count": analysis.get("after_count", 0),
+            "primary_tid": analysis.get("primary_tid"),
+        },
+    )
+
+    return {
+        "ok": not bool(collect_error),
+        "scenario": scenario_name,
+        "hypothesis_fingerprint": fingerprint,
+        "candidate_key": plan.get("candidate_key", ""),
+        "plan": plan,
+        "analysis": analysis,
+        "saved": saved,
+        "posted": posted,
+        "event_count": len(matched),
+        "events": matched[:120],
+        "event_cursor": latest,
+        "cleanup": cleanup,
+        "error": collect_error or None,
+    }
+
+
+@mcp.tool()
+def verify_root_cause_hypothesis(
+    session_id: str,
+    a: str,
+    b: str,
+    capture_for: str,
+    candidate_rank: int = 1,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_rank: int = 1,
+    path_index: int = 0,
+    max_depth: int = 4,
+    max_nodes: int = 60,
+    max_args: int = 8,
+    max_fields: int = 6,
+    seconds: float = 15.0,
+    quiet_ms: int = 1200,
+    max_events: int = 200,
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+    include_events: bool = False,
+) -> dict:
+    """对一个方法根因候选执行最小 A/B 输入输出实验。
+
+    实验候选始终从不含旧假设加权的基线排名中选择，避免验证后排名变化导致
+    A/B 两次采集错接到不同候选。第二侧完成后会自动比较并返回验证后排名。
+    """
+    if capture_for not in {a, b}:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "error": "capture_for 必须等于场景 a 或 b",
+        }
+
+    candidate_rank = max(1, min(int(candidate_rank), 20))
+    baseline = rank_root_causes(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_rank=writer_rank,
+        path_index=path_index,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        limit=max(10, candidate_rank),
+        include_hypothesis=False,
+    )
+    if not baseline.get("ok"):
+        return baseline
+
+    selected = next(
+        (
+            item
+            for item in (baseline.get("candidates") or [])
+            if int(item.get("rank", 0) or 0) == candidate_rank
+        ),
+        None,
+    )
+    if selected is None:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": baseline.get("package"),
+            "error": f"找不到 candidate_rank={candidate_rank}",
+            "candidates": baseline.get("candidates", []),
+        }
+    if selected.get("candidate_type") != "method":
+        method_candidates = [
+            item
+            for item in (baseline.get("candidates") or [])
+            if item.get("candidate_type") == "method"
+        ]
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": baseline.get("package"),
+            "candidate": selected,
+            "error": "静态来源节点不能直接做方法输入输出实验",
+            "method_candidates": method_candidates[:5],
+            "next_action": (
+                "若当前 Top 是静态来源，先完成 verify_value_lineage A/B；"
+                "或选择 method_candidates 中的 candidate_rank"
+            ),
+        }
+
+    context = investigation.method_context(
+        session_id,
+        str(selected.get("class", "")),
+        str(selected.get("method", "")),
+        descriptor=str(selected.get("descriptor", "")),
+        relation_limit=80,
+        include_source=True,
+    )
+    plan = hypothesis_verify.plan_experiment(
+        selected,
+        context,
+        max_args=max_args,
+        max_fields=max_fields,
+    )
+    if not plan.get("ok"):
+        return {
+            **plan,
+            "session_id": session_id,
+            "package": baseline.get("package"),
+        }
+
+    state = investigation.load(session_id, refresh=True)
+    result = _capture_root_cause_hypothesis(
+        session_id,
+        state,
+        capture_for,
+        plan,
+        seconds=seconds,
+        quiet_ms=quiet_ms,
+        max_events=max_events,
+        restart=restart,
+        hot=hot,
+        cleanup=cleanup,
+    )
+    result.update(
+        {
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "capture_for": capture_for,
+            "candidate_rank": candidate_rank,
+            "baseline_candidate": selected,
+            "baseline_top_candidate": baseline.get(
+                "top_candidate"
+            ),
+        }
+    )
+
+    fingerprint = str(
+        result.get("hypothesis_fingerprint", "")
+    )
+    if result.get("ok") and fingerprint:
+        other_name = b if capture_for == a else a
+        other = investigation.load_root_cause_hypothesis_capture(
+            session_id,
+            other_name,
+            fingerprint,
+        )
+        current = investigation.load_root_cause_hypothesis_capture(
+            session_id,
+            capture_for,
+            fingerprint,
+        )
+        if other and current:
+            capture_a = current if capture_for == a else other
+            capture_b = current if capture_for == b else other
+            comparison = hypothesis_verify.compare_captures(
+                capture_a,
+                capture_b,
+            )
+            investigation.save_root_cause_hypothesis_result(
+                session_id,
+                str(selected.get("candidate_key", "")),
+                comparison,
+            )
+            investigation.record_root_cause_hypothesis_evidence(
+                session_id,
+                selected,
+                comparison,
+            )
+            result["comparison"] = comparison
+            result["updated_ranking"] = rank_root_causes(
+                session_id,
+                a,
+                b,
+                condition_rank=condition_rank,
+                probe_index=probe_index,
+                writer_rank=writer_rank,
+                path_index=path_index,
+                max_depth=max_depth,
+                max_nodes=max_nodes,
+                limit=10,
+                include_hypothesis=True,
+            )
+
+    if not include_events:
+        result.pop("events", None)
+    return result
+
+
+@mcp.tool()
+def compare_root_cause_hypothesis(
+    session_id: str,
+    a: str,
+    b: str,
+    candidate_rank: int = 1,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_rank: int = 1,
+    path_index: int = 0,
+    max_depth: int = 4,
+    max_nodes: int = 60,
+    max_args: int = 8,
+    max_fields: int = 6,
+) -> dict:
+    """重新比较已采集的根因假设实验，并返回验证前/后的根因排名变化。"""
+    candidate_rank = max(1, min(int(candidate_rank), 20))
+    baseline = rank_root_causes(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_rank=writer_rank,
+        path_index=path_index,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        limit=max(10, candidate_rank),
+        include_hypothesis=False,
+    )
+    if not baseline.get("ok"):
+        return baseline
+
+    selected = next(
+        (
+            item
+            for item in (baseline.get("candidates") or [])
+            if int(item.get("rank", 0) or 0) == candidate_rank
+        ),
+        None,
+    )
+    if selected is None or selected.get("candidate_type") != "method":
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": baseline.get("package"),
+            "candidate": selected,
+            "error": "所选 candidate_rank 不是可验证的方法候选",
+        }
+
+    context = investigation.method_context(
+        session_id,
+        str(selected.get("class", "")),
+        str(selected.get("method", "")),
+        descriptor=str(selected.get("descriptor", "")),
+        relation_limit=80,
+        include_source=True,
+    )
+    plan = hypothesis_verify.plan_experiment(
+        selected,
+        context,
+        max_args=max_args,
+        max_fields=max_fields,
+    )
+    fingerprint = str(
+        plan.get("hypothesis_fingerprint", "")
+    )
+    if not plan.get("ok") or not fingerprint:
+        return {
+            **plan,
+            "session_id": session_id,
+            "package": baseline.get("package"),
+        }
+
+    capture_a = investigation.load_root_cause_hypothesis_capture(
+        session_id,
+        a,
+        fingerprint,
+    )
+    capture_b = investigation.load_root_cause_hypothesis_capture(
+        session_id,
+        b,
+        fingerprint,
+    )
+    missing = [
+        name
+        for name, capture in ((a, capture_a), (b, capture_b))
+        if capture is None
+    ]
+    if missing:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": baseline.get("package"),
+            "candidate": selected,
+            "plan": plan,
+            "missing": missing,
+            "error": "尚未完成两侧同一 Root Cause 假设实验采集",
+            "next_action": (
+                "分别调用 verify_root_cause_hypothesis，capture_for="
+                + " / ".join(missing)
+            ),
+        }
+
+    comparison = hypothesis_verify.compare_captures(
+        capture_a,
+        capture_b,
+    )
+    investigation.save_root_cause_hypothesis_result(
+        session_id,
+        str(selected.get("candidate_key", "")),
+        comparison,
+    )
+    investigation.record_root_cause_hypothesis_evidence(
+        session_id,
+        selected,
+        comparison,
+    )
+    updated = rank_root_causes(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_rank=writer_rank,
+        path_index=path_index,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+        limit=10,
+        include_hypothesis=True,
+    )
+
+    new_candidate = next(
+        (
+            item
+            for item in (updated.get("candidates") or [])
+            if item.get("candidate_key")
+            == selected.get("candidate_key")
+        ),
+        None,
+    )
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "package": baseline.get("package"),
+        "a": a,
+        "b": b,
+        "candidate": selected,
+        "plan": plan,
+        "comparison": comparison,
+        "baseline_rank": selected.get("rank"),
+        "baseline_score": selected.get("score"),
+        "updated_candidate": new_candidate,
+        "updated_ranking": updated,
+        "next_action": (
+            (new_candidate or {}).get("next_action")
+            or comparison.get("explanation", "")
+        ),
     }
 
 
