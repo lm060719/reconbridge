@@ -70,6 +70,8 @@
 | `verify_value_lineage(session_id, a, b, capture_for, path_index=0, ...)` | 对一条 origin_path 的应用方法批量抓 after 返回值；字段 sink 的最后 writer 额外抓 before/after 字段值，返回真实顺序、覆盖率和值摘要 |
 | `compare_value_lineage_runtime(session_id, a, b, path_index=0, ...)` | 比较 A/B 同一路径的运行时返回值和 writer 字段变化，找最早稳定值差异 |
 | `rank_root_causes(session_id, a, b, path_index=0, limit=5, ...)` | 综合最早 A/B 值差异、双侧命中、完整链覆盖、writer 字段变化、既有 runtime hits、静态来源置信度和多路径支持度，输出 Top 根因节点、分项得分和下一步动作 |
+| `verify_root_cause_hypothesis(session_id, a, b, capture_for, candidate_rank=1, ...)` | 对指定方法根因做最小输入/输出实验：精确重载可用时锁定参数签名，只抓必要参数、源码引用字段和返回值；第二侧完成后自动比较并重排 |
+| `compare_root_cause_hypothesis(session_id, a, b, candidate_rank=1, ...)` | 重算已保存的 A/B 假设实验，判断内部产生/上游输入差异/未复现，并返回验证前后 rank/score 变化 |
 | `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
@@ -315,6 +317,36 @@ rank_root_causes(
 # → #3 Preferences 来源 score=32
 #      +24 静态来源置信度
 #      +5  所在路径已完整运行时覆盖
+
+verify_root_cause_hypothesis(
+    session_id, "非会员", "会员",
+    capture_for="非会员",
+    candidate_rank=1
+)
+# ↑ 触发一次非会员行为；只抓 Top 1 方法的必要输入/输出
+
+verify_root_cause_hypothesis(
+    session_id, "非会员", "会员",
+    capture_for="会员",
+    candidate_rank=1
+)
+# ↑ 第二侧完成后自动 comparison + updated_ranking
+#
+# 若：
+#   A/B args + 关键 fields 均相同，但 return 不同
+# → internal_generation_supported，当前候选 +30
+#
+# 若：
+#   args[0] 在进入方法前已经 false/true 不同
+# → upstream_input_difference，当前候选 -30，调查方向推回上游
+
+compare_root_cause_hypothesis(
+    session_id, "非会员", "会员",
+    candidate_rank=1
+)
+# → baseline_rank / baseline_score
+# → comparison.status / score_adjustment
+# → updated_candidate / updated_ranking
 ```
 两次采集会同时保存 `graph_fingerprint` 与 `hook_fingerprint`；任一不一致就拒绝给出“业务分叉”结论，避免第二次 Hook 少挂了方法导致假差异。场景事件经过压缩后独立保存在当前 Investigation 会话目录，不会持续膨胀主 session JSON。
 
@@ -359,6 +391,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 确认真实链路。若比较两个行为，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage → verify_value_lineage A/B → compare_value_lineage_runtime → rank_root_causes`；字段条件可先用 `verify_condition_writer` 确认真正 writer。最后优先看 Top 1～3 的 score_breakdown，不再手工扫整张 Lineage。DEX v3 会持久化字段读写 xref，旧索引自动重建。
+3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 确认真实链路。若比较两个行为，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage → verify_value_lineage A/B → compare_value_lineage_runtime → rank_root_causes → verify_root_cause_hypothesis A/B → compare_root_cause_hypothesis`。字段条件可先用 `verify_condition_writer` 确认真正 writer；最终优先看验证后的 Top 1～3，而不是只看“最早观察到差异”的节点。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
