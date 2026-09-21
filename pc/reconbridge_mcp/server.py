@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import branch_condition, candidate, condition_probe, external, hypothesis_verify, investigation, pipeline, root_cause, runtime_lineage, runtime_path, scenario_path, writer_probe
+from . import branch_condition, candidate, condition_probe, external, hypothesis_verify, investigation, pipeline, program_package, root_cause, runtime_lineage, runtime_path, scenario_path, writer_probe
 
 mcp = FastMCP("reconbridge")
 
@@ -4828,6 +4828,171 @@ def runtime_program_status(
     if program_id:
         params["id"] = program_id
     return client.get_json("/runtime_programs", params=params)
+
+
+@mcp.tool()
+def runtime_program_signer_status() -> dict:
+    """查看 PC 本地 Runtime Program signer 与已信任公钥；绝不返回私钥。"""
+    return program_package.signer_status()
+
+
+@mcp.tool()
+def runtime_program_trust_signer(
+    public_key_b64: str,
+    label: str = "",
+) -> dict:
+    """把一个 Ed25519 Runtime Program signer 公钥加入本机信任列表。"""
+    try:
+        signer = program_package.trust_signer(
+            public_key_b64,
+            label=label,
+        )
+        return {"ok": True, "signer": signer}
+    except (ValueError, OSError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@mcp.tool()
+def runtime_program_export(
+    package: str,
+    program_id: str,
+    signer: str = "default",
+    allowed_packages: Optional[list[str]] = None,
+    output_path: str = "",
+) -> dict:
+    """把设备上的 Runtime Program 导出为 Ed25519 签名 .rbprog.json 包。"""
+    _validate_package_name(package)
+    status = runtime_program_status(package, program_id)
+    programs = status.get("programs") or []
+    if not programs:
+        return {
+            "ok": False,
+            "error": "Runtime Program 不存在",
+            "package": package,
+            "program_id": program_id,
+        }
+
+    try:
+        bundle = program_package.create_bundle(
+            programs[0],
+            source_package=package,
+            allowed_packages=allowed_packages,
+            signer=signer,
+        )
+        path = program_package.save_bundle(
+            bundle,
+            output_path=output_path,
+        )
+        verification = program_package.verify_bundle(
+            bundle,
+            target_package=package,
+            require_trusted=True,
+        )
+    except (ValueError, OSError, TypeError) as exc:
+        return {"ok": False, "error": str(exc)}
+
+    signature = bundle.get("signature") or {}
+    return {
+        "ok": bool(verification.get("ok")),
+        "package": package,
+        "program_id": program_id,
+        "output_path": str(path),
+        "payload_sha256": bundle.get("payload_sha256"),
+        "permissions": bundle.get("permissions", []),
+        "allowed_packages": bundle.get("allowed_packages", []),
+        "signature": {
+            "algorithm": signature.get("algorithm"),
+            "key_id": signature.get("key_id"),
+            "public_key_b64": signature.get("public_key_b64"),
+        },
+        "trusted": verification.get("trusted", False),
+    }
+
+
+@mcp.tool()
+def runtime_program_verify_package(
+    bundle: dict | str,
+    target_package: str = "",
+    require_trusted: bool = False,
+) -> dict:
+    """离线校验 Runtime Program Package 的 SHA-256、Ed25519 签名、权限与包作用域。"""
+    if target_package:
+        _validate_package_name(target_package)
+    result = program_package.verify_bundle(
+        bundle,
+        target_package=target_package,
+        require_trusted=require_trusted,
+    )
+    if not result.get("ok"):
+        return result
+    return {
+        key: value
+        for key, value in result.items()
+        if key not in {"bundle", "manifest"}
+    }
+
+
+@mcp.tool()
+def runtime_program_import(
+    package: str,
+    bundle: dict | str,
+    mode: str = "install",
+    allow_untrusted: bool = False,
+    enable: Optional[bool] = None,
+    expected_revision: int = 0,
+    restart: bool = False,
+    timeout_ms: int = 3000,
+) -> dict:
+    """验签后把 .rbprog.json 安装/替换到目标包。
+
+    默认只接受本机信任 signer。allow_untrusted=True 只跳过信任列表要求，
+    仍然强制 Ed25519 签名、SHA-256、allowed_packages 和权限扫描全部通过。
+    """
+    _validate_package_name(package)
+    if mode not in {"install", "replace"}:
+        return {"ok": False, "error": "mode 仅支持 install/replace"}
+
+    verified = program_package.verify_bundle(
+        bundle,
+        target_package=package,
+        require_trusted=not allow_untrusted,
+    )
+    if not verified.get("ok"):
+        return {
+            **verified,
+            "package": package,
+            "mode": mode,
+        }
+
+    package_data = verified.get("bundle") or {}
+    program = package_data.get("program") or {}
+    manifest = verified.get("manifest") or {}
+    desired_enable = (
+        bool(program.get("enabled", True))
+        if enable is None
+        else bool(enable)
+    )
+    result = _runtime_program_write(
+        package,
+        manifest,
+        mode=mode,
+        enable=desired_enable,
+        restart=restart,
+        timeout_ms=timeout_ms,
+        expected_revision=expected_revision,
+    )
+    return {
+        **result,
+        "package_verification": {
+            "trusted": verified.get("trusted", False),
+            "key_id": verified.get("key_id", ""),
+            "payload_sha256": package_data.get("payload_sha256", ""),
+            "permissions": verified.get("permissions", []),
+            "allowed_packages": verified.get("allowed_packages", []),
+            "source_package": verified.get("source_package", ""),
+            "source_revision": verified.get("source_revision", 0),
+        },
+    }
 
 
 @mcp.tool()
