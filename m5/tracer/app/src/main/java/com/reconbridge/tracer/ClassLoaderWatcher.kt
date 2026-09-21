@@ -23,6 +23,8 @@ internal class ClassLoaderWatcher(
     private val lock = Any()
     private val constructorHandles = mutableListOf<LiveHookHandle>()
     private val loadClassHandles = mutableListOf<LiveHookHandle>()
+    @Volatile
+    private var pendingEnabledDesired = false
 
     fun start()
     {
@@ -62,6 +64,26 @@ internal class ClassLoaderWatcher(
 
     fun setPendingEnabled(enabled: Boolean)
     {
+        pendingEnabledDesired = enabled
+
+        if (!enabled && isSuppressed()) {
+            Thread({
+                try {
+                    Thread.yield()
+                    synchronized(lock) {
+                        if (!pendingEnabledDesired) {
+                            clearHandles(loadClassHandles)
+                        }
+                    }
+                } catch (_: Throwable) {
+                }
+            }, "ReconTracer-loader-watch-stop").apply {
+                isDaemon = true
+                start()
+            }
+            return
+        }
+
         synchronized(lock) {
             if (enabled) {
                 ensureLoadClassWatcherLocked()
