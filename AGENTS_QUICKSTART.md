@@ -109,12 +109,13 @@
 
 > **重型工具路径坑**：Ghidra 需 JDK21 且**必须装在 ASCII 路径**（安装路径含非 ASCII 字符会让 Ghidra 的 log4j 初始化崩溃）。若仓库本身在非 ASCII 路径下，把 Ghidra/JDK 放到 ASCII 目录并用 `RECONBRIDGE_NATIVE_TOOLS` 指定（Windows 默认回退到 `<盘符>:/ReconBridgeTools`）。
 
-### 3.3 动态 hook / 内存 dump / 产出物（M3 native + M4，8 个）
+### 3.3 动态 hook / 运行时状态 / 内存 dump / 产出物（M3 + M5 + M4，9 个）
 | 工具 | 签名 | 用途 |
 |---|---|---|
 | `post_hook` | `(config)` | 下发原始 hook 配置（native 或 java，见协议）。**通用入口** |
-| `list_hooks` | `()` | 列当前已下发配置 |
-| `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 hook 配置 |
+| `list_hooks` | `()` | 列磁盘上的**期望 Hook 配置** |
+| `runtime_hook_status` | `(package="")` | 查运行中 M5 Tracer 的**真实 HookRegistry**：进程/pid、实际安装 id、member 数、live unhook/replace 能力 |
+| `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 Hook；运行中的 M5 Java Hook 会立即 **live unhook**，无需 force-stop |
 | `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**；**`include_recent=True` 事后补捞**环形缓冲历史命中（命中发生在采集开始前也能拿到）；`fold_stack` 折叠栈顶 hook 框架帧 |
 | `recent_events` | `(limit=50, since_seq=0)` | **事后采集**：直接取守护进程环形缓冲里最近的命中，无需正连着 SSE。返回 `latest_seq` 可作游标只取增量 |
 | `dump_dex` | `(package, symbol="", offset="", base_arg=0, size_arg=1, lib="libart.so", restart=True)` | hook dex 加载入口，把内存中已解密 dex 回传落盘（脱壳） |
@@ -138,7 +139,7 @@
 
 ## 4. M5 Tracer（LSPosed）—— 用前必读
 
-**是什么**：一个通用的、由 PC 数据驱动的 LSPosed 模块（`m5/tracer/`，包名 `com.reconbridge.tracer`，预编译 `m5/ReconBridge-Tracer.apk`）。它跑在目标 App 进程里，读守护进程下发的 `kind:"java"` 目标，用 `XposedBridge` 装 trace/篡改回调，走**和 M3 相同**的 socket→SSE→`collect_events` 链路。**daemon 不用改。**
+**是什么**：一个通用的、由 PC 数据驱动的 LSPosed Runtime（`m5/tracer/`，包名 `com.reconbridge.tracer`）。它跑在目标 App 进程里，由 daemon 同步完整期望配置；进程内 `HookRegistry` 保存真实 Xposed `Unhook` handle，负责 live add/remove/replace，并通过状态帧把实际安装状态回报 daemon。事件仍走和 M3 相同的 socket→SSE→`collect_events` 链路。
 
 **启用步骤（一次性，人工）**：
 1. `adb install -r m5/ReconBridge-Tracer.apk`
@@ -153,6 +154,7 @@
 - `paths`(嵌套字段路径捕获)：`[{"path":"args[1].payload.load_url","render":"tostring"}]`——直接拿深埋在 payload 对象里的值，不靠整对象 toString 撞运气。路径 `args[N]`/`this`/`ret` 起头，`.name` 逐层(反射字段→getter→Map key)，`[n]` 索引数组/List；裸字段名=`this.<name>`；解析不到标 `unresolved:true`。
 - `action`(篡改与 Action 流水线)：支持快捷覆盖入参 `replace_args:[{index,value,type}]`、覆盖返回值 `replace_return:{value,type}`、`skip_original`；同时支持高级动作链 `before_actions` / `after_actions`，包含 `call_method`(调用Java方法)、`set_field`(读写字段)、`construct`(构造对象)、`eval_js`(Rhino JS片段执行)、`eval_dex`(DEX动态执行)、`exec_shell`(执行Shell命令)。命中事件带 `tampered:true`。
 - `debug:true` 才逐命中打 logcat（默认安静）。
+- 配置同步是**全量 reconcile**：新 id 安装、同 id 改配置 live replace、缺失 id live remove；`runtime_hook_status` 用来核对进程里实际装了什么。
 
 ---
 
@@ -180,7 +182,7 @@ trace_target(session_id,
              class_name="com.target.Foo", method="doWork",
              paths=[{"path":"args[1].payload","render":"deep"}],
              seconds=30)
-# 默认命中即返回，并自动卸载这次临时 Hook
+# 默认命中即返回，并通过 HookRegistry live unhook 自动卸载这次临时 Hook
 ```
 复杂持续 Hook、篡改或原始协议调试再使用 `trace_java` / `patch_java` / `post_hook`。
 
@@ -192,8 +194,9 @@ patch_java("com.target.app", "com.target.Foo", "doWork",
 # 让某校验方法恒返回 true、且不执行原方法：
 patch_java("com.target.app", "com.target.Security", "verify",
            replace_return={"value":true,"type":"boolean"}, skip_original=True)
-# 用完恢复：
-unhook(package="com.target.app")   # + 用外部 adb: adb shell am force-stop <pkg> 清掉运行进程里的活 hook
+# 用完立即恢复（M5 无需 force-stop）：
+unhook(package="com.target.app")
+runtime_hook_status(package="com.target.app")  # 确认 installed_count 已回到预期
 ```
 
 > **推荐套路：先验证，再固化。** 定位到候选方法后，别急着写模块 + 编译 + 安装 + 测试整轮。
@@ -357,13 +360,13 @@ compare_root_cause_hypothesis(
 ## 6. 高频坑（务必记住）
 
 1. **adb + Git Bash（Windows）**：所有 adb 命令前 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`，否则 `/data/...` 被改写成 Windows 路径。
-2. **首个 hook 要 `restart:true`，之后可 `hot`**：模块/native 层在**进程启动时**读一次配置。第一个 hook 需 `restart`（`am force-stop` 触发重注入）让目标带配置起来；此后目标进程活着时，**Java trace 可用 `trace_java(hot=True)` 免重启热加**（`restart:false`+`mode:append`，往运行中进程增量追加，daemon 下发 reload 帧）——迭代加 hook 不再反复强退/重唤醒。`hot_injected` 为 0 说明目标没在跑（或非 tracer 作用域/旧版 APK/native 目标），退回 `restart`。native 目标目前仍需 `restart`。
+2. **首个 hook 先让 Tracer 进程上线，之后走 live reconcile**：最稳妥的首发仍用 `restart:true`；一旦 M5 Tracer 已连接，`restart:false` / `hot=True` 会同步完整期望配置，HookRegistry 可 live add/remove/replace。同 ID target 改配置会即时替换；`unhook` 会即时卸载。`runtime_hook_status` 用来确认真实安装状态。native M3 目标目前仍需 restart/下次启动生效。
 3. **稀疏事件的采集时序**：**优先 `until_first_hit=True`**（命中即返回，不必和窗口掐点）。守护进程带**最近 ~400 条环形缓冲**，故命中即便发生在采集开始前也能捞回——用 `collect_events(include_recent=True)` 或直接 `recent_events()`（推荐流程：post_hook 后 `recent_events(limit=0)` 记游标 → 触发 → 事后 `recent_events(since_seq=游标)` 补捞）。`seconds` 只当兜底。
 4. **控制台中文可能显示成乱码**：多为终端编码问题（如 Windows Git Bash），数据本身是 UTF-8。验证时写 UTF-8 文件再用 Read 看，或设 `PYTHONUTF8=1 PYTHONIOENCODING=utf-8`。
 5. **改了 `pc/reconbridge_mcp/*.py` 要重启 MCP server** 才生效（新会话天然是新 server，不受影响）。
 6. **LSPosed 模块必须人工启用 + 勾作用域**；悬浮窗/自绘/Compose 类 UI 不一定走 `Activity.onResume`，验证挑必然会走的业务方法。
 7. **多设备/多链路** → MCP 自动挑唯一在线设备、忽略离线残链；仅**多台都在线**时才需设 `RECONBRIDGE_SERIAL`。
-8. **篡改用完要恢复**：`unhook` + `adb shell am force-stop <pkg>`，否则活 hook 留在运行进程里。
+8. **篡改用完要恢复**：M5 直接 `unhook(package, hook_id)` 或清整包即可 live 卸载；随后用 `runtime_hook_status(package)` 核对。只有旧 Tracer/非 M5 native Hook 才仍需重启进程。
 9. **模块日志**：`XposedBridge.log` 不一定进 logcat；模块另有 `android.util.Log`（tag `ReconTracer`），`adb logcat -s ReconTracer` 可看装 hook/错误（逐命中日志需配置 `debug:true`）。
 
 ---
@@ -376,7 +379,7 @@ compare_root_cause_hypothesis(
 | **M2** | PC MCP Server + 反编译链（jadx/androguard/Ghidra/Hermes） | `pc/reconbridge_mcp/`、`pc/README.md` |
 | **M3** | 通用 native 动态 hook 执行器：Zygisk+ShadowHook + SSE/WS | `src/dynamic.cpp`、`m3/zygisk/module.cpp`、`m3/HOOK_PROTOCOL.md` |
 | **M4** | 加固/反调试增强：内存 dex dump + 反检测模板 | `m4/README.md`、`m4/templates/` |
-| **M5** | 通用 Java trace + 实时篡改（LSPosed 模块） | `m5/tracer/`、`m5/README.md`、`m5/JAVA_HOOK_PROTOCOL.md`、`m5/ReconBridge-Tracer.apk` |
+| **M5** | 通用 Java trace + 实时篡改 + HookRegistry live 生命周期（LSPosed Runtime） | `m5/tracer/`、`m5/README.md`、`m5/JAVA_HOOK_PROTOCOL.md`、`m5/ReconBridge-Tracer.apk` |
 
 **构建**：`./build.ps1`（NDK clang++ 编守护进程 + zygisk，无需 cmake）→ `./pack.ps1`（打 `dist/ReconBridge-*.zip`）。
 M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓库在非 ASCII 路径，`gradle.properties` 已加 `android.overridePathCheck=true`）。
