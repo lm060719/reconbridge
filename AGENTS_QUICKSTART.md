@@ -55,7 +55,8 @@
 |---|---|
 | `open_target(package_name, auto_pull=True, note="")` | 创建持久化分析会话；自动绑定本地 APK/JADX/so，本地没 APK 时默认尝试从设备拉取 |
 | `investigate(session_id, goal, verify_runtime=True, top_n=5, seconds=15, ...)` | **默认首选**：自然语言目标自动执行关键词规划、索引、多词候选排序、批量运行时验证，并自动展开主候选 callers/callees + JADX 源码上下文；运行时失败仍保留静态与源码结果 |
-| `inspect_method(session_id, class_name, method, descriptor="", ...)` | 已知具体方法时直接查看调用者、被调用方法、关联字符串、同类字段和 JADX 方法体；可自动准备源码 |
+| `inspect_method(session_id, class_name, method, descriptor="", ...)` | 已知具体方法时查看一层 callers/callees、关联字符串、同类字段和 JADX 方法体；可自动准备源码 |
+| `inspect_call_graph(session_id, class_name, method, upstream_depth=2, downstream_depth=2, ...)` | 递归展开调用图；默认标准库/Android/Kotlin 节点只显示不继续扩，返回代表业务路径并标记 runtime 覆盖 |
 | `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
@@ -147,12 +148,13 @@
 device_status
 → open_target("com.target.app")                 # 返回 session_id
 → investigate(session_id, goal="找到会员状态判断方法", top_n=5)
-# ↑ 自动：关键词规划 → SQLite v2 索引 → 多词候选合并 → 批量 Hook → callers/callees → JADX 方法体 → 证据汇总
+# ↑ 自动：关键词规划 → SQLite v2 索引 → 多词候选合并 → 批量 Hook → callers/callees → JADX 方法体
+#    → 上下游递归调用图 → 入口/目标/下游代表路径 → runtime 覆盖 → 证据汇总
 # 如果此轮需要 runtime 验证，在采集窗口里触发一次目标行为即可
 → prepare_target(session_id)                    # 只有需要完整源码上下文时再做
 → trace_target(session_id, "com.target.PayManager", "checkVip")  # 已明确方法后精细抓参数/字段
 ```
-同一个 APK 的索引只需构建一次；DEX 索引 v2 额外持久化方法调用边，所以 callers/callees 也无需重新启动 Androguard。旧版索引首次使用会自动重建。候选排序会优先利用字符串 xref 与已有运行时证据；批量验证只需要一次行为触发。主候选确定后会自动准备/复用 JADX 并附带方法体源码。搜索、调用关系和 trace 结果都会沉淀进 Evidence Graph。
+同一个 APK 的索引只需构建一次；DEX 索引 v2 持久化方法调用边，所以多层调用图也只查 SQLite。默认向上/向下各追 2 层，并在遇到 Java/Android/Kotlin 框架节点时停止继续外扩，防止图爆炸。investigate 只回传少量代表路径；需要完整 nodes/edges 再调用 inspect_call_graph。已有 trace 命中的方法会在路径里显示 runtime_confirmed/runtime_hits/runtime_coverage。
 
 **B. 定位并观测一个 Java 方法（推荐）**
 ```
@@ -235,6 +237,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 默认直接 `investigate(session_id, goal=...)`；结果会自动带主候选调用关系与源码。要手工展开另一个方法用 `inspect_method`；已明确具体方法后再 `trace_target` 做精细运行时观测。
+3. 默认直接 `investigate(session_id, goal=...)`；先读返回的 `call_graph.representative_paths` 理解业务链。要完整调用图用 `inspect_call_graph`，只展开另一个方法用 `inspect_method`；已明确具体方法后再 `trace_target` 做精细运行时观测。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
