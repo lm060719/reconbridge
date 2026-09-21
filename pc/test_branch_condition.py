@@ -108,6 +108,36 @@ def test_ternary_is_detected():
     assert any(item["type"] == "ternary" for item in ranked)
 
 
+def test_object_receiver_does_not_generate_wrong_same_class_hook():
+    source = """public void route() {
+    if (userManager.isPremium()) {
+        enterFeature();
+    } else {
+        showPaywall();
+    }
+}
+"""
+
+    ranked = branch_condition.rank_conditions(
+        source,
+        a_next="showPaywall",
+        b_next="enterFeature",
+    )
+    plan = branch_condition.build_probe_plan(
+        "com.example.PayManager",
+        "route",
+        ranked,
+    )
+
+    call = next(
+        item for item in plan
+        if item["kind"] == "condition_call_expression"
+    )
+    assert call["expression"] == "userManager.isPremium"
+    assert call["tool"] is None
+    assert "实际类型" in call["note"]
+
+
 def test_probe_plan_prefers_field_and_deduplicates():
     ranked = [
         {
