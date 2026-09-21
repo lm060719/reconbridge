@@ -524,6 +524,26 @@ class HookEntry : IXposedHookLoadPackage {
             }
         }
 
+        val lifecycleArray = t.optJSONArray("on_lifecycle")
+        if (lifecycleArray != null) {
+            for (index in 0 until lifecycleArray.length()) {
+                val row = lifecycleArray.optJSONObject(index)
+                    ?: continue
+                definitions.add(
+                    LifecycleTrigger.normalizeHandler(row)
+                )
+            }
+        } else {
+            val lifecycleSingle = t.optJSONObject("on_lifecycle")
+            if (lifecycleSingle != null) {
+                definitions.add(
+                    LifecycleTrigger.normalizeHandler(
+                        lifecycleSingle
+                    )
+                )
+            }
+        }
+
         if (definitions.isEmpty()) {
             return HookInstallResult(
                 emptyList(),
@@ -551,6 +571,10 @@ class HookEntry : IXposedHookLoadPackage {
                     ownerHookId = ownerId,
                     eventName = eventName,
                 ) { event ->
+                    if (!LifecycleTrigger.matches(handler, event)) {
+                        return@subscribe
+                    }
+
                     val ctx = ActionContext(
                         param = null,
                         classLoader = classLoader,
