@@ -48,3 +48,18 @@ cd m5/tracer && ./gradlew.bat :app:assembleDebug
 
 ## 边界与能力
 支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、**pending hook + 动态 ClassLoader Watch**、**Runtime State + Event Bus**、**Lifecycle + Context Runtime**、**Runtime Command Dispatcher**、**Runtime Program / Module Manifest**、实时篡改和完整 Action Pipeline。State 提供 process/package/hook/thread 四种作用域；不同 Hook 可通过 `${state.process.xxx}` / `condition.path=state.hook.xxx` 共享状态，也可用 `emit_event` 驱动另一个 target。Lifecycle Runtime 通过 `Application.attach` + `ActivityLifecycleCallbacks` 跟踪 Application/Context/当前 Activity，Activity 只用弱引用保存；可直接使用 `${application}`、`${context}`、`${activity}`、`lifecycle.activity_state`，并用 `on_lifecycle` 响应 resumed/paused/destroyed 等标准事件。显式 `class` 目标若当前所有已知 loader 都找不到类会进入 pending，后续动态 loader 出现后自动补装。需 LSPosed 并在管理器里勾选作用域。详见 `JAVA_HOOK_PROTOCOL.md`。
+
+
+## Runtime Program Package（Phase 7）
+
+Phase 6 的 Runtime Program 现在可以通过 PC MCP 导出为 Ed25519 签名的 `.rbprog.json`：
+
+```text
+runtime_program_export
+runtime_program_verify_package
+runtime_program_import
+runtime_program_trust_signer
+runtime_program_signer_status
+```
+
+签名覆盖完整 manifest、权限清单、allowed_packages 和来源 revision。导入时默认要求 signer 已加入本机 trust store；同时 daemon 会重新扫描 manifest 所需权限，显式少声明高风险能力会拒绝安装。签名私钥只保留在 PC 本地，不进入 Android 设备。完整格式与权限表见 `JAVA_HOOK_PROTOCOL.md`。
