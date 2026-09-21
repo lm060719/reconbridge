@@ -71,6 +71,7 @@ internal class ActionContext(
     val runtimeState: RuntimeStateStore? = null,
     val eventBus: RuntimeEventBus? = null,
     val runtimeEvent: RuntimeEvent? = null,
+    val contextRuntime: RuntimeContextProvider? = null,
 ) {
     private var fallbackThis: Any? = null
     private var fallbackArgs: Array<Any?>? = null
@@ -975,6 +976,50 @@ internal object ActionExecutor {
         var s: String
 
         when {
+            expr == "application" ||
+                expr.startsWith("application.") ||
+                expr.startsWith("application[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.applicationObject() ?: return MISSING
+                s = if (expr == "application") {
+                    ""
+                } else {
+                    expr.substring("application".length)
+                }
+            }
+            expr == "context" ||
+                expr.startsWith("context.") ||
+                expr.startsWith("context[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.contextObject() ?: return MISSING
+                s = if (expr == "context") {
+                    ""
+                } else {
+                    expr.substring("context".length)
+                }
+            }
+            expr == "activity" ||
+                expr.startsWith("activity.") ||
+                expr.startsWith("activity[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.activityObject() ?: return MISSING
+                s = if (expr == "activity") {
+                    ""
+                } else {
+                    expr.substring("activity".length)
+                }
+            }
+            expr == "lifecycle" ||
+                expr.startsWith("lifecycle.") ||
+                expr.startsWith("lifecycle[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.lifecycleView()
+                s = if (expr == "lifecycle") {
+                    ""
+                } else {
+                    expr.substring("lifecycle".length)
+                }
+            }
             expr.startsWith("state.") -> {
                 val state = ctx.runtimeState ?: return MISSING
                 return state.resolve(
