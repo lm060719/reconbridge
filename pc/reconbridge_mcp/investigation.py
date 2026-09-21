@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .dex_index import index_status
+from . import evidence
 from .settings import settings
 
 _SESSION_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -83,6 +84,7 @@ def create(package: str, note: str = "") -> dict[str, Any]:
         "event_cursor": 0,
         "temporary_hooks": [],
         "discoveries": [],
+        "evidence_graph": evidence.new_graph(),
     }
     save(state)
     return state
@@ -128,6 +130,7 @@ def status(session_id: str) -> dict[str, Any]:
         "event_cursor": state.get("event_cursor", 0),
         "temporary_hooks": state.get("temporary_hooks", []),
         "discoveries": state.get("discoveries", [])[-20:],
+        "evidence_graph": evidence.summary(state.get("evidence_graph") or evidence.new_graph()),
         "created_at": state.get("created_at"),
         "updated_at": state.get("updated_at"),
     }
@@ -173,6 +176,52 @@ def add_discovery(session_id: str, discovery: dict[str, Any]) -> None:
     if len(items) > 200:
         del items[:-200]
     save(state)
+
+
+def record_search_evidence(
+    session_id: str,
+    query: str,
+    strategy: str,
+    results: list[dict[str, Any]],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_search(graph, query, strategy, results)
+    save(state)
+
+
+def record_trace_evidence(
+    session_id: str,
+    class_name: str,
+    method_name: str,
+    events: list[dict[str, Any]],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_trace(graph, class_name, method_name, events)
+    save(state)
+
+
+def evidence_subgraph(
+    session_id: str,
+    focus: str = "",
+    depth: int = 2,
+    limit: int = 100,
+) -> dict[str, Any]:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    return evidence.subgraph(graph, focus=focus, depth=depth, limit=limit)
+
+
+def explain_evidence_graph(
+    session_id: str,
+    focus: str,
+    depth: int = 3,
+    limit: int = 80,
+) -> dict[str, Any]:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    return evidence.explain(graph, focus=focus, depth=depth, limit=limit)
 
 
 def source_search(session_id: str, query: str, limit: int = 20) -> dict[str, Any]:
