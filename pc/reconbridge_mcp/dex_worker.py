@@ -1,15 +1,27 @@
 """Androguard 隔离 worker。
 
-AnalyzeAPK 会为多 DEX APK 构建很大的对象图，因此绝不能在长期驻留的 MCP
-主进程中执行。worker 每次只处理一个查询，结果写盘后立即退出，让操作系统回收全部堆。
+重型 APK 解析始终放在短生命周期子进程中。优先任务是一次性建立 SQLite
+持久索引；旧的直接查询能力保留为兼容兜底。
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
+
+from .dex_index import write_meta
+
+
+def _quiet_loguru() -> None:
+    try:
+        from loguru import logger as loguru_logger
+        loguru_logger.remove()
+    except Exception:
+        pass
 
 
 def _pat(pattern: str) -> str:
@@ -20,13 +32,233 @@ def _pat(pattern: str) -> str:
     return ".*" + re.escape(pattern) + ".*"
 
 
-def run_search(apk_path: str, query: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from loguru import logger as loguru_logger
-        loguru_logger.remove()
-    except Exception:
-        pass
+def _method_row(method_analysis) -> dict[str, str]:
+    method = (
+        method_analysis.get_method()
+        if hasattr(method_analysis, "get_method")
+        else method_analysis
+    )
+    return {
+        "class": str(method.get_class_name()),
+        "method": str(method.get_name()),
+        "descriptor": str(method.get_descriptor()) if hasattr(method, "get_descriptor") else "",
+        "access": (
+            str(method.get_access_flags_string())
+            if hasattr(method, "get_access_flags_string")
+            else ""
+        ),
+    }
 
+
+def _field_row(field_analysis) -> dict[str, str]:
+    field = (
+        field_analysis.get_field()
+        if hasattr(field_analysis, "get_field")
+        else field_analysis
+    )
+    return {
+        "class": str(field.get_class_name()),
+        "field": str(field.get_name()),
+        "type": str(field.get_descriptor()) if hasattr(field, "get_descriptor") else "",
+    }
+
+
+def _create_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        PRAGMA journal_mode=OFF;
+        PRAGMA synchronous=OFF;
+        PRAGMA temp_store=FILE;
+
+        CREATE TABLE meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+
+        CREATE TABLE classes (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE methods (
+            id INTEGER PRIMARY KEY,
+            class_name TEXT NOT NULL,
+            method_name TEXT NOT NULL,
+            descriptor TEXT NOT NULL,
+            access TEXT NOT NULL,
+            UNIQUE(class_name, method_name, descriptor)
+        );
+
+        CREATE TABLE fields (
+            id INTEGER PRIMARY KEY,
+            class_name TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            UNIQUE(class_name, field_name, type)
+        );
+
+        CREATE TABLE strings (
+            id INTEGER PRIMARY KEY,
+            value TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE string_method_xrefs (
+            string_id INTEGER NOT NULL,
+            method_id INTEGER NOT NULL,
+            UNIQUE(string_id, method_id)
+        );
+
+        CREATE INDEX idx_classes_name ON classes(name);
+        CREATE INDEX idx_methods_name ON methods(method_name);
+        CREATE INDEX idx_methods_class ON methods(class_name);
+        CREATE INDEX idx_fields_name ON fields(field_name);
+        CREATE INDEX idx_fields_class ON fields(class_name);
+        CREATE INDEX idx_strings_value ON strings(value);
+        CREATE INDEX idx_xrefs_string ON string_method_xrefs(string_id);
+        CREATE INDEX idx_xrefs_method ON string_method_xrefs(method_id);
+        """
+    )
+
+
+def build_index(apk_path: str, index_path: str) -> dict[str, Any]:
+    _quiet_loguru()
+    try:
+        from androguard.misc import AnalyzeAPK
+    except Exception:
+        return {"ok": False, "error": "androguard 未安装", "hint": "pip install androguard"}
+
+    apk = Path(apk_path)
+    target = Path(index_path)
+    if not apk.exists():
+        return {"ok": False, "error": f"apk 不存在: {apk_path}"}
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    building = target.with_suffix(target.suffix + ".building")
+    building.unlink(missing_ok=True)
+
+    try:
+        _apk_obj, _dex_list, analysis = AnalyzeAPK(str(apk))
+    except MemoryError:
+        return {"ok": False, "error": "androguard 建索引阶段内存不足"}
+    except Exception as exc:
+        return {"ok": False, "error": f"androguard 解析失败: {exc}"}
+
+    counts = {
+        "classes": 0,
+        "methods": 0,
+        "fields": 0,
+        "strings": 0,
+        "string_method_xrefs": 0,
+    }
+
+    try:
+        with sqlite3.connect(building) as conn:
+            _create_schema(conn)
+            conn.execute("BEGIN")
+
+            for item in analysis.find_classes(".*"):
+                name = str(getattr(item, "name", ""))
+                if not name:
+                    continue
+                cur = conn.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (name,))
+                counts["classes"] += max(0, cur.rowcount)
+
+            for item in analysis.find_methods(classname=".*", methodname=".*"):
+                row = _method_row(item)
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO methods(class_name, method_name, descriptor, access)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (row["class"], row["method"], row["descriptor"], row["access"]),
+                )
+                counts["methods"] += max(0, cur.rowcount)
+
+            for item in analysis.find_fields(classname=".*", fieldname=".*"):
+                row = _field_row(item)
+                cur = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO fields(class_name, field_name, type)
+                    VALUES (?, ?, ?)
+                    """,
+                    (row["class"], row["field"], row["type"]),
+                )
+                counts["fields"] += max(0, cur.rowcount)
+
+            for string_analysis in analysis.find_strings(".*"):
+                value = str(string_analysis.get_value())
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO strings(value) VALUES (?)",
+                    (value,),
+                )
+                counts["strings"] += max(0, cur.rowcount)
+                string_row = conn.execute(
+                    "SELECT id FROM strings WHERE value = ?",
+                    (value,),
+                ).fetchone()
+                if not string_row:
+                    continue
+                string_id = int(string_row[0])
+
+                for xref in string_analysis.get_xref_from():
+                    if len(xref) < 2:
+                        continue
+                    method = _method_row(xref[1])
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO methods(class_name, method_name, descriptor, access)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            method["class"],
+                            method["method"],
+                            method["descriptor"],
+                            method["access"],
+                        ),
+                    )
+                    method_row = conn.execute(
+                        """
+                        SELECT id
+                        FROM methods
+                        WHERE class_name = ? AND method_name = ? AND descriptor = ?
+                        """,
+                        (method["class"], method["method"], method["descriptor"]),
+                    ).fetchone()
+                    if not method_row:
+                        continue
+
+                    cur = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO string_method_xrefs(string_id, method_id)
+                        VALUES (?, ?)
+                        """,
+                        (string_id, int(method_row[0])),
+                    )
+                    counts["string_method_xrefs"] += max(0, cur.rowcount)
+
+            write_meta(conn, apk, counts)
+            conn.commit()
+
+        os.replace(building, target)
+        return {
+            "ok": True,
+            "operation": "build_index",
+            "backend": "androguard-worker",
+            "index_path": str(target),
+            "index_bytes": target.stat().st_size,
+            "counts": counts,
+        }
+    except MemoryError:
+        building.unlink(missing_ok=True)
+        return {"ok": False, "error": "建立 SQLite 索引时内存不足"}
+    except Exception as exc:
+        building.unlink(missing_ok=True)
+        return {"ok": False, "error": f"建立 SQLite 索引失败: {exc}"}
+
+
+def run_search(apk_path: str, query: dict[str, Any]) -> dict[str, Any]:
+    """兼容旧路径：直接用 Androguard 执行一次查询。"""
+    _quiet_loguru()
     try:
         from androguard.misc import AnalyzeAPK
     except Exception:
@@ -47,23 +279,6 @@ def run_search(apk_path: str, query: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         return {"ok": False, "error": f"androguard 解析失败: {exc}"}
 
-    def meth_row(method_analysis) -> dict[str, Any]:
-        method = (
-            method_analysis.get_method()
-            if hasattr(method_analysis, "get_method")
-            else method_analysis
-        )
-        return {
-            "class": method.get_class_name(),
-            "method": method.get_name(),
-            "descriptor": method.get_descriptor() if hasattr(method, "get_descriptor") else "",
-            "access": (
-                method.get_access_flags_string()
-                if hasattr(method, "get_access_flags_string")
-                else ""
-            ),
-        }
-
     try:
         if find == "string":
             pattern = query.get("string", ".*")
@@ -80,29 +295,19 @@ def run_search(apk_path: str, query: dict[str, Any]) -> dict[str, Any]:
         elif find == "field":
             field_pattern = _pat(query.get("field_name", ".*"))
             class_pattern = _pat(query.get("class_name", ".*"))
-            for item in analysis.find_fields(
-                classname=class_pattern,
-                fieldname=field_pattern,
-            ):
-                field = item.get_field()
-                results.append(
-                    {
-                        "class": field.get_class_name(),
-                        "field": field.get_name(),
-                        "type": field.get_descriptor(),
-                    }
-                )
+            for item in analysis.find_fields(classname=class_pattern, fieldname=field_pattern):
+                row = _field_row(item)
+                results.append({"class": row["class"], "field": row["field"], "type": row["type"]})
                 if len(results) >= limit:
                     break
         else:
             using = query.get("using_strings")
             if using:
                 seen = set()
-                stop = False
                 for keyword in using:
                     for string_analysis in analysis.find_strings(keyword):
                         for xref in string_analysis.get_xref_from():
-                            row = meth_row(xref[1])
+                            row = _method_row(xref[1])
                             key = (row["class"], row["method"], row["descriptor"])
                             if key in seen:
                                 continue
@@ -110,11 +315,10 @@ def run_search(apk_path: str, query: dict[str, Any]) -> dict[str, Any]:
                             row["matched_string"] = keyword
                             results.append(row)
                             if len(results) >= limit:
-                                stop = True
                                 break
-                        if stop:
+                        if len(results) >= limit:
                             break
-                    if stop:
+                    if len(results) >= limit:
                         break
             else:
                 class_pattern = _pat(query.get("class_name", ".*"))
@@ -123,7 +327,7 @@ def run_search(apk_path: str, query: dict[str, Any]) -> dict[str, Any]:
                     classname=class_pattern,
                     methodname=method_pattern,
                 ):
-                    results.append(meth_row(item))
+                    results.append(_method_row(item))
                     if len(results) >= limit:
                         break
     except MemoryError:
@@ -149,7 +353,11 @@ def main(args: list[str] | None = None) -> int:
     response_path = Path(args[1])
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
-        result = run_search(request["apk_path"], request.get("query") or {})
+        operation = request.get("operation", "search")
+        if operation == "build_index":
+            result = build_index(request["apk_path"], request["index_path"])
+        else:
+            result = run_search(request["apk_path"], request.get("query") or {})
     except Exception as exc:
         result = {"ok": False, "error": f"dex worker 失败: {exc}"}
 
