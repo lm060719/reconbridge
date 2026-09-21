@@ -943,7 +943,7 @@ static json invoke_tool(const std::string& name, const json& a) {
         return http_post(endpoint, body);
     }
     if (name == "runtime_program_status") {
-        std::map<std::string, std::string> params = {
+        Params params = {
             {"package", a.value("package", "")}
         };
         const std::string program_id =
