@@ -4418,7 +4418,9 @@ def runtime_hook_status(package: str = "") -> dict:
     Runtime State、Event Bus、Context/Lifecycle Runtime 的真实状态。
     context_runtime 会报告 Application/Context/当前 Activity 可用性与 Activity 状态；
     lifecycle_runtime 会报告 attach watcher、ActivityLifecycleCallbacks 和生命周期事件计数。
-    pending_hooks 会显示等待类名、重试次数和最后错误；package 为空时列出全部连接进程。
+    pending_hooks 会显示等待类名、重试次数和最后错误；context_runtime 会显示当前
+    Application/Context/Activity 与 activity_state，lifecycle_runtime 会显示 callbacks/events；
+    package 为空时列出全部连接进程。
     """
     params = None
     if package:
