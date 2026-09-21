@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -85,7 +86,13 @@ def _b64(data: bytes) -> str:
 
 
 def _unb64(value: str) -> bytes:
-    return base64.b64decode(value.encode("ascii"), validate=True)
+    try:
+        return base64.b64decode(
+            value.encode("ascii"),
+            validate=True,
+        )
+    except (ValueError, UnicodeError, binascii.Error) as exc:
+        raise ValueError("无效 Base64 编码") from exc
 
 
 def _security_root() -> Path:
