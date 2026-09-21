@@ -777,6 +777,127 @@ static std::string normalize_program_scope(
     return raw;
 }
 
+static const std::set<std::string>& runtime_program_known_permissions() {
+    static const std::set<std::string> values = {
+        "hook.java",
+        "hook.tamper",
+        "runtime.event",
+        "runtime.lifecycle",
+        "state.write",
+        "java.call",
+        "java.field_write",
+        "java.construct",
+        "code.eval_js",
+        "code.eval_dex",
+        "shell.exec",
+        "shell.root",
+        "activity.access"
+    };
+    return values;
+}
+
+static void collect_runtime_program_permissions(
+    const json& node,
+    std::set<std::string>& out) {
+    if (node.is_array()) {
+        for (const auto& item : node)
+            collect_runtime_program_permissions(item, out);
+        return;
+    }
+    if (!node.is_object()) return;
+
+    if (node.contains("kind") && node["kind"].is_string()) {
+        const std::string kind = node["kind"].get<std::string>();
+        if (kind == "java") out.insert("hook.java");
+        if (kind == "runtime") {
+            if (node.contains("on_event") ||
+                node.contains("event_handlers"))
+                out.insert("runtime.event");
+            if (node.contains("on_lifecycle"))
+                out.insert("runtime.lifecycle");
+        }
+    }
+
+    if (node.contains("on_event") ||
+        node.contains("event_handlers"))
+        out.insert("runtime.event");
+    if (node.contains("on_lifecycle"))
+        out.insert("runtime.lifecycle");
+
+    if ((node.contains("state_init") &&
+         node["state_init"].is_array() &&
+         !node["state_init"].empty()) ||
+        (node.contains("state_cleanup") &&
+         node["state_cleanup"].is_array() &&
+         !node["state_cleanup"].empty()))
+        out.insert("state.write");
+
+    if (node.contains("action") && node["action"].is_string()) {
+        const std::string action =
+            node["action"].get<std::string>();
+        if (action == "set_state" ||
+            action == "remove_state" ||
+            action == "clear_state" ||
+            action == "increment_state" ||
+            action == "append_state")
+            out.insert("state.write");
+        else if (action == "call_method" ||
+                 action == "invoke")
+            out.insert("java.call");
+        else if (action == "set_field" ||
+                 action == "mutate" ||
+                 action == "set_path" ||
+                 action == "mutate_path")
+            out.insert("java.field_write");
+        else if (action == "construct" ||
+                 action == "new_instance")
+            out.insert("java.construct");
+        else if (action == "eval_js" ||
+                 action == "js")
+            out.insert("code.eval_js");
+        else if (action == "eval_dex" ||
+                 action == "dex")
+            out.insert("code.eval_dex");
+        else if (action == "exec_shell" ||
+                 action == "shell") {
+            out.insert("shell.exec");
+            if (node.value("as_root", false))
+                out.insert("shell.root");
+        } else if (action == "set_arg" ||
+                   action == "set_result" ||
+                   action == "replace_return")
+            out.insert("hook.tamper");
+        else if (action == "emit_event")
+            out.insert("runtime.event");
+    }
+
+    if (node.contains("target") &&
+        node["target"].is_string() &&
+        node["target"].get<std::string>() == "activity")
+        out.insert("activity.access");
+
+    if ((node.contains("replace_args") &&
+         !node["replace_args"].is_null()) ||
+        node.contains("replace_return") ||
+        (node.contains("mutate_return") &&
+         !node["mutate_return"].is_null()) ||
+        node.value("skip_original", false))
+        out.insert("hook.tamper");
+
+    for (auto it = node.begin(); it != node.end(); ++it) {
+        if (it.key() == "permissions") continue;
+        collect_runtime_program_permissions(it.value(), out);
+    }
+}
+
+static json runtime_program_permission_array(
+    const std::set<std::string>& values) {
+    json out = json::array();
+    for (const auto& value : values)
+        out.push_back(value);
+    return out;
+}
+
 static bool normalize_runtime_program_manifest(
     const json& input,
     json& normalized,
@@ -879,6 +1000,59 @@ static bool normalize_runtime_program_manifest(
             }
         }
     }
+
+    std::set<std::string> required_permissions;
+    collect_runtime_program_permissions(
+        normalized,
+        required_permissions);
+
+    std::set<std::string> declared_permissions;
+    const bool has_explicit_permissions =
+        normalized.contains("permissions");
+    if (has_explicit_permissions) {
+        if (!normalized["permissions"].is_array()) {
+            error = "manifest.permissions 必须是字符串数组";
+            return false;
+        }
+        for (const auto& item : normalized["permissions"]) {
+            if (!item.is_string()) {
+                error = "manifest.permissions 必须是字符串数组";
+                return false;
+            }
+            const std::string permission =
+                item.get<std::string>();
+            if (!runtime_program_known_permissions().count(
+                    permission)) {
+                error =
+                    "未知 Runtime Program 权限: " + permission;
+                return false;
+            }
+            declared_permissions.insert(permission);
+        }
+
+        std::vector<std::string> missing;
+        for (const auto& required : required_permissions) {
+            if (!declared_permissions.count(required))
+                missing.push_back(required);
+        }
+        if (!missing.empty()) {
+            std::ostringstream oss;
+            oss << "manifest.permissions 少声明实际能力: ";
+            for (size_t i = 0; i < missing.size(); ++i) {
+                if (i) oss << ", ";
+                oss << missing[i];
+            }
+            error = oss.str();
+            return false;
+        }
+    } else {
+        declared_permissions = required_permissions;
+    }
+
+    normalized["permissions"] =
+        runtime_program_permission_array(declared_permissions);
+    normalized["permissions_inferred"] =
+        !has_explicit_permissions;
 
     if (normalized.dump().size() > (2u << 20)) {
         error = "manifest 过大（上限 2 MiB）";
@@ -1107,6 +1281,8 @@ static json runtime_program_record_summary(const json& record) {
         {"target_count", manifest.value("targets", json::array()).size()},
         {"state_init_count", manifest.value("state_init", json::array()).size()},
         {"state_cleanup_count", manifest.value("state_cleanup", json::array()).size()},
+        {"permissions", manifest.value("permissions", json::array())},
+        {"permissions_inferred", manifest.value("permissions_inferred", false)},
         {"history_depth", record.value("history", json::array()).size()},
         {"effective_target_ids", effective_ids},
         {"installed_at", record.value("installed_at", (int64_t)0)},
