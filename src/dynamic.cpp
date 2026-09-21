@@ -420,6 +420,12 @@ static json send_runtime_command_to_conn(
     const std::shared_ptr<InjectConn>& c,
     json command,
     int timeout_ms) {
+    std::string process_name_snapshot;
+    {
+        std::lock_guard<std::mutex> lk(g_conn_mutex);
+        process_name_snapshot = c->process_name;
+    }
+
     const uint64_t seq = g_runtime_command_seq.fetch_add(1);
     const std::string request_id =
         "rcmd_" + std::to_string(now_ms()) + "_" + std::to_string(seq);
@@ -489,8 +495,10 @@ static json send_runtime_command_to_conn(
             {"error", "Runtime Command Ack 格式无效"}
         };
     }
+    if (!response.contains("request_id"))
+        response["request_id"] = request_id;
     response["package"] = c->base_pkg;
-    response["process"] = c->process_name;
+    response["process"] = process_name_snapshot;
     return response;
 }
 
