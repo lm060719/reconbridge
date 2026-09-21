@@ -34,6 +34,7 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
    - 字符串特征定位混淆方法：使用 `using_strings=["sendStream"]` 参数，m5 会在 App 进程中自动扫描 DEX 结构，反查并挂载匹配的方法（无需预先定位混淆类名）。
    - 实时篡改与回调：`patch_java(...)`（支持改参数、改返回值、返回值深层字段/Map key篡改 `mutate_return`、条件检查 `condition`、模板变量 `${...}` 及 Action Pipeline，支持 `hot=True` 免重启热加）。
    - 跨 Hook 状态/事件：在 action 中使用 `set_state/get_state/increment_state/append_state/emit_event`；另一个 Java Hook 或 `kind:"runtime"` target 可通过 `state.* / event.*` 条件与模板响应。
+   - Lifecycle/Context：模板、condition 和 Action target 可直接引用 `${application}` / `${context}` / `${activity}` / `lifecycle.*`；`kind:"runtime"` target 可用 `on_lifecycle` 监听 resumed/paused/destroyed 等事件。
    - Context/Lifecycle：Action/模板/condition 可直接访问 `${application}`、`${context}`、`${activity}`、`${lifecycle.activity_state}`；runtime target 可用 `on_lifecycle` 监听 created/resumed/paused/destroyed 等事件。
    - 或手工：`post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`。
 
@@ -44,4 +45,4 @@ cd m5/tracer && ./gradlew.bat :app:assembleDebug
 （仓库在非 ASCII 路径，`gradle.properties` 里已加 `android.overridePathCheck=true`；内置 Rhino JS 引擎，支持脚本动态计算。）
 
 ## 边界与能力
-支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、**pending hook + 动态 ClassLoader Watch**、**Runtime State + Event Bus**、实时篡改和完整 Action Pipeline。State 提供 process/package/hook/thread 四种作用域；不同 Hook 可通过 `${state.process.xxx}` / `condition.path=state.hook.xxx` 共享状态，也可用 `emit_event` 驱动另一个 `kind:"runtime"` 或 Java target 的 `on_event` 动作。Hook-scope 状态会随真正 unhook 清理，同 ID replace 会保留；Event Bus 同步分发并限制递归深度。显式 `class` 目标若当前所有已知 loader 都找不到类会进入 pending，后续动态 loader 出现后自动补装。需 LSPosed 并在管理器里勾选作用域。详见 `JAVA_HOOK_PROTOCOL.md`。
+支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、**pending hook + 动态 ClassLoader Watch**、**Runtime State + Event Bus**、**Lifecycle + Context Runtime**、实时篡改和完整 Action Pipeline。State 提供 process/package/hook/thread 四种作用域；不同 Hook 可通过 `${state.process.xxx}` / `condition.path=state.hook.xxx` 共享状态，也可用 `emit_event` 驱动另一个 target。Lifecycle Runtime 通过 `Application.attach` + `ActivityLifecycleCallbacks` 跟踪 Application/Context/当前 Activity，Activity 只用弱引用保存；可直接使用 `${application}`、`${context}`、`${activity}`、`lifecycle.activity_state`，并用 `on_lifecycle` 响应 resumed/paused/destroyed 等标准事件。显式 `class` 目标若当前所有已知 loader 都找不到类会进入 pending，后续动态 loader 出现后自动补装。需 LSPosed 并在管理器里勾选作用域。详见 `JAVA_HOOK_PROTOCOL.md`。
