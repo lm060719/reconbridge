@@ -108,6 +108,13 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(string_id, method_id)
         );
 
+        CREATE TABLE method_calls (
+            caller_method_id INTEGER NOT NULL,
+            callee_method_id INTEGER NOT NULL,
+            call_count INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(caller_method_id, callee_method_id)
+        );
+
         CREATE INDEX idx_classes_name ON classes(name);
         CREATE INDEX idx_methods_name ON methods(method_name);
         CREATE INDEX idx_methods_class ON methods(class_name);
@@ -116,6 +123,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_strings_value ON strings(value);
         CREATE INDEX idx_xrefs_string ON string_method_xrefs(string_id);
         CREATE INDEX idx_xrefs_method ON string_method_xrefs(method_id);
+        CREATE INDEX idx_calls_caller ON method_calls(caller_method_id);
+        CREATE INDEX idx_calls_callee ON method_calls(callee_method_id);
         """
     )
 
@@ -149,6 +158,7 @@ def build_index(apk_path: str, index_path: str) -> dict[str, Any]:
         "fields": 0,
         "strings": 0,
         "string_method_xrefs": 0,
+        "method_calls": 0,
     }
 
     try:
@@ -163,7 +173,8 @@ def build_index(apk_path: str, index_path: str) -> dict[str, Any]:
                 cur = conn.execute("INSERT OR IGNORE INTO classes(name) VALUES (?)", (name,))
                 counts["classes"] += max(0, cur.rowcount)
 
-            for item in analysis.find_methods(classname=".*", methodname=".*"):
+            method_items = list(analysis.find_methods(classname=".*", methodname=".*"))
+            for item in method_items:
                 row = _method_row(item)
                 cur = conn.execute(
                     """
@@ -173,6 +184,89 @@ def build_index(apk_path: str, index_path: str) -> dict[str, Any]:
                     (row["class"], row["method"], row["descriptor"], row["access"]),
                 )
                 counts["methods"] += max(0, cur.rowcount)
+
+            method_ids = {
+                (str(row[1]), str(row[2]), str(row[3])): int(row[0])
+                for row in conn.execute(
+                    "SELECT id, class_name, method_name, descriptor FROM methods"
+                )
+            }
+
+            # Androguard 的 MethodAnalysis.get_xref_to() 表示“当前方法调用了谁”。
+            # 把调用边一次性持久化，后续 callers/callees 全部直接查 SQLite。
+            for item in method_items:
+                caller = _method_row(item)
+                caller_key = (
+                    caller["class"],
+                    caller["method"],
+                    caller["descriptor"],
+                )
+                caller_id = method_ids.get(caller_key)
+                if caller_id is None or not hasattr(item, "get_xref_to"):
+                    continue
+
+                try:
+                    xrefs = item.get_xref_to()
+                except Exception:
+                    continue
+
+                for xref in xrefs:
+                    if len(xref) < 2:
+                        continue
+                    callee = _method_row(xref[1])
+                    callee_key = (
+                        callee["class"],
+                        callee["method"],
+                        callee["descriptor"],
+                    )
+                    callee_id = method_ids.get(callee_key)
+                    if callee_id is None:
+                        cur = conn.execute(
+                            """
+                            INSERT OR IGNORE INTO methods(
+                                class_name, method_name, descriptor, access
+                            ) VALUES (?, ?, ?, ?)
+                            """,
+                            (
+                                callee["class"],
+                                callee["method"],
+                                callee["descriptor"],
+                                callee["access"],
+                            ),
+                        )
+                        counts["methods"] += max(0, cur.rowcount)
+                        row_id = conn.execute(
+                            """
+                            SELECT id
+                            FROM methods
+                            WHERE class_name = ? AND method_name = ? AND descriptor = ?
+                            """,
+                            callee_key,
+                        ).fetchone()
+                        if not row_id:
+                            continue
+                        callee_id = int(row_id[0])
+                        method_ids[callee_key] = callee_id
+
+                    cur = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO method_calls(
+                            caller_method_id, callee_method_id, call_count
+                        ) VALUES (?, ?, 1)
+                        """,
+                        (caller_id, callee_id),
+                    )
+                    if cur.rowcount:
+                        counts["method_calls"] += 1
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE method_calls
+                            SET call_count = call_count + 1
+                            WHERE caller_method_id = ? AND callee_method_id = ?
+                            """,
+                            (caller_id, callee_id),
+                        )
 
             for item in analysis.find_fields(classname=".*", fieldname=".*"):
                 row = _field_row(item)
