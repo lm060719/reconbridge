@@ -132,6 +132,59 @@ def test_call_graph_scenario_storage_is_session_scoped(tmp_path, monkeypatch):
     assert status["call_scenario_count"] == 1
 
 
+def test_condition_probe_is_stored_inside_call_scenario(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
+
+    pkg = "com.example.target"
+    apk_dir = tmp_path / pkg / "apk"
+    apk_dir.mkdir(parents=True)
+    (apk_dir / "base.apk").write_bytes(b"fake-apk")
+
+    state = investigation.create(pkg)
+    session_id = state["session_id"]
+    investigation.save_call_scenario(
+        session_id,
+        "会员",
+        {
+            "graph_fingerprint": "graph-1",
+            "hook_fingerprint": "hooks-1",
+            "analysis": {"event_count": 3},
+        },
+    )
+
+    saved = investigation.save_condition_probe(
+        session_id,
+        "会员",
+        "probe-1",
+        {
+            "scenario": "会员",
+            "probe_fingerprint": "probe-1",
+            "summary": {
+                "sample_count": 1,
+                "stable": True,
+                "stable_value": {
+                    "type": "boolean",
+                    "value": True,
+                    "canonical": "true",
+                },
+            },
+        },
+    )
+
+    assert saved["probe_count"] == 1
+    loaded = investigation.load_condition_probe(
+        session_id,
+        "会员",
+        "probe-1",
+    )
+    assert loaded is not None
+    assert loaded["summary"]["stable_value"]["value"] is True
+
+    listed = investigation.list_call_scenarios(session_id)
+    assert listed[0]["condition_probe_count"] == 1
+
+
 def test_call_graph_scenario_rejects_unsafe_name(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workdir", tmp_path)
     monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
