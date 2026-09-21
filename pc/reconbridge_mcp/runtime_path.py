@@ -110,12 +110,20 @@ def build_timeline(
     return timeline
 
 
+def _same_thread(source: dict[str, Any], target: dict[str, Any]) -> bool:
+    source_tid = source.get("tid")
+    target_tid = target.get("tid")
+    if source_tid in (None, 0, "") or target_tid in (None, 0, ""):
+        return True
+    return source_tid == target_tid
+
+
 def _adjacent_edge_observed(
     timeline: list[dict[str, Any]],
     source_index: int,
     target_index: int,
 ) -> tuple[bool, float | None]:
-    """判断静态相邻节点是否按顺序命中，并返回最短观测间隔。"""
+    """判断静态相邻节点是否在同一线程按顺序命中，并返回最短入口间隔。"""
     sources = [
         item for item in timeline
         if int(item.get("path_index", -1)) == source_index
@@ -130,6 +138,8 @@ def _adjacent_edge_observed(
     for source in sources:
         source_ts = float(source.get("ts", 0) or 0)
         for target in targets:
+            if not _same_thread(source, target):
+                continue
             target_ts = float(target.get("ts", 0) or 0)
             if target_ts < source_ts:
                 continue
@@ -179,17 +189,30 @@ def analyze_path(
 
     edge_count = max(0, node_count - 1)
 
-    # 检查整条路径是否存在一次严格按静态顺序出现的命中子序列。
-    expected_pos = 0
-    ordered_indexes: list[int] = []
+    # 在每个线程内部检查静态顺序；选择匹配节点最多的线程作为主执行链。
+    grouped: dict[Any, list[dict[str, Any]]] = {}
     for event in timeline:
-        if expected_pos >= len(path_indexes):
-            break
-        if int(event["path_index"]) == path_indexes[expected_pos]:
-            ordered_indexes.append(path_indexes[expected_pos])
-            expected_pos += 1
+        grouped.setdefault(event.get("tid"), []).append(event)
+    if not grouped:
+        grouped[None] = []
 
-    full_path_observed = bool(path_indexes) and expected_pos == len(path_indexes)
+    best_tid: Any = None
+    best_ordered: list[int] = []
+    for tid, thread_events in grouped.items():
+        expected_pos = 0
+        ordered: list[int] = []
+        for event in thread_events:
+            if expected_pos >= len(path_indexes):
+                break
+            if int(event["path_index"]) == path_indexes[expected_pos]:
+                ordered.append(path_indexes[expected_pos])
+                expected_pos += 1
+        if len(ordered) > len(best_ordered):
+            best_tid = tid
+            best_ordered = ordered
+
+    ordered_indexes = best_ordered
+    full_path_observed = bool(path_indexes) and len(ordered_indexes) == len(path_indexes)
 
     compact_timeline: list[dict[str, Any]] = []
     for item in timeline[:200]:
@@ -218,6 +241,7 @@ def analyze_path(
         "ordered_matched_nodes": len(ordered_indexes),
         "ordered_indexes": ordered_indexes,
         "full_path_observed": full_path_observed,
+        "primary_tid": best_tid,
         "edges": edges,
         "timeline": compact_timeline,
     }
