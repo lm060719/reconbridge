@@ -281,6 +281,78 @@ def record_trace(
                 previous = fid
 
 
+def record_method_context(
+    graph: dict[str, Any],
+    class_name: str,
+    method_name: str,
+    descriptor: str,
+    context: dict[str, Any],
+) -> None:
+    """把静态调用关系、字符串、字段与源码位置写入 Evidence Graph。"""
+    mid = method_node(graph, class_name, method_name, descriptor)
+    relations = context.get("relations") or {}
+
+    for caller in relations.get("callers") or []:
+        caller_id = method_node(
+            graph,
+            str(caller.get("class", "")),
+            str(caller.get("method", "")),
+            str(caller.get("descriptor", "")),
+            access=caller.get("access", ""),
+        )
+        add_edge(
+            graph,
+            caller_id,
+            mid,
+            "calls",
+            call_count=int(caller.get("call_count", 0) or 0),
+        )
+
+    for callee in relations.get("callees") or []:
+        callee_id = method_node(
+            graph,
+            str(callee.get("class", "")),
+            str(callee.get("method", "")),
+            str(callee.get("descriptor", "")),
+            access=callee.get("access", ""),
+        )
+        add_edge(
+            graph,
+            mid,
+            callee_id,
+            "calls",
+            call_count=int(callee.get("call_count", 0) or 0),
+        )
+
+    for value in relations.get("strings") or []:
+        sid = string_node(graph, str(value))
+        add_edge(graph, sid, mid, "referenced_by")
+
+    for field in relations.get("class_fields") or []:
+        field_node(
+            graph,
+            str(field.get("class", class_name)),
+            str(field.get("field", "")),
+            str(field.get("type", "")),
+        )
+
+    source = context.get("source") or {}
+    if source.get("available") and source.get("path"):
+        sid = source_node(
+            graph,
+            str(source["path"]),
+            int(source.get("declaration_line", 0) or 0),
+        )
+        add_edge(
+            graph,
+            mid,
+            sid,
+            "source_context",
+            start_line=int(source.get("start_line", 0) or 0),
+            end_line=int(source.get("end_line", 0) or 0),
+        )
+
+
 def summary(graph: dict[str, Any]) -> dict[str, Any]:
     _ensure(graph)
     type_counts: dict[str, int] = {}
