@@ -349,6 +349,108 @@ def test_value_lineage_is_persisted_into_evidence_graph():
     )
 
 
+def test_runtime_value_lineage_records_sequence_and_field_change():
+    graph = evidence.new_graph()
+    path = {
+        "nodes": [
+            {
+                "type": "method",
+                "class_name": "com.example.Repo",
+                "method_name": "isVipEnabled",
+                "descriptor": "()Z",
+            },
+            {
+                "type": "method",
+                "class_name": "com.example.PayManager",
+                "method_name": "loadMemberState",
+                "descriptor": "()V",
+            },
+            {
+                "type": "field",
+                "class_name": "com.example.PayManager",
+                "field_name": "premiumStatus",
+                "field_type": "Z",
+            },
+        ]
+    }
+    analysis = {
+        "observations": [
+            {
+                "path_index": 0,
+                "class": "com.example.Repo",
+                "method": "isVipEnabled",
+                "descriptor": "()Z",
+                "hit_count": 1,
+                "returns": {
+                    "stable": True,
+                    "stable_value": {
+                        "type": "boolean",
+                        "canonical": "true",
+                    },
+                },
+            },
+            {
+                "path_index": 1,
+                "class": "com.example.PayManager",
+                "method": "loadMemberState",
+                "descriptor": "()V",
+                "hit_count": 1,
+                "returns": {
+                    "stable": True,
+                    "stable_value": {
+                        "type": "null",
+                        "canonical": "null",
+                    },
+                },
+            },
+        ],
+        "timeline": [
+            {
+                "path_index": 0,
+                "label": "Repo.isVipEnabled",
+                "tid": 7,
+                "delta_ms": None,
+            },
+            {
+                "path_index": 1,
+                "label": "PayManager.loadMemberState",
+                "tid": 7,
+                "delta_ms": 20.0,
+            },
+        ],
+        "terminal_field": {
+            "class": "com.example.PayManager",
+            "field": "premiumStatus",
+            "type": "Z",
+        },
+        "writer_change": {
+            "changed": True,
+            "changed_calls": 1,
+            "distinct_changes": [
+                {
+                    "before": {"canonical": "false"},
+                    "after": {"canonical": "true"},
+                }
+            ],
+        },
+    }
+
+    evidence.record_runtime_lineage(graph, path, analysis)
+
+    relations = {edge["relation"] for edge in graph["edges"]}
+    assert "runtime_value_sequence" in relations
+    assert "runtime_writes_field" in relations
+
+    methods = [
+        node for node in graph["nodes"].values()
+        if node.get("type") == "method"
+    ]
+    assert any(
+        node.get("runtime_return_preview") == "true"
+        for node in methods
+    )
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
