@@ -45,7 +45,8 @@ hiddenimports += ["reconbridge_mcp", "reconbridge_mcp.server",
                   "reconbridge_mcp.register", "reconbridge_mcp.webconsole",
                   "reconbridge_mcp.client", "reconbridge_mcp.external",
                   "reconbridge_mcp.settings", "reconbridge_mcp.resource",
-                  "reconbridge_mcp.dex_worker", "reconbridge_mcp.investigation"]
+                  "reconbridge_mcp.dex_worker", "reconbridge_mcp.dex_index",
+                  "reconbridge_mcp.investigation"]
 
 # 打进 PC 控制台单页 HTML（webconsole.py 用 importlib.resources 读包内 webconsole.html）
 datas += collect_data_files("reconbridge_mcp", includes=["*.html"])
