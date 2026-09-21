@@ -1,0 +1,374 @@
+"""分析会话 Evidence Graph。
+
+把静态搜索、字符串 xref、源码命中和运行时 trace 自动沉淀为轻量证据图。
+图保存在 investigation 会话 JSON 中，不依赖额外数据库。
+"""
+from __future__ import annotations
+
+import hashlib
+from collections import deque
+from typing import Any
+
+MAX_NODES = 1500
+MAX_EDGES = 5000
+
+
+def new_graph() -> dict[str, Any]:
+    return {"nodes": {}, "edges": []}
+
+
+def _hash(value: str) -> str:
+    return hashlib.sha1(value.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _ensure(graph: dict[str, Any]) -> dict[str, Any]:
+    graph.setdefault("nodes", {})
+    graph.setdefault("edges", [])
+    return graph
+
+
+def add_node(
+    graph: dict[str, Any],
+    node_id: str,
+    node_type: str,
+    label: str,
+    **attrs: Any,
+) -> str:
+    _ensure(graph)
+    nodes = graph["nodes"]
+    node = nodes.get(node_id)
+    if node is None:
+        if len(nodes) >= MAX_NODES:
+            return node_id
+        node = {"id": node_id, "type": node_type, "label": label}
+        nodes[node_id] = node
+    for key, value in attrs.items():
+        if value not in (None, "", [], {}):
+            node[key] = value
+    return node_id
+
+
+def add_edge(
+    graph: dict[str, Any],
+    source: str,
+    target: str,
+    relation: str,
+    **attrs: Any,
+) -> None:
+    _ensure(graph)
+    edges = graph["edges"]
+    key = (source, target, relation)
+    for edge in edges:
+        if (edge.get("source"), edge.get("target"), edge.get("relation")) == key:
+            for name, value in attrs.items():
+                if value not in (None, "", [], {}):
+                    edge[name] = value
+            return
+    if len(edges) >= MAX_EDGES:
+        return
+    edge = {"source": source, "target": target, "relation": relation}
+    for name, value in attrs.items():
+        if value not in (None, "", [], {}):
+            edge[name] = value
+    edges.append(edge)
+
+
+def query_node(graph: dict[str, Any], query: str, strategy: str = "") -> str:
+    return add_node(
+        graph,
+        f"query:{_hash(query)}",
+        "query",
+        query,
+        strategy=strategy,
+    )
+
+
+def string_node(graph: dict[str, Any], value: str) -> str:
+    return add_node(graph, f"string:{_hash(value)}", "string", value[:500], value=value[:2000])
+
+
+def class_node(graph: dict[str, Any], class_name: str) -> str:
+    return add_node(graph, f"class:{class_name}", "class", class_name)
+
+
+def method_node(
+    graph: dict[str, Any],
+    class_name: str,
+    method_name: str,
+    descriptor: str = "",
+    **attrs: Any,
+) -> str:
+    suffix = descriptor or ""
+    label = f"{class_name}.{method_name}{suffix}"
+    return add_node(
+        graph,
+        f"method:{class_name}#{method_name}{suffix}",
+        "method",
+        label,
+        class_name=class_name,
+        method_name=method_name,
+        descriptor=descriptor,
+        **attrs,
+    )
+
+
+def field_node(
+    graph: dict[str, Any],
+    class_name: str,
+    field_name: str,
+    field_type: str = "",
+) -> str:
+    return add_node(
+        graph,
+        f"field:{class_name}#{field_name}",
+        "field",
+        f"{class_name}.{field_name}",
+        class_name=class_name,
+        field_name=field_name,
+        field_type=field_type,
+    )
+
+
+def source_node(graph: dict[str, Any], path: str, line: int) -> str:
+    return add_node(
+        graph,
+        f"source:{_hash(path)}:{line}",
+        "source",
+        f"{path}:{line}",
+        path=path,
+        line=line,
+    )
+
+
+def record_search(
+    graph: dict[str, Any],
+    query: str,
+    strategy: str,
+    results: list[dict[str, Any]],
+) -> None:
+    qid = query_node(graph, query, strategy)
+    for result in results:
+        if "method" in result:
+            class_name = str(result.get("class", ""))
+            method_name = str(result.get("method", ""))
+            descriptor = str(result.get("descriptor", ""))
+            mid = method_node(
+                graph,
+                class_name,
+                method_name,
+                descriptor,
+                access=result.get("access", ""),
+            )
+            add_edge(graph, qid, mid, "matched")
+
+            matched_string = result.get("matched_string")
+            if matched_string:
+                sid = string_node(graph, str(matched_string))
+                add_edge(graph, qid, sid, "searched_for")
+                add_edge(graph, sid, mid, "referenced_by")
+
+        elif "field" in result:
+            fid = field_node(
+                graph,
+                str(result.get("class", "")),
+                str(result.get("field", "")),
+                str(result.get("type", "")),
+            )
+            add_edge(graph, qid, fid, "matched")
+
+        elif "class" in result:
+            cid = class_node(graph, str(result.get("class", "")))
+            add_edge(graph, qid, cid, "matched")
+
+        elif "string" in result:
+            sid = string_node(graph, str(result.get("string", "")))
+            add_edge(graph, qid, sid, "matched")
+
+        elif "path" in result:
+            src = source_node(
+                graph,
+                str(result.get("path", "")),
+                int(result.get("line", 0) or 0),
+            )
+            add_edge(graph, qid, src, "source_hit", snippet=str(result.get("text", ""))[:500])
+
+
+def record_trace(
+    graph: dict[str, Any],
+    class_name: str,
+    method_name: str,
+    events: list[dict[str, Any]],
+) -> None:
+    mid = method_node(
+        graph,
+        class_name,
+        method_name,
+        runtime_hits=len(events),
+        runtime_confirmed=bool(events),
+    )
+    runtime_id = add_node(
+        graph,
+        f"runtime:{_hash(class_name + '#' + method_name)}",
+        "runtime",
+        f"运行时命中 {class_name}.{method_name}",
+        hits=len(events),
+    )
+    add_edge(graph, mid, runtime_id, "runtime_observed", hits=len(events))
+
+    for event in events[:100]:
+        event_class = str(event.get("class") or class_name)
+        event_method = str(event.get("method") or method_name)
+        event_mid = method_node(graph, event_class, event_method, runtime_confirmed=True)
+        add_edge(graph, mid, event_mid, "runtime_event")
+
+        for path in event.get("paths") or []:
+            path_name = str(path.get("path", ""))
+            if not path_name:
+                continue
+            pid = add_node(
+                graph,
+                f"path:{event_mid}:{_hash(path_name)}",
+                "path",
+                path_name,
+                value=str(path.get("value", ""))[:1000],
+                unresolved=bool(path.get("unresolved")),
+            )
+            add_edge(graph, event_mid, pid, "observed_path")
+
+        for field in event.get("fields") or []:
+            field_name = str(field.get("name", ""))
+            if not field_name:
+                continue
+            fid = field_node(graph, event_class, field_name)
+            add_edge(
+                graph,
+                event_mid,
+                fid,
+                "observed_field",
+                value=str(field.get("value", ""))[:1000],
+            )
+
+        stack = event.get("stack") or []
+        previous = event_mid
+        if isinstance(stack, list):
+            for frame in stack[:12]:
+                label = str(frame)
+                if not label:
+                    continue
+                fid = add_node(
+                    graph,
+                    f"frame:{_hash(label)}",
+                    "stack_frame",
+                    label[:500],
+                )
+                add_edge(graph, previous, fid, "called_from")
+                previous = fid
+
+
+def summary(graph: dict[str, Any]) -> dict[str, Any]:
+    _ensure(graph)
+    type_counts: dict[str, int] = {}
+    relation_counts: dict[str, int] = {}
+    for node in graph["nodes"].values():
+        node_type = str(node.get("type", "unknown"))
+        type_counts[node_type] = type_counts.get(node_type, 0) + 1
+    for edge in graph["edges"]:
+        relation = str(edge.get("relation", "unknown"))
+        relation_counts[relation] = relation_counts.get(relation, 0) + 1
+    return {
+        "node_count": len(graph["nodes"]),
+        "edge_count": len(graph["edges"]),
+        "node_types": type_counts,
+        "relations": relation_counts,
+    }
+
+
+def subgraph(
+    graph: dict[str, Any],
+    focus: str = "",
+    depth: int = 2,
+    limit: int = 100,
+) -> dict[str, Any]:
+    _ensure(graph)
+    depth = max(0, min(int(depth), 5))
+    limit = max(1, min(int(limit), 300))
+    nodes = graph["nodes"]
+    edges = graph["edges"]
+
+    if not focus:
+        selected_ids = list(nodes.keys())[:limit]
+    else:
+        needle = focus.casefold()
+        seeds = [
+            node_id
+            for node_id, node in nodes.items()
+            if needle in str(node.get("label", "")).casefold()
+            or needle in node_id.casefold()
+        ][:20]
+        selected: set[str] = set(seeds)
+        queue = deque((node_id, 0) for node_id in seeds)
+        adjacency: dict[str, list[str]] = {}
+        for edge in edges:
+            adjacency.setdefault(str(edge["source"]), []).append(str(edge["target"]))
+            adjacency.setdefault(str(edge["target"]), []).append(str(edge["source"]))
+
+        while queue and len(selected) < limit:
+            current, level = queue.popleft()
+            if level >= depth:
+                continue
+            for neighbor in adjacency.get(current, []):
+                if neighbor in selected:
+                    continue
+                selected.add(neighbor)
+                queue.append((neighbor, level + 1))
+                if len(selected) >= limit:
+                    break
+        selected_ids = list(selected)
+
+    selected_set = set(selected_ids)
+    out_nodes = [nodes[node_id] for node_id in selected_ids if node_id in nodes]
+    out_edges = [
+        edge
+        for edge in edges
+        if edge.get("source") in selected_set and edge.get("target") in selected_set
+    ][: limit * 3]
+
+    return {
+        **summary(graph),
+        "focus": focus,
+        "depth": depth,
+        "nodes": out_nodes,
+        "edges": out_edges,
+    }
+
+
+def explain(graph: dict[str, Any], focus: str, depth: int = 3, limit: int = 80) -> dict[str, Any]:
+    data = subgraph(graph, focus=focus, depth=depth, limit=limit)
+    nodes = data["nodes"]
+    edges = data["edges"]
+    runtime_methods = [
+        node["label"]
+        for node in nodes
+        if node.get("type") == "method" and node.get("runtime_confirmed")
+    ]
+    strings = [node["label"] for node in nodes if node.get("type") == "string"]
+    fields = [node["label"] for node in nodes if node.get("type") == "field"]
+    methods = [node["label"] for node in nodes if node.get("type") == "method"]
+
+    evidence: list[str] = []
+    if strings:
+        evidence.append(f"关联字符串: {', '.join(strings[:8])}")
+    if methods:
+        evidence.append(f"关联方法: {', '.join(methods[:8])}")
+    if fields:
+        evidence.append(f"关联字段: {', '.join(fields[:8])}")
+    if runtime_methods:
+        evidence.append(f"已运行时验证: {', '.join(runtime_methods[:8])}")
+
+    return {
+        "focus": focus,
+        "summary": "；".join(evidence) if evidence else "当前证据图中没有找到相关节点",
+        "runtime_confirmed": runtime_methods,
+        "nodes": nodes,
+        "edges": edges,
+    }
