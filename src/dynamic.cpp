@@ -1610,10 +1610,22 @@ static void handle_hook(const Request& req, Response& res) {
         }
     }
 
-    // 落盘
-    ::mkdir(g_hooks_dir.c_str(), 0755);
+    // 手工 Hook 与 Runtime Program 共用最终 materialized 配置。
+    // 普通 /hook 只负责手工 targets；已启用 Program targets 始终由 Program manager 重建。
+    {
+        std::lock_guard<std::mutex> lk(g_program_mutex);
+        to_write = compose_hook_config_with_runtime_programs(
+            pkg,
+            to_write);
+        ::mkdir(g_hooks_dir.c_str(), 0755);
+        if (!write_json_atomic(
+                hook_path(pkg),
+                to_write)) {
+            reply(res, 500, {{"error", "写入 hook 配置失败"}});
+            return;
+        }
+    }
     std::string written = to_write.dump(2);
-    { std::ofstream f(hook_path(pkg), std::ios::trunc); f << written; }
 
     std::string note;
     int hot = 0;
@@ -1675,32 +1687,74 @@ static void handle_unhook(const Request& req, Response& res) {
 
         config_existed = true;
         json kept = json::array();
-        for (auto& t : cfg.value("targets", json::array()))
-            if (t.value("id", "") != removed_id) kept.push_back(t);
+        for (auto& t : cfg.value("targets", json::array())) {
+            if (!t.is_object()) continue;
+            if (t.value("id", "") == removed_id &&
+                t.contains("__reconbridge_program")) {
+                reply(res, 409, {
+                    {"error", "该 target 属于 Runtime Program；请使用 runtime_program_disable/replace"},
+                    {"program_id", t.value("__reconbridge_program", "")},
+                    {"target_id", removed_id}
+                });
+                return;
+            }
+            if (t.value("id", "") != removed_id)
+                kept.push_back(t);
+        }
 
         desired = cfg;
         desired["package"] = pkg;
         desired["restart"] = false;
         desired["targets"] = kept;
-
-        if (kept.empty()) {
-            ::remove(p.c_str());
-        } else {
-            std::ofstream out(p, std::ios::trunc);
-            out << desired.dump(2);
-        }
     } else {
-        config_existed = (::remove(p.c_str()) == 0);
+        std::ifstream in(p);
+        if (in.good()) {
+            config_existed = true;
+            try {
+                json cfg;
+                in >> cfg;
+                desired = cfg;
+            } catch (...) {
+                desired = {
+                    {"package", pkg},
+                    {"restart", false},
+                    {"targets", json::array()}
+                };
+            }
+        }
+
+        // 清空所有手工 target；Program target 会在 compose 阶段重新加入。
+        desired["package"] = pkg;
+        desired["restart"] = false;
+        desired["targets"] = json::array();
     }
 
-    // 即使磁盘配置已被删除，也向仍连接的 tracer 下发 targets:[]，
-    // 让 HookRegistry 立即调用 XC_MethodHook.Unhook.unhook()。
+    {
+        std::lock_guard<std::mutex> lk(g_program_mutex);
+        desired = compose_hook_config_with_runtime_programs(
+            pkg,
+            desired);
+        const bool has_program_records =
+            !load_runtime_program_records(pkg).empty();
+        const bool has_targets =
+            !desired.value("targets", json::array()).empty();
+
+        if (!has_program_records && !has_targets) {
+            ::remove(p.c_str());
+        } else if (!write_json_atomic(p, desired)) {
+            reply(res, 500, {{"error", "写入 unhook 后配置失败"}});
+            return;
+        }
+    }
+
+    // 手工 Hook 被移除后，仍向在线 Tracer 下发包含 Program targets 的完整期望状态。
     int hot = hot_reload(pkg, desired.dump());
     std::string note;
     if (hot > 0)
-        note = "配置已移除，并已向 " + std::to_string(hot) + " 个运行中进程执行 live unhook";
+        note = "手工 Hook 已移除，并已向 " + std::to_string(hot) +
+               " 个运行中进程同步；已启用 Runtime Program 保持生效";
     else
-        note = "配置已移除；当前无运行中的 live reconcile 进程";
+        note = "手工 Hook 已移除；Runtime Program 记录保持不变";
 
     json result = {
         {"ok", true},
