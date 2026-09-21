@@ -146,6 +146,21 @@ def set_event_cursor(session_id: str, cursor: int) -> None:
     save(state)
 
 
+def add_temporary_hook(session_id: str, hook_id: str) -> None:
+    state = load(session_id)
+    hooks = state.setdefault("temporary_hooks", [])
+    if hook_id not in hooks:
+        hooks.append(hook_id)
+    save(state)
+
+
+def remove_temporary_hook(session_id: str, hook_id: str) -> None:
+    state = load(session_id)
+    hooks = state.setdefault("temporary_hooks", [])
+    state["temporary_hooks"] = [item for item in hooks if item != hook_id]
+    save(state)
+
+
 def add_discovery(session_id: str, discovery: dict[str, Any]) -> None:
     state = load(session_id)
     items = state.setdefault("discoveries", [])
