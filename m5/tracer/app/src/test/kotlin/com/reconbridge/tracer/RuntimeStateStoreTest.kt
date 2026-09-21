@@ -67,6 +67,37 @@ class RuntimeStateStoreTest
     }
 
     @Test
+    fun concurrentIncrementDoesNotLoseUpdates()
+    {
+        val store = RuntimeStateStore(
+            packageName = "com.example",
+        )
+        val threads = (0 until 8).map {
+            Thread {
+                repeat(200) {
+                    store.increment(
+                        "process",
+                        "hits",
+                        1.0,
+                    )
+                }
+            }
+        }
+
+        for (thread in threads) {
+            thread.start()
+        }
+        for (thread in threads) {
+            thread.join()
+        }
+
+        assertEquals(
+            1600L,
+            store.get("process", "hits"),
+        )
+    }
+
+    @Test
     fun statePathReadWriteUsesCurrentHookScope()
     {
         val store = RuntimeStateStore(
