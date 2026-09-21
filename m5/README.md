@@ -37,6 +37,7 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
    - 跨 Hook 状态/事件：在 action 中使用 `set_state/get_state/increment_state/append_state/emit_event`；另一个 Java Hook 或 `kind:"runtime"` target 可通过 `state.* / event.*` 条件与模板响应。
    - Lifecycle/Context：模板、condition、Action target 和 Rhino JS 可直接引用 `${application}` / `${context}` / `${activity}` / `lifecycle.*`（JS 对应 `$application/$context/$activity/$lifecycle`）；`kind:"runtime"` target 可用 `on_lifecycle` 监听 created/resumed/paused/destroyed 等事件并按 Activity 类过滤。
    - Runtime Command：Tracer 在线后可直接用 `runtime_state_get/set/remove/increment/append/clear`、`runtime_event_emit`、`runtime_context_status`、`runtime_activity_action`，无需为了远程交互创建临时 Hook。
+   - Runtime Program：用 `runtime_program_install/replace/enable/disable/rollback/status` 把一组 Hook + State 初始化 + Event/Lifecycle handler 作为命名模块持久化管理；局部 target id 自动命名空间化。
    - 或手工：`post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`。
 
 ## 构建
@@ -46,4 +47,4 @@ cd m5/tracer && ./gradlew.bat :app:assembleDebug
 （仓库在非 ASCII 路径，`gradle.properties` 里已加 `android.overridePathCheck=true`；内置 Rhino JS 引擎，支持脚本动态计算。）
 
 ## 边界与能力
-支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、**pending hook + 动态 ClassLoader Watch**、**Runtime State + Event Bus**、**Lifecycle + Context Runtime**、**Runtime Command Dispatcher**、实时篡改和完整 Action Pipeline。State 提供 process/package/hook/thread 四种作用域；不同 Hook 可通过 `${state.process.xxx}` / `condition.path=state.hook.xxx` 共享状态，也可用 `emit_event` 驱动另一个 target。Lifecycle Runtime 通过 `Application.attach` + `ActivityLifecycleCallbacks` 跟踪 Application/Context/当前 Activity，Activity 只用弱引用保存；可直接使用 `${application}`、`${context}`、`${activity}`、`lifecycle.activity_state`，并用 `on_lifecycle` 响应 resumed/paused/destroyed 等标准事件。显式 `class` 目标若当前所有已知 loader 都找不到类会进入 pending，后续动态 loader 出现后自动补装。需 LSPosed 并在管理器里勾选作用域。详见 `JAVA_HOOK_PROTOCOL.md`。
+支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、**pending hook + 动态 ClassLoader Watch**、**Runtime State + Event Bus**、**Lifecycle + Context Runtime**、**Runtime Command Dispatcher**、**Runtime Program / Module Manifest**、实时篡改和完整 Action Pipeline。State 提供 process/package/hook/thread 四种作用域；不同 Hook 可通过 `${state.process.xxx}` / `condition.path=state.hook.xxx` 共享状态，也可用 `emit_event` 驱动另一个 target。Lifecycle Runtime 通过 `Application.attach` + `ActivityLifecycleCallbacks` 跟踪 Application/Context/当前 Activity，Activity 只用弱引用保存；可直接使用 `${application}`、`${context}`、`${activity}`、`lifecycle.activity_state`，并用 `on_lifecycle` 响应 resumed/paused/destroyed 等标准事件。显式 `class` 目标若当前所有已知 loader 都找不到类会进入 pending，后续动态 loader 出现后自动补装。需 LSPosed 并在管理器里勾选作用域。详见 `JAVA_HOOK_PROTOCOL.md`。
