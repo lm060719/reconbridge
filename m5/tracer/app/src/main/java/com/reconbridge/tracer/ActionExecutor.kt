@@ -1171,12 +1171,7 @@ internal object ActionExecutor {
 
         return when (value) {
             is JSONObject -> {
-                if (
-                    value.has("path") ||
-                    value.has("var") ||
-                    value.has("value") ||
-                    value.has("type")
-                ) {
+                if (isValueDescriptor(value)) {
                     resolveValue(ctx, value)
                 } else {
                     val out = LinkedHashMap<String, Any?>()
@@ -1207,6 +1202,25 @@ internal object ActionExecutor {
 
             else -> resolveValueItem(ctx, value)
         }
+    }
+
+    private fun isValueDescriptor(value: JSONObject): Boolean
+    {
+        if (value.has("path") || value.has("var")) {
+            return true
+        }
+        if (!value.has("value")) {
+            return false
+        }
+
+        val allowed = setOf("value", "type")
+        val iterator = value.keys()
+        while (iterator.hasNext()) {
+            if (!allowed.contains(iterator.next())) {
+                return false
+            }
+        }
+        return true
     }
 
     private fun interpolateTemplateString(ctx: ActionContext, str: String): String {
