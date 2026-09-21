@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, runtime_path, scenario_path, writer_probe
+from . import branch_condition, candidate, condition_probe, external, investigation, pipeline, runtime_lineage, runtime_path, scenario_path, writer_probe
 
 mcp = FastMCP("reconbridge")
 
@@ -2308,6 +2308,483 @@ def inspect_value_lineage(
         "session_id": session_id,
         "package": state["package"],
         "error": f"暂不支持 Value Lineage 的 origin_kind: {origin_kind}",
+    }
+
+
+def _capture_runtime_value_lineage(
+    session_id: str,
+    state: dict[str, Any],
+    scenario_name: str,
+    path: dict[str, Any],
+    seconds: float = 20.0,
+    quiet_ms: int = 1500,
+    max_events: int = 600,
+    max_hooks: int = 16,
+    include_external: bool = False,
+    return_render: str = "tostring",
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+) -> dict[str, Any]:
+    methods = runtime_lineage.path_methods(
+        path,
+        max_hooks=max_hooks,
+        include_external=include_external,
+    )
+    if not methods:
+        return {
+            "ok": False,
+            "error": "所选 Value Lineage 路径中没有可运行时验证的方法",
+        }
+
+    render = return_render if return_render in {"tostring", "class", "json", "deep"} else "tostring"
+    field = runtime_lineage.terminal_field(path)
+    writer = methods[-1] if methods else None
+    can_capture_field = bool(
+        field
+        and writer
+        and str(field.get("class", "")) == str(writer.get("class", ""))
+        and field.get("field")
+    )
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    targets: list[dict[str, Any]] = []
+    hook_ids: list[str] = []
+    hook_map: dict[str, dict[str, Any]] = {}
+
+    for index, method in enumerate(methods, 1):
+        safe_class = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            method["class"].rsplit(".", 1)[-1],
+        )[:18] or "class"
+        safe_method = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            method["method"],
+        )[:22] or "method"
+        hook_id = (
+            f"rbvl_{session_id}_{index}_{safe_class}_{safe_method}"
+        )
+        hook_ids.append(hook_id)
+        hook_map[hook_id] = method
+        investigation.add_temporary_hook(session_id, hook_id)
+
+        is_writer = bool(
+            can_capture_field
+            and int(method["path_index"]) == int(writer["path_index"])
+        )
+        capture: dict[str, Any] = {
+            "this": "class",
+            "when": "both" if is_writer else "after",
+            "all_args": False,
+            "ret": {
+                "capture": True,
+                "render": render,
+                "max": 4096,
+            },
+            "stack": False,
+        }
+        if is_writer:
+            capture["fields"] = [
+                {
+                    "target": "this",
+                    "name": str(field.get("field", "")),
+                    "render": "tostring",
+                }
+            ]
+
+        targets.append(
+            {
+                "kind": "java",
+                "id": hook_id,
+                "class": method["class"],
+                "method": method["method"],
+                "capture": capture,
+            }
+        )
+
+    config: dict[str, Any] = {
+        "package": state["package"],
+        "restart": bool(restart and not hot),
+        "debug": False,
+        "targets": targets,
+    }
+    if hot:
+        config["restart"] = False
+        config["mode"] = "append"
+
+    posted: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    collect_error = ""
+
+    try:
+        posted = client.post_json("/hook", config)
+        events = client.collect_sse(
+            seconds=max(0.5, float(seconds)),
+            max_events=max(1, min(int(max_events), 2500)),
+            fold_stack=True,
+            include_recent=True,
+            since_seq=cursor,
+            quiet_ms=max(0, int(quiet_ms)),
+        )
+    except Exception as exc:
+        collect_error = str(exc)
+    finally:
+        if cleanup:
+            for hook_id in hook_ids:
+                try:
+                    unhook(state["package"], hook_id)
+                except Exception:
+                    pass
+                finally:
+                    investigation.remove_temporary_hook(session_id, hook_id)
+
+    try:
+        latest = int(
+            client.get_recent(limit=0).get("latest_seq", cursor)
+            or cursor
+        )
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    analysis = runtime_lineage.analyze_capture(
+        path,
+        events,
+        hook_map,
+    )
+
+    for hook_id, meta in hook_map.items():
+        matched = [
+            event
+            for event in events
+            if (
+                str(event.get("hook_id", "")) == hook_id
+                or (
+                    candidate.normalize_class_name(
+                        str(event.get("class", ""))
+                    ) == meta["class"]
+                    and str(event.get("method", "")) == meta["method"]
+                )
+            )
+        ]
+        if matched:
+            investigation.record_trace_evidence(
+                session_id,
+                meta["class"],
+                meta["method"],
+                matched,
+            )
+
+    investigation.record_runtime_lineage_evidence(
+        session_id,
+        path,
+        analysis,
+    )
+
+    lineage_key = runtime_lineage.path_fingerprint(path)
+    capture = {
+        "scenario": scenario_name,
+        "captured_at": int(time.time() * 1000),
+        "lineage_fingerprint": lineage_key,
+        "path_text": path.get("text", ""),
+        "path": {
+            "length": path.get("length", 0),
+            "nodes": path.get("nodes", []),
+            "relations": path.get("relations", []),
+        },
+        "hooked_methods": methods,
+        "analysis": analysis,
+    }
+    saved = investigation.save_runtime_lineage_capture(
+        session_id,
+        scenario_name,
+        lineage_key,
+        capture,
+    )
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "runtime_value_lineage",
+            "scenario": scenario_name,
+            "lineage_fingerprint": lineage_key,
+            "methods": analysis.get("method_count", 0),
+            "method_coverage": analysis.get("method_coverage", 0),
+            "ordered_coverage": analysis.get("ordered_coverage", 0),
+            "full_sequence": analysis.get(
+                "full_method_sequence_observed",
+                False,
+            ),
+            "writer_changed": bool(
+                (analysis.get("writer_change") or {}).get("changed")
+            ),
+        },
+    )
+
+    return {
+        "ok": not bool(collect_error),
+        "scenario": scenario_name,
+        "lineage_fingerprint": lineage_key,
+        "analysis": analysis,
+        "hooked_methods": methods,
+        "saved": saved,
+        "posted": posted,
+        "events": events[:300],
+        "event_cursor": latest,
+        "cleanup": cleanup,
+        "error": collect_error or None,
+    }
+
+
+@mcp.tool()
+def verify_value_lineage(
+    session_id: str,
+    a: str,
+    b: str,
+    capture_for: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_rank: int = 1,
+    path_index: int = 0,
+    max_depth: int = 4,
+    max_nodes: int = 60,
+    seconds: float = 20.0,
+    quiet_ms: int = 1500,
+    max_events: int = 600,
+    max_hooks: int = 16,
+    include_external: bool = False,
+    return_render: str = "tostring",
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+    include_events: bool = False,
+) -> dict:
+    """一次性动态验证一条 Value Lineage 的方法返回顺序与最终字段变化。
+
+    capture_for 必须等于 a 或 b。默认对路径中的应用方法抓 after 返回值；
+    若路径以同类实例字段结束，则最后 writer 同时抓 before/after 字段值。
+    """
+    if capture_for not in {a, b}:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "error": "capture_for 必须等于场景 a 或 b",
+        }
+
+    lineage_result = inspect_value_lineage(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_rank=writer_rank,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+    )
+    if not lineage_result.get("ok"):
+        return lineage_result
+
+    lineage = lineage_result.get("lineage") or {}
+    paths = lineage.get("origin_paths") or []
+    if not paths:
+        return {
+            **lineage_result,
+            "ok": False,
+            "error": "当前 Value Lineage 没有形成可验证的 origin_path",
+            "next_action": "先处理 ambiguities/unresolved_calls，再重新生成 Lineage",
+        }
+
+    path_index = max(0, min(int(path_index), len(paths) - 1))
+    selected_path = paths[path_index]
+    state = investigation.load(session_id, refresh=True)
+
+    result = _capture_runtime_value_lineage(
+        session_id,
+        state,
+        capture_for,
+        selected_path,
+        seconds=seconds,
+        quiet_ms=quiet_ms,
+        max_events=max_events,
+        max_hooks=max_hooks,
+        include_external=include_external,
+        return_render=return_render,
+        restart=restart,
+        hot=hot,
+        cleanup=cleanup,
+    )
+    result.update(
+        {
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "capture_for": capture_for,
+            "selected_path_index": path_index,
+            "selected_path": selected_path,
+            "condition": lineage_result.get("condition"),
+            "probe": lineage_result.get("probe"),
+        }
+    )
+
+    key = result.get("lineage_fingerprint", "")
+    if result.get("ok") and key:
+        other_name = b if capture_for == a else a
+        other = investigation.load_runtime_lineage_capture(
+            session_id,
+            other_name,
+            key,
+        )
+        current = investigation.load_runtime_lineage_capture(
+            session_id,
+            capture_for,
+            key,
+        )
+        if other and current:
+            capture_a = current if capture_for == a else other
+            capture_b = current if capture_for == b else other
+            result["comparison"] = runtime_lineage.compare_captures(
+                capture_a,
+                capture_b,
+            )
+
+    if not include_events:
+        result.pop("events", None)
+    return result
+
+
+@mcp.tool()
+def compare_value_lineage_runtime(
+    session_id: str,
+    a: str,
+    b: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_rank: int = 1,
+    path_index: int = 0,
+    max_depth: int = 4,
+    max_nodes: int = 60,
+) -> dict:
+    """比较已采集的 A/B Runtime Value Lineage，找最早稳定值差异。"""
+    lineage_result = inspect_value_lineage(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_rank=writer_rank,
+        max_depth=max_depth,
+        max_nodes=max_nodes,
+    )
+    if not lineage_result.get("ok"):
+        return lineage_result
+
+    paths = (lineage_result.get("lineage") or {}).get(
+        "origin_paths",
+        [],
+    )
+    if not paths:
+        return {
+            **lineage_result,
+            "ok": False,
+            "error": "当前 Value Lineage 没有 origin_path",
+        }
+
+    path_index = max(0, min(int(path_index), len(paths) - 1))
+    selected_path = paths[path_index]
+    key = runtime_lineage.path_fingerprint(selected_path)
+
+    capture_a = investigation.load_runtime_lineage_capture(
+        session_id,
+        a,
+        key,
+    )
+    capture_b = investigation.load_runtime_lineage_capture(
+        session_id,
+        b,
+        key,
+    )
+    missing = [
+        name
+        for name, capture in ((a, capture_a), (b, capture_b))
+        if capture is None
+    ]
+    if missing:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": lineage_result.get("package"),
+            "a": a,
+            "b": b,
+            "lineage_fingerprint": key,
+            "selected_path_index": path_index,
+            "selected_path": selected_path,
+            "missing": missing,
+            "error": "尚未完成两侧同一 Runtime Value Lineage 采集",
+            "next_action": (
+                "分别调用 verify_value_lineage，capture_for="
+                + " / ".join(missing)
+            ),
+        }
+
+    comparison = runtime_lineage.compare_captures(
+        capture_a,
+        capture_b,
+    )
+    first = comparison.get("first_stable_value_difference")
+
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "runtime_value_lineage_comparison",
+            "a": a,
+            "b": b,
+            "lineage_fingerprint": key,
+            "first_difference": (
+                first.get("label", "")
+                if isinstance(first, dict)
+                else ""
+            ),
+            "a_full_sequence": comparison.get(
+                "a_full_sequence",
+                False,
+            ),
+            "b_full_sequence": comparison.get(
+                "b_full_sequence",
+                False,
+            ),
+        },
+    )
+
+    if first:
+        next_action = (
+            "已找到 A/B 最早稳定返回值差异；优先 inspect_method/trace_target 检查该方法的入参、"
+            "上游对象字段和返回构造逻辑"
+        )
+    elif comparison.get("a_full_sequence") and comparison.get(
+        "b_full_sequence"
+    ):
+        next_action = (
+            "两侧链路都完整命中但未找到稳定返回值差异；可将 return_render 改为 deep，"
+            "或对关键对象使用 paths 抓内部字段"
+        )
+    else:
+        next_action = (
+            "至少一侧链路覆盖不完整；确认触发行为或扩大 seconds/max_events 后重新采集"
+        )
+
+    return {
+        **comparison,
+        "session_id": session_id,
+        "package": lineage_result.get("package"),
+        "selected_path_index": path_index,
+        "selected_path": selected_path,
+        "next_action": next_action,
     }
 
 
