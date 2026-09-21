@@ -38,6 +38,12 @@ binaries += collect_dynamic_libs("androguard")
 # PyInstaller 默认不带 dist-info，缺了会 PackageNotFoundError → 报成 androguard 缺失。
 datas += copy_metadata("androguard")
 
+# cryptography：Runtime Program Package 使用 Ed25519；显式收集保证 Windows onedir
+# 带上 Rust/OpenSSL 后端动态库与 metadata。
+hiddenimports += collect_submodules("cryptography")
+binaries += collect_dynamic_libs("cryptography")
+datas += copy_metadata("cryptography")
+
 # httpx / anyio：MCP stdio 传输与 HTTP client 走它们；子模块补全避免漏收
 hiddenimports += collect_submodules("httpx")
 hiddenimports += collect_submodules("anyio")
