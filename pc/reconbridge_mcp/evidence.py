@@ -100,7 +100,7 @@ def method_node(
 ) -> str:
     suffix = descriptor or ""
     label = f"{class_name}.{method_name}{suffix}"
-    return add_node(
+    node_id = add_node(
         graph,
         f"method:{class_name}#{method_name}{suffix}",
         "method",
@@ -110,6 +110,10 @@ def method_node(
         descriptor=descriptor,
         **attrs,
     )
+    if class_name:
+        cid = class_node(graph, class_name)
+        add_edge(graph, cid, node_id, "contains")
+    return node_id
 
 
 def field_node(
@@ -118,7 +122,7 @@ def field_node(
     field_name: str,
     field_type: str = "",
 ) -> str:
-    return add_node(
+    node_id = add_node(
         graph,
         f"field:{class_name}#{field_name}",
         "field",
@@ -127,6 +131,10 @@ def field_node(
         field_name=field_name,
         field_type=field_type,
     )
+    if class_name:
+        cid = class_node(graph, class_name)
+        add_edge(graph, cid, node_id, "contains")
+    return node_id
 
 
 def source_node(graph: dict[str, Any], path: str, line: int) -> str:
@@ -164,7 +172,7 @@ def record_search(
             matched_string = result.get("matched_string")
             if matched_string:
                 sid = string_node(graph, str(matched_string))
-                add_edge(graph, qid, sid, "searched_for")
+                add_edge(graph, qid, sid, "led_to")
                 add_edge(graph, sid, mid, "referenced_by")
 
         elif "field" in result:
