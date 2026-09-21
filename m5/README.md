@@ -19,6 +19,9 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
   - `ClassLoaderWatcher.kt` —— 常驻监听 BaseDexClassLoader 创建；仅在存在 pending 时临时监听 `ClassLoader.loadClass`。
   - `RuntimeStateStore.kt` —— 跨 Hook 共享状态，支持 process/package/hook/thread 作用域、原子计数和有界追加列表。
   - `RuntimeEventBus.kt` —— 进程内同步事件总线；Hook 可 emit，runtime target 可订阅并执行 Action Pipeline，带递归深度保护。
+  - `ContextRegistry.kt` —— 弱引用维护 Application / app Context / 当前 Activity，并向 Action 模板暴露 context lifecycle 视图。
+  - `LifecycleManager.kt` —— Hook Application.attach 后注册官方 ActivityLifecycleCallbacks，产生 lifecycle.* 事件并刷新 Runtime 状态。
+  - `LifecycleTrigger.kt` —— `on_lifecycle` 事件名归一化和 Activity 精确/正则过滤。
   - `ActionExecutor.kt` —— 动作流水线执行器；除 Java 调用/字段/JS/DEX/shell 外，支持 State 读写与 Event → Action。
   - `InjectSocket.kt` —— 复刻 M3 的 `@reconbridge_inject` 抽象 socket 分帧协议。
 - `ReconBridge-Tracer.apk` —— 预编译产物（debug 自签名，可直接安装）。
@@ -31,6 +34,7 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
    - 字符串特征定位混淆方法：使用 `using_strings=["sendStream"]` 参数，m5 会在 App 进程中自动扫描 DEX 结构，反查并挂载匹配的方法（无需预先定位混淆类名）。
    - 实时篡改与回调：`patch_java(...)`（支持改参数、改返回值、返回值深层字段/Map key篡改 `mutate_return`、条件检查 `condition`、模板变量 `${...}` 及 Action Pipeline，支持 `hot=True` 免重启热加）。
    - 跨 Hook 状态/事件：在 action 中使用 `set_state/get_state/increment_state/append_state/emit_event`；另一个 Java Hook 或 `kind:"runtime"` target 可通过 `state.* / event.*` 条件与模板响应。
+   - Context/Lifecycle：Action/模板/condition 可直接访问 `${application}`、`${context}`、`${activity}`、`${lifecycle.activity_state}`；runtime target 可用 `on_lifecycle` 监听 created/resumed/paused/destroyed 等事件。
    - 或手工：`post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`。
 
 ## 构建
