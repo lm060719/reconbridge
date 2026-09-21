@@ -527,7 +527,9 @@ static void inject_client(int fd) {
     conn->base_pkg = base_pkg;
     conn->process_name = pkg;
     reg_add(conn);
-    // 回传通道：'E'=事件，'D'=dump，'H'=声明 live reconcile，'S'=HookRegistry runtime status。
+    // 回传通道：
+    // 'E'=事件，'D'=dump，'H'=声明 live reconcile，'S'=Runtime status，
+    // 'K'=声明 Runtime Command，'A'=Runtime Command Ack。
     while (true) {
         char type = 0;
         if (!sock_read_full(fd, &type, 1)) break;
@@ -538,6 +540,11 @@ static void inject_client(int fd) {
         if (type == 'H') {
             reg_mark_reloadable(conn);
             log_line("Tracer 声明支持 live reconcile：" + pkg);
+        } else if (type == 'K') {
+            reg_mark_command_capable(conn);
+            log_line("Tracer 声明支持 Runtime Command：" + pkg);
+        } else if (type == 'A') {
+            reg_handle_command_ack(conn, payload);
         } else if (type == 'S') {
             reg_update_status(conn, payload);
         } else if (type == 'E') {
@@ -567,8 +574,12 @@ static void inject_client(int fd) {
         }
     }
     reg_remove(conn);
+    reg_fail_pending_commands(
+        conn,
+        "目标进程 Runtime 通道已断开"
+    );
     {
-        // 和 hot_reload 使用同一把锁，避免并发配置写撞上 close / fd 复用。
+        // 和 hot_reload / runtime command 使用同一把锁，避免并发写撞上 close / fd 复用。
         std::lock_guard<std::mutex> write_lk(conn->write_mutex);
         conn->alive = false;
         close(fd);
