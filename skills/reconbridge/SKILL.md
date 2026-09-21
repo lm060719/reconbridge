@@ -65,8 +65,8 @@ description: >-
 ## 原子工具（高级/兜底用途，签名详见各工具描述）
 - **设备原子能力（7）**：`device_status` `list_packages` `pull_apk` `pull_libs` `read_remote_file` `proc_info` `remote_shell`（白名单）
 - **静态反编译（5）**：`decompile_apk`(jadx) `dexkit_search`(androguard 后端) `ghidra_analyze` `hermes_decompile`(RN Hermes) `toolchain_status`
-- **动态 hook / 事件 / Runtime 状态（M3/M5/M4）**：`post_hook` `list_hooks`（磁盘期望配置） `runtime_hook_status`（运行中 M5 HookRegistry + ClassLoaderRegistry：installed/pending/loader/watcher） `unhook`（M5 live remove，pending 也同步移除） `collect_events` `recent_events`（环形缓冲事后补捞） `dump_dex`(脱壳) `list_dumps`
-- **Java trace / 篡改（LSPosed，M5）**：`trace_java`（读 this/参数/返回值/字段/栈；支持 `capture.paths` 挖嵌套字段 + `render:"deep"` 对象图） `patch_java`（`replace_args` / `replace_return` / `mutate_return` 返回值深层字段篡改 / `condition` 条件判断 / `${...}` 模板变量 / `skip_original` 以及 Action Pipeline：`call_method`, `set_field`, `construct`, `eval_js`, `eval_dex`, `exec_shell`, `before/after_actions`）
+- **动态 hook / 事件 / Runtime 状态（M3/M5/M4）**：`post_hook` `list_hooks`（磁盘期望配置） `runtime_hook_status`（运行中 M5：installed/pending/loader/watcher + Runtime State + Event Bus） `unhook`（M5 live remove，pending/事件订阅/hook-scope state 同步清理） `collect_events` `recent_events`（环形缓冲事后补捞） `dump_dex`(脱壳) `list_dumps`
+- **Java trace / 篡改（LSPosed，M5）**：`trace_java`（读 this/参数/返回值/字段/栈；支持 `capture.paths` 挖嵌套字段 + `render:"deep"` 对象图） `patch_java` / `post_hook`（除 replace/mutate/condition/JS/DEX/shell 外，Action Pipeline 还支持 `set_state/get_state/remove_state/clear_state/increment_state/append_state/emit_event`；模板/条件可读 `state.* / event.*`；`kind:"runtime"` + `on_event` 可做纯事件监听）
 - **场景 / 产出物**：`capture_scenario` `diff_scenarios` `list_scenarios` `list_artifacts` `list_dumps`
 
 ## 三条主线（选一条走）
@@ -75,7 +75,7 @@ description: >-
 默认：`open_target` → `investigate(goal=...)` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage → verify_value_lineage A/B → compare_value_lineage_runtime → rank_root_causes → verify_root_cause_hypothesis A/B → compare_root_cause_hypothesis`。字段条件可先用 `verify_condition_writer` 确认真实 writer。根因假设实验会反向加权/降权排名：入口一致而输出不同才支持内部产生；入口已不同则把方向推回上游。DEX v3 持久化字段 read/write xref；Lineage 对同名 callee 保守处理。对象接收者先解析实际类型；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
-默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 通过 HookRegistry live unhook 自动清理。持续 patch 时可用 `runtime_hook_status(package)` 核对当前进程真正装着哪些 Hook。若显式目标类还没进入任何已知 ClassLoader，状态会是 `pending_class`，不是失败；优先触发插件/动态 DEX 加载并观察 pending→installed。只有需要复杂字段抓取/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
+默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 通过 HookRegistry live unhook 自动清理。持续 patch 若存在“Hook A 命中后影响 Hook B”或需要跨调用保持状态，优先用 Runtime State + Event Bus：A 用 `set_state` 或 `emit_event`，B 用 `state.*` 条件或 `kind:"runtime"/on_event` 响应；不要把多个 Hook 的状态手工塞进外部轮询。用 `runtime_hook_status(package)` 核对 installed/pending、`runtime_state` 和 `event_bus`。若显式目标类还没进入任何已知 ClassLoader，状态会是 `pending_class`，不是失败；优先触发插件/动态 DEX 加载并观察 pending→installed。
 
 **C. 场景差分** —— 「A 操作与 B 操作为什么行为不同」
 装 hook → `capture_scenario("A")` 做操作 A → `capture_scenario("B")` 做操作 B → `diff_scenarios("A","B")` 拿方法级差异（只在 A / 只在 B / 参数不同）。
@@ -89,7 +89,8 @@ description: >-
 6. **可靠冷启动测事件流**：要稳定触发，用 native hook 打**有 launcher 的 App**（如 `com.android.vending`，`monkey -p PKG -c android.intent.category.LAUNCHER 1`）；无 launcher 的目标（如 voiceassist）只能靠触发助手冷启动，偶发不灵。
 7. **改了 PC 侧 `pc/*.py` 要新会话生效**：MCP server 进程启动时加载代码；当前会话测新 tracer 能力可用 `post_hook` 发原始 config 绕过。
 8. **adb 路径别被 Git Bash mangle**：跑 adb 前 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`，否则 `/data/...` 被改成 Windows 路径。
-9. **M5 unhook 已经是 live 的**：不要再机械地 force-stop。`unhook` 后优先 `runtime_hook_status(package)` 确认 id/member 已消失；只有 native M3 或旧版 Tracer 才需要重启进程。
+9. **M5 unhook 已经是 live 的**：不要再机械地 force-stop。`unhook` 后优先 `runtime_hook_status(package)` 确认 id/member/事件 handler 已消失；对应 hook-scope State 会一并清理。同 ID replace 会保留 hook-scope State，适合热更新状态机逻辑。只有 native M3 或旧版 Tracer 才需要重启进程。
+10. **Event Bus 是进程内同步分发**：handler 在 emit 的当前线程执行，修改 State 会立即可见；不要在 handler 里做无限递归 emit 或长时间阻塞。运行时有 max_depth=16 保护，但复杂耗时任务仍应谨慎。
 
 ## 更深的细节
 完整一页纸（全工具签名、协议、部署、更多坑）见仓库 `AGENTS_QUICKSTART.md`；在线安装用户见 GitHub：https://github.com/lm060719/reconbridge （`AGENTS_QUICKSTART.md`）。
