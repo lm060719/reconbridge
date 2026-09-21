@@ -38,7 +38,9 @@ def test_mcp_import_and_registration():
         "compare_divergence_probes", "inspect_condition_origin",
         "verify_condition_writer", "inspect_value_lineage",
         "verify_value_lineage", "compare_value_lineage_runtime",
-        "rank_root_causes", "rank_candidates", "verify_candidates",
+        "rank_root_causes", "verify_root_cause_hypothesis",
+        "compare_root_cause_hypothesis", "rank_candidates",
+        "verify_candidates",
         "trace_target", "evidence_graph",
         "explain_evidence", "close_investigation",
     }
@@ -96,7 +98,7 @@ async def test_mcp_stdio_e2e():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) >= 52
+            assert len(tools) >= 54
             names = {t.name for t in tools}
             assert "device_status" in names
             assert "toolchain_status" in names
@@ -119,6 +121,8 @@ async def test_mcp_stdio_e2e():
             assert "verify_value_lineage" in names
             assert "compare_value_lineage_runtime" in names
             assert "rank_root_causes" in names
+            assert "verify_root_cause_hypothesis" in names
+            assert "compare_root_cause_hypothesis" in names
             assert "rank_candidates" in names
             assert "verify_candidates" in names
             assert "trace_target" in names
