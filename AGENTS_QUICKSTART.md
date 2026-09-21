@@ -67,6 +67,8 @@
 | `inspect_condition_origin(session_id, a, b, ...)` | 继续追条件值来源：字段返回 DEX v3 reader/writer + offset，并用 JADX 解释 writer 赋值右值来源；条件方法则分析 return 表达式与 callees |
 | `verify_condition_writer(session_id, a, b, writer_rank=1, ...)` | 对同类实例字段 writer 抓 before/after 字段值，验证该方法是否真实改变目标条件字段 |
 | `inspect_value_lineage(session_id, a, b, writer_rank=1, max_depth=4, ...)` | 跨方法追值来源：writer 赋值 / 条件方法 return → DEX callee → 下层 JADX return，输出 origin_paths、ambiguities、unresolved_calls，并复用 runtime 命中证据 |
+| `verify_value_lineage(session_id, a, b, capture_for, path_index=0, ...)` | 对一条 origin_path 的应用方法批量抓 after 返回值；字段 sink 的最后 writer 额外抓 before/after 字段值，返回真实顺序、覆盖率和值摘要 |
+| `compare_value_lineage_runtime(session_id, a, b, path_index=0, ...)` | 比较 A/B 同一路径的运行时返回值和 writer 字段变化，找最早稳定值差异 |
 | `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
@@ -271,6 +273,29 @@ inspect_value_lineage(
 #
 # 若 helper.get() 在 DEX 中匹配多个同名 callee：
 # ambiguities=[候选类...]，不会擅自选一个继续追
+
+verify_value_lineage(
+    session_id, "非会员", "会员",
+    capture_for="非会员",
+    path_index=0
+)
+# ↑ 触发一次非会员行为
+
+verify_value_lineage(
+    session_id, "非会员", "会员",
+    capture_for="会员",
+    path_index=0
+)
+# ↑ 触发一次会员行为；第二侧完成后自动尝试 comparison
+
+compare_value_lineage_runtime(
+    session_id, "非会员", "会员",
+    path_index=0
+)
+# → first_stable_value_difference:
+#      UserRepository.isVipEnabled()
+#      非会员=false / 会员=true
+# → 后续 writer premiumStatus 的 before/after 变化也一并展示
 ```
 两次采集会同时保存 `graph_fingerprint` 与 `hook_fingerprint`；任一不一致就拒绝给出“业务分叉”结论，避免第二次 Hook 少挂了方法导致假差异。场景事件经过压缩后独立保存在当前 Investigation 会话目录，不会持续膨胀主 session JSON。
 
@@ -315,6 +340,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 确认真实链路。若比较两个行为，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage`；字段条件可先用 `verify_condition_writer` 确认真正 writer。DEX v3 会持久化字段读写 xref，旧索引自动重建。
+3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 确认真实链路。若比较两个行为，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage → verify_value_lineage A/B → compare_value_lineage_runtime`；字段条件可先用 `verify_condition_writer` 确认真正 writer。DEX v3 会持久化字段读写 xref，旧索引自动重建。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
