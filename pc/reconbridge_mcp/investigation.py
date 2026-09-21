@@ -18,6 +18,7 @@ from . import evidence
 from .settings import settings
 
 _SESSION_RE = re.compile(r"^[a-f0-9]{12}$")
+_SCENARIO_RE = re.compile(r"^[A-Za-z0-9_.\-\u4e00-\u9fff]{1,64}$")
 _ROOT = settings.workdir / ".investigations"
 
 
@@ -29,6 +30,17 @@ def _session_path(session_id: str) -> Path:
     if not _SESSION_RE.fullmatch(session_id):
         raise ValueError("invalid investigation session id")
     return _ROOT / f"{session_id}.json"
+
+
+def _call_scenario_dir(session_id: str) -> Path:
+    _session_path(session_id)
+    return _ROOT / f"{session_id}.call-scenarios"
+
+
+def _call_scenario_path(session_id: str, name: str) -> Path:
+    if not _SCENARIO_RE.fullmatch(name):
+        raise ValueError("invalid call graph scenario name")
+    return _call_scenario_dir(session_id) / f"{name}.json"
 
 
 def _scan_artifacts(package: str) -> dict[str, Any]:
@@ -131,6 +143,7 @@ def status(session_id: str) -> dict[str, Any]:
         "temporary_hooks": state.get("temporary_hooks", []),
         "discoveries": state.get("discoveries", [])[-20:],
         "evidence_graph": evidence.summary(state.get("evidence_graph") or evidence.new_graph()),
+        "call_scenario_count": len(list_call_scenarios(session_id)),
         "created_at": state.get("created_at"),
         "updated_at": state.get("updated_at"),
     }
@@ -474,6 +487,69 @@ def record_runtime_path_evidence(
     graph = state.setdefault("evidence_graph", evidence.new_graph())
     evidence.record_runtime_path(graph, path, analysis)
     save(state)
+
+
+def save_call_scenario(
+    session_id: str,
+    name: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """保存一次会话级调用图场景；事件不会塞进主 session JSON。"""
+    load(session_id)
+    path = _call_scenario_path(session_id, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        **payload,
+        "name": name,
+        "session_id": session_id,
+        "saved_at": _now_ms(),
+    }
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return {
+        "name": name,
+        "path": str(path),
+        "event_count": int((data.get("analysis") or {}).get("event_count", 0) or 0),
+        "graph_fingerprint": data.get("graph_fingerprint", ""),
+    }
+
+
+def load_call_scenario(session_id: str, name: str) -> dict[str, Any]:
+    load(session_id)
+    path = _call_scenario_path(session_id, name)
+    if not path.exists():
+        raise FileNotFoundError(f"call graph scenario not found: {name}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def list_call_scenarios(session_id: str) -> list[dict[str, Any]]:
+    _session_path(session_id)
+    root = _call_scenario_dir(session_id)
+    if not root.is_dir():
+        return []
+
+    out: list[dict[str, Any]] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append(
+            {
+                "name": data.get("name", path.stem),
+                "saved_at": data.get("saved_at"),
+                "graph_fingerprint": data.get("graph_fingerprint", ""),
+                "event_count": int((data.get("analysis") or {}).get("event_count", 0) or 0),
+                "observed_nodes": int((data.get("analysis") or {}).get("observed_nodes", 0) or 0),
+                "primary_tid": (data.get("analysis") or {}).get("primary_tid"),
+                "path": str(path),
+            }
+        )
+    return out
 
 
 def source_search(session_id: str, query: str, limit: int = 20) -> dict[str, Any]:
