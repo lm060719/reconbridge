@@ -47,6 +47,53 @@ def test_investigation_persists_target_and_searches_sources(tmp_path, monkeypatc
     assert closed["closed"] is True
 
 
+def test_source_method_context_finds_java_method_body(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
+
+    pkg = "com.example.target"
+    apk_dir = tmp_path / pkg / "apk"
+    apk_dir.mkdir(parents=True)
+    (apk_dir / "base.apk").write_bytes(b"fake-apk")
+
+    source_dir = apk_dir / "base-jadx" / "sources" / "com" / "example"
+    source_dir.mkdir(parents=True)
+    source_file = source_dir / "PayManager.java"
+    source_file.write_text(
+        """package com.example;
+
+public class PayManager {
+    private boolean premiumStatus;
+
+    public boolean checkVip() {
+        if (premiumStatus) {
+            return true;
+        }
+        return false;
+    }
+
+    public void caller() {
+        checkVip();
+    }
+}
+""",
+        encoding="utf-8",
+    )
+
+    state = investigation.create(pkg)
+    result = investigation.source_method_context(
+        state["session_id"],
+        "Lcom/example/PayManager;",
+        "checkVip",
+    )
+
+    assert result["available"]
+    assert result["path"].endswith("PayManager.java")
+    assert result["declaration_line"] > 0
+    assert "public boolean checkVip()" in result["text"]
+    assert "return true;" in result["text"]
+
+
 def test_investigation_rejects_invalid_session_id(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "workdir", tmp_path)
     monkeypatch.setattr(investigation, "_ROOT", tmp_path / ".investigations")
