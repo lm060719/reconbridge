@@ -89,9 +89,19 @@ internal class ContextRegistry(
     )
     {
         synchronized(lock) {
-            activityRef = WeakReference(activity)
-            activityClass = activity.javaClass.name
-            activityState = state
+            val current = activityRef?.get()
+            val promotesToCurrent = (
+                state == "created" ||
+                state == "started" ||
+                state == "resumed"
+            )
+
+            if (promotesToCurrent || current === activity || current == null) {
+                activityRef = WeakReference(activity)
+                activityClass = activity.javaClass.name
+                activityState = state
+            }
+
             lastEvent = "activity_" + state
             lastEventAt = System.currentTimeMillis()
             incrementLocked("activity_" + state)
