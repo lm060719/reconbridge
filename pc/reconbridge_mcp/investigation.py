@@ -518,6 +518,50 @@ def save_call_scenario(
     }
 
 
+def save_condition_probe(
+    session_id: str,
+    scenario_name: str,
+    probe_key: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """把条件探针压缩结果写回对应调用图场景文件。"""
+    load(session_id)
+    path = _call_scenario_path(session_id, scenario_name)
+    if not path.exists():
+        raise FileNotFoundError(f"call graph scenario not found: {scenario_name}")
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    probes = data.setdefault("condition_probes", {})
+    probes[probe_key] = {
+        **payload,
+        "saved_at": _now_ms(),
+    }
+    data["probe_updated_at"] = _now_ms()
+
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return {
+        "scenario": scenario_name,
+        "probe_key": probe_key,
+        "path": str(path),
+        "probe_count": len(probes),
+    }
+
+
+def load_condition_probe(
+    session_id: str,
+    scenario_name: str,
+    probe_key: str,
+) -> dict[str, Any] | None:
+    data = load_call_scenario(session_id, scenario_name)
+    probe = (data.get("condition_probes") or {}).get(probe_key)
+    return dict(probe) if isinstance(probe, dict) else None
+
+
 def load_call_scenario(session_id: str, name: str) -> dict[str, Any]:
     load(session_id)
     path = _call_scenario_path(session_id, name)
@@ -546,6 +590,7 @@ def list_call_scenarios(session_id: str) -> list[dict[str, Any]]:
                 "event_count": int((data.get("analysis") or {}).get("event_count", 0) or 0),
                 "observed_nodes": int((data.get("analysis") or {}).get("observed_nodes", 0) or 0),
                 "primary_tid": (data.get("analysis") or {}).get("primary_tid"),
+                "condition_probe_count": len(data.get("condition_probes") or {}),
                 "path": str(path),
             }
         )
