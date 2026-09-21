@@ -272,7 +272,7 @@ class RuntimeCommandDispatcherTest
                         .put("action", "call_method")
                         .put("target", "activity")
                         .put("method", "ping")
-                        .put("save_to", "$reply")
+                        .put("save_to", "\$reply")
                 ),
             )
         }
@@ -283,7 +283,7 @@ class RuntimeCommandDispatcherTest
         assertEquals(
             "pong-1",
             value.getJSONObject("registers")
-                .getString("$reply"),
+                .getString("\$reply"),
         )
     }
 
