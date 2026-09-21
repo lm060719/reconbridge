@@ -29,6 +29,9 @@ internal class LifecycleManager(
     private val lifecycleEvents = AtomicLong()
     private val attachEvents = AtomicLong()
 
+    @Volatile
+    private var statusPublisher: (() -> Unit)? = null
+
     private val callbacks = object : Application.ActivityLifecycleCallbacks
     {
         override fun onActivityCreated(
@@ -94,6 +97,11 @@ internal class LifecycleManager(
                 activity = activity,
             )
         }
+    }
+
+    fun setStatusPublisher(publisher: (() -> Unit)?)
+    {
+        statusPublisher = publisher
     }
 
     fun start(): Int
@@ -271,6 +279,7 @@ internal class LifecycleManager(
                 sourceHookId = "__lifecycle__",
             )
         )
+        notifyStatusChanged()
     }
 
     private fun onActivity(
@@ -320,5 +329,14 @@ internal class LifecycleManager(
                 sourceHookId = "__lifecycle__",
             )
         )
+        notifyStatusChanged()
+    }
+
+    private fun notifyStatusChanged()
+    {
+        try {
+            statusPublisher?.invoke()
+        } catch (_: Throwable) {
+        }
     }
 }
