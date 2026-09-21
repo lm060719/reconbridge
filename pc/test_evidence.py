@@ -282,6 +282,73 @@ def test_field_origin_records_writer_reader_and_source_nodes():
     )
 
 
+def test_value_lineage_is_persisted_into_evidence_graph():
+    graph = evidence.new_graph()
+    lineage = {
+        "ok": True,
+        "nodes": [
+            {
+                "id": "origin:1",
+                "type": "origin",
+                "label": "来自偏好存储",
+                "kind": "preferences",
+                "confidence": 0.95,
+            },
+            {
+                "id": "expr:1",
+                "type": "expression",
+                "label": 'preferences.getBoolean("vip", false)',
+                "owner_class": "com.example.UserRepository",
+                "owner_method": "isVipEnabled",
+            },
+            {
+                "id": "method:1",
+                "type": "method",
+                "label": "com.example.UserRepository.isVipEnabled",
+                "class_name": "com.example.UserRepository",
+                "method_name": "isVipEnabled",
+                "descriptor": "()Z",
+            },
+            {
+                "id": "field:1",
+                "type": "field",
+                "label": "com.example.PayManager.premiumStatus",
+                "class_name": "com.example.PayManager",
+                "field_name": "premiumStatus",
+                "field_type": "Z",
+            },
+        ],
+        "edges": [
+            {
+                "source": "origin:1",
+                "target": "expr:1",
+                "relation": "feeds_expression",
+            },
+            {
+                "source": "expr:1",
+                "target": "method:1",
+                "relation": "returns_from",
+            },
+            {
+                "source": "method:1",
+                "target": "field:1",
+                "relation": "writes_field",
+            },
+        ],
+    }
+
+    evidence.record_value_lineage(graph, lineage)
+
+    relations = {edge["relation"] for edge in graph["edges"]}
+    assert "feeds_expression" in relations
+    assert "returns_from" in relations
+    assert "writes_field" in relations
+    assert any(
+        node.get("type") == "value_expression"
+        for node in graph["nodes"].values()
+    )
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
