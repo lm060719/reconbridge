@@ -226,10 +226,12 @@ internal class RuntimeStateStore(
     ): List<Any?>
     {
         val current = get(scope, key, hookId)
-        val list = when (current) {
-            is List<*> -> current.toMutableList()
-            null -> mutableListOf()
-            else -> mutableListOf(current)
+        val list = mutableListOf<Any?>()
+        when (current) {
+            is List<*> -> list.addAll(current)
+            null -> {
+            }
+            else -> list.add(current)
         }
         list.add(value)
         while (list.size > maxAppendItems) {
@@ -343,12 +345,16 @@ internal class RuntimeStateStore(
                     return null
                 }
                 synchronized(hookLock) {
-                    var map = hookStates[hookId]
-                    if (map == null && create) {
-                        map = BoundedStateMap(maxKeysPerScope)
-                        hookStates[hookId] = map
+                    val existing = hookStates[hookId]
+                    if (existing != null || !create) {
+                        existing
+                    } else {
+                        val created = BoundedStateMap(
+                            maxKeysPerScope
+                        )
+                        hookStates[hookId] = created
+                        created
                     }
-                    map
                 }
             }
             else -> null
