@@ -64,9 +64,13 @@ internal fun setFieldAny(obj: Any, name: String, value: Any?): Boolean {
 }
 
 class ActionContext(
-    val param: MethodHookParam,
+    val param: MethodHookParam?,
     val classLoader: ClassLoader,
     val pkg: String,
+    val hookId: String = "",
+    val runtimeState: RuntimeStateStore? = null,
+    val eventBus: RuntimeEventBus? = null,
+    val runtimeEvent: RuntimeEvent? = null,
 ) {
     private var fallbackThis: Any? = null
     private var fallbackArgs: Array<Any?>? = null
@@ -76,52 +80,80 @@ class ActionContext(
     @Suppress("UNCHECKED_CAST")
     val registers: HashMap<String, Any?> = run {
         var regs: HashMap<String, Any?>? = null
-        try {
-            regs = param.getObjectExtra("recon_registers") as? HashMap<String, Any?>
-        } catch (_: Throwable) {}
+        val methodParam = param
+        if (methodParam != null) {
+            try {
+                regs = methodParam.getObjectExtra(
+                    "recon_registers"
+                ) as? HashMap<String, Any?>
+            } catch (_: Throwable) {
+            }
+        }
         if (regs == null) {
             regs = HashMap()
-            try {
-                param.setObjectExtra("recon_registers", regs)
-            } catch (_: Throwable) {}
+            if (methodParam != null) {
+                try {
+                    methodParam.setObjectExtra(
+                        "recon_registers",
+                        regs,
+                    )
+                } catch (_: Throwable) {
+                }
+            }
         }
         regs
     }
 
     var thisObject: Any?
-        get() = try {
-            val t = param.thisObject
-            if (t != null) t else fallbackThis
-        } catch (_: Throwable) {
-            fallbackThis
+        get() {
+            val methodParam = param ?: return fallbackThis
+            return try {
+                val value = methodParam.thisObject
+                if (value != null) value else fallbackThis
+            } catch (_: Throwable) {
+                fallbackThis
+            }
         }
         set(value) {
             fallbackThis = value
+            val methodParam = param ?: return
             try {
-                param.thisObject = value
-            } catch (_: Throwable) {}
+                methodParam.thisObject = value
+            } catch (_: Throwable) {
+            }
         }
 
     val args: Array<Any?>?
-        get() = try {
-            val a = param.args
-            if (a != null) a else fallbackArgs
-        } catch (_: Throwable) {
-            fallbackArgs
+        get() {
+            val methodParam = param ?: return fallbackArgs
+            return try {
+                val value = methodParam.args
+                if (value != null) value else fallbackArgs
+            } catch (_: Throwable) {
+                fallbackArgs
+            }
         }
 
     var result: Any?
-        get() = if (hasFallbackResult) {
-            fallbackResult
-        } else {
-            try { param.result } catch (_: Throwable) { fallbackResult }
+        get() {
+            if (hasFallbackResult) {
+                return fallbackResult
+            }
+            val methodParam = param ?: return fallbackResult
+            return try {
+                methodParam.result
+            } catch (_: Throwable) {
+                fallbackResult
+            }
         }
         set(value) {
             fallbackResult = value
             hasFallbackResult = true
+            val methodParam = param ?: return
             try {
-                param.setResult(value)
-            } catch (_: Throwable) {}
+                methodParam.setResult(value)
+            } catch (_: Throwable) {
+            }
         }
 }
 
@@ -218,6 +250,12 @@ object ActionExecutor {
             "eval_dex", "dex" -> stepEvalDex(ctx, step)
             "set_arg" -> stepSetArg(ctx, step)
             "set_result", "replace_return" -> stepSetResult(ctx, step)
+            "set_state" -> stepSetState(ctx, step)
+            "remove_state" -> stepRemoveState(ctx, step)
+            "clear_state" -> stepClearState(ctx, step)
+            "increment_state", "inc_state" -> stepIncrementState(ctx, step)
+            "append_state" -> stepAppendState(ctx, step)
+            "emit_event" -> stepEmitEvent(ctx, step)
             else -> logW("[${ctx.pkg}] 未知 action 类型: $type")
         }
     }
