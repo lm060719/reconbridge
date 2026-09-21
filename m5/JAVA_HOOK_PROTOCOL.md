@@ -155,18 +155,41 @@ patch_java(package, class_name, method,
 下发一条带 `action` 的 java target（篡改**持久生效**直到 `unhook`）。`seconds>0` 时顺便采集命中。
 常见用法：换某 String 参数、让校验方法恒返回 true（`replace_return` + `skip_original`）、拦掉某调用。
 
-## 移除：`POST /unhook`（复用 M3）
-`{"package":"com.miui.voiceassist"}` 删整包配置；带 `"id"` 只删某目标。模块下次进程启动即不再挂。
+## 实时配置同步 / 移除
+
+M5 Tracer 现在使用进程内 `HookRegistry` 保存每个 target id 对应的 LSPosed `Unhook` handle。
+daemon 下发的配置被视为“完整期望状态”，运行中收到新配置后会执行 reconcile：
+
+- 新 id → live install；
+- 同 id 且配置未变 → 保持；
+- 同 id 但配置改变 → **先装新 Hook，成功后再卸载旧 Hook**，避免 replace 失败导致已有能力消失；
+- 配置中消失的 id → 立即调用 `Unhook.unhook()`；
+- `targets:[]` → 清空当前进程全部 M5 Java Hook。
+
+因此 `POST /unhook` 对运行中的 M5 Tracer 已经是 **live unhook**：
+
+```json
+{"package":"com.miui.voiceassist"}
+{"package":"com.miui.voiceassist","id":"sendStream"}
+```
+
+无需再 force-stop 才能恢复。若目标进程未运行，则只更新磁盘期望配置，下次启动自然不会再安装。
+
+查询分两层：
+
+- `GET /hooks` / MCP `list_hooks`：磁盘上的**期望配置**；
+- `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**真实 HookRegistry 状态**，包含进程、pid、实际已安装 id、member 数、fingerprint，以及 `live_unhook/replace_supported`。
 
 ## 语义与限制
 
 - **trace（观测）+ 实时篡改（action）** 均支持。篡改在 Xposed before（改参数/skip）/after（改返回值）阶段生效。
 - 类解析用目标进程主 classloader（`lpparam.classLoader`）；动态加载进独立 classloader 的类暂不覆盖。
-- 模块进程启动时读配置装 hook。**首个 hook 需 `restart:true`**（force-stop 让目标带配置起来）；
-  此后目标进程活着时支持**免重启热加**（`restart:false` + `mode:"append"`）：daemon 向运行中的 tracer
-  下发 `'R'`(reload) 控制帧，tracer 按 id 去重**增量装新 target（只加不删）**——迭代加 hook 不再反复 force-stop。
-  PC 侧 `trace_java(hot=True)` 即走此路；`hot_injected` 返回热注入到的进程数（0=目标没在跑，退回 restart）。
-  （注入 socket 因此变双向：tracer 握手后发 `'H'` 声明可热加；native 层不发 `'H'`，故 native 目标仍需 restart。）
+- 首个 hook 仍需目标进程先加载 Tracer；最稳妥的起手式仍是 `restart:true`。
+- 进程已连接后，`restart:false` 会走实时 reconcile：daemon 用 `'R'` 下发**完整期望配置**，
+  HookRegistry 自动 add/remove/replace。PC 侧 `trace_java(hot=True)` 继续可免重启追加；
+  同 ID target 发生变化时会 live replace，`unhook` 会 live remove。
+- tracer 通过 `'S'` 帧持续回报 HookRegistry 真实状态；`runtime_hook_status` 可核对“配置已下发”与“进程里实际已安装”是否一致。
+- native M3 目标不发送 `'H'/'S'`，因此这些 live reconcile 能力目前只保证 M5 Java Hook。
 - 复杂对象默认只 `toString()` + 类名；要看内部状态用 `fields`（点名反射某字段）、`paths`（按路径取深埋值）
   或 `render:"deep"`（整棵对象图序列化，有深度/环/节点预算防爆）。
 - 篡改值类型要与目标 Java 签名匹配（显式 `type`）；类型不符会在命中时抛异常并打日志（不影响原方法）。
