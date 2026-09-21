@@ -207,8 +207,7 @@ runtime_hook_status(package="com.target.app")  # 确认 installed_count 已回�
 
 > **推荐套路：先验证，再固化。** 定位到候选方法后，别急着写模块 + 编译 + 安装 + 测试整轮。
 > 先用 `patch_java` **现场验证想法**——"skip 掉这个方法真能拦住跳转吗？""把返回值改成 true 有效吗？"
-> ——`skip_original` / `replace_return` / `replace_args` 秒级见效。验证通过后再把逻辑固化进 APK 模块，
-> 能省掉早期若干轮"改代码→编译→装→测"。
+> ——`skip_original` / `replace_return` / `replace_args` 秒级见效。验证通过后，优先把稳定逻辑固化成 **Runtime Program**；只有确实需要自定义 native/资源/界面能力时再写独立 APK 模块。
 
 **Runtime Command（Phase 5）—— 不造临时 Hook 直接控制在线 Runtime**
 
@@ -236,6 +235,47 @@ runtime_activity_action(
 ```
 
 多进程 App 不传 `process` 会对每个在线 Runtime 分别执行并返回 `results[]`；只操作主进程或 `:service` 时显式传 process。远程 Runtime State 支持 get/set/remove/increment/append/clear，scope 为 process/package/hook；不支持 thread scope，因为 ThreadLocal 只能代表实际业务线程，不能由 socket 命令线程可靠访问。Activity Action 会在真实 Activity 主线程执行。
+
+**Runtime Program（Phase 6）—— 把验证过的动态逻辑固化成命名模块**
+
+```text
+runtime_program_install(
+    "com.target.app",
+    manifest={
+        "id": "vip_debug",
+        "version": "1.0.0",
+        "targets": [
+            {
+                "id": "vip_source",
+                "kind": "java",
+                "class": "com.target.UserRepo",
+                "method": "refreshVip"
+            }
+        ],
+        "state_init": [
+            {"scope":"process","key":"enabled","value":true}
+        ],
+        "state_cleanup": [
+            {"scope":"process","key":"enabled"}
+        ]
+    }
+)
+
+runtime_program_status("com.target.app", "vip_debug")
+runtime_program_disable("com.target.app", "vip_debug")
+runtime_program_enable("com.target.app", "vip_debug")
+
+# 更新时可带 expected_revision 防止覆盖并发修改
+runtime_program_replace(
+    "com.target.app",
+    manifest={...},
+    expected_revision=1
+)
+
+runtime_program_rollback("com.target.app", "vip_debug")
+```
+
+Program 内 target id 自动变成 `rp:<program>:<local_id>`；不同 Program 可以复用同样的局部 id。replace 会保留最多 5 层 manifest 历史，rollback 恢复上一版但 revision 继续递增。state_init 在线时立即应用，未来进程启动时还会通过私有 `application_attached` bootstrap 再初始化。普通 `post_hook/unhook` 只管理手工 Hook，不会覆盖已启用 Program。
 
 **D. 跨 Hook 状态机 / Event → Action（M5 Runtime Phase 3）**
 ```jsonc
@@ -498,7 +538,7 @@ compare_root_cause_hypothesis(
 5. **改了 `pc/reconbridge_mcp/*.py` 要重启 MCP server** 才生效（新会话天然是新 server，不受影响）。
 6. **LSPosed 模块必须人工启用 + 勾作用域**；Lifecycle Runtime 能稳定覆盖 Application/Activity，但 Fragment/Compose/悬浮窗/自绘内部状态不一定对应独立 Activity 生命周期，必要时仍应 Hook 业务方法。
 7. **多设备/多链路** → MCP 自动挑唯一在线设备、忽略离线残链；仅**多台都在线**时才需设 `RECONBRIDGE_SERIAL`。
-8. **篡改用完要恢复**：M5 直接 `unhook(package, hook_id)` 或清整包即可 live 卸载；随后用 `runtime_hook_status(package)` 核对。只有旧 Tracer/非 M5 native Hook 才仍需重启进程。
+8. **篡改用完要恢复**：手工 M5 Hook 用 `unhook(package, hook_id)` live 卸载；Runtime Program 用 `runtime_program_disable`。Phase 6 起，整包 `unhook(package)` 也会保留已启用 Program targets，避免低层调试命令误伤命名模块。
 9. **模块日志**：`XposedBridge.log` 不一定进 logcat；模块另有 `android.util.Log`（tag `ReconTracer`），`adb logcat -s ReconTracer` 可看装 hook/错误（逐命中日志需配置 `debug:true`）。
 
 ---
@@ -516,7 +556,7 @@ compare_root_cause_hypothesis(
 **构建**：`./build.ps1`（NDK clang++ 编守护进程 + zygisk，无需 cmake）→ `./pack.ps1`（打 `dist/ReconBridge-*.zip`）。
 M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓库在非 ASCII 路径，`gradle.properties` 已加 `android.overridePathCheck=true`）。
 
-**运行时文件（设备）**：`/data/adb/reconbridge/`：`config.conf`(enabled/port/bind/token)、`daemon.log`、`hooks/<pkg>.json`(下发的配置)、`dumps/`(dump 落盘)、`agent/`。模块根 `/data/adb/modules/reconbridge/`（`rbctl`、`bin/reconbridge_daemon`、`sepolicy.rule`）。
+**运行时文件（设备）**：`/data/adb/reconbridge/`：`config.conf`(enabled/port/bind/token)、`daemon.log`、`hooks/<pkg>.json`(最终物化配置)、`runtime_programs/<pkg>/<program>.json`(Phase 6 Program manifest + history)、`dumps/`(dump 落盘)、`agent/`。模块根 `/data/adb/modules/reconbridge/`（`rbctl`、`bin/reconbridge_daemon`、`sepolicy.rule`）。
 
 **配置环境变量**（在 `~/.claude.json` 的 mcp `env` 或 shell 里设）：`RECONBRIDGE_TRANSPORT`(adb/wifi)、`RECONBRIDGE_SERIAL`、`RECONBRIDGE_PORT`(默认 8787)、`RECONBRIDGE_URL`/`RECONBRIDGE_TOKEN`(wifi 模式)、`RECONBRIDGE_WORKDIR`、`RECONBRIDGE_NATIVE_TOOLS`(Ghidra/JDK 的 ASCII 路径)、`RECONBRIDGE_ADB`(adb 可执行文件路径)。
 
