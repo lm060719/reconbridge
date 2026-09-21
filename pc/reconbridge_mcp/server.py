@@ -557,6 +557,78 @@ def inspect_method(
 
 
 @mcp.tool()
+def inspect_call_graph(
+    session_id: str,
+    class_name: str,
+    method: str,
+    descriptor: str = "",
+    upstream_depth: int = 2,
+    downstream_depth: int = 2,
+    max_nodes: int = 120,
+    max_edges: int = 300,
+    max_paths: int = 20,
+    expand_external: bool = False,
+) -> dict:
+    """递归展开一个 Java 方法的静态调用图，并叠加会话里已有的 runtime 命中证据。
+
+    默认向上/向下各追 2 层；Java/Android/Kotlin 等外部框架方法会显示但不继续递归，
+    避免调用图爆炸。representative_paths 直接给出“入口 → 目标 → 下游”的代表链。
+    """
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "当前会话没有 APK，无法展开调用图",
+        }
+
+    prepared = external.ensure_dex_index(apk)
+    if not prepared.get("ok"):
+        return {
+            **prepared,
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+        }
+
+    graph = investigation.call_graph_context(
+        session_id,
+        class_name,
+        method,
+        descriptor=descriptor,
+        upstream_depth=upstream_depth,
+        downstream_depth=downstream_depth,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+        max_paths=max_paths,
+        expand_external=expand_external,
+    )
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "call_graph",
+            "class": candidate.normalize_class_name(class_name),
+            "method": method,
+            "descriptor": descriptor,
+            "nodes": graph.get("node_count", 0),
+            "edges": graph.get("edge_count", 0),
+            "runtime_confirmed_nodes": graph.get("runtime_confirmed_nodes", 0),
+        },
+    )
+    return {
+        **graph,
+        "session_id": session_id,
+        "package": state["package"],
+    }
+
+
+@mcp.tool()
 def investigate(
     session_id: str,
     goal: str,
@@ -571,12 +643,16 @@ def investigate(
     include_source: bool = True,
     auto_prepare_source: bool = True,
     relation_limit: int = 20,
+    include_call_graph: bool = True,
+    call_up_depth: int = 2,
+    call_down_depth: int = 2,
+    call_graph_max_nodes: int = 120,
 ) -> dict:
     """执行一轮自动调查：目标解析 → DEX 索引 → 多词候选排序 → 可选运行时验证 → 方法上下文 → 证据汇总。
 
     goal 可以是自然语言，例如“找到会员状态判断方法”或“定位点击「立即开通」后走的方法”。
-    默认会做运行时验证，并在主候选确定后自动展开 callers/callees 与 JADX 源码上下文。
-    如果设备/Tracer 不可用，仍保留静态候选和源码/调用关系结果。
+    默认会做运行时验证，并在主候选确定后自动展开 callers/callees、JADX 源码与递归调用链。
+    如果设备/Tracer 不可用，仍保留静态候选、源码和静态调用路径。
     """
     goal = goal.strip()
     if not goal:
@@ -790,6 +866,42 @@ def investigate(
             }
         )
 
+    call_graph: dict[str, Any] | None = None
+    if include_call_graph:
+        try:
+            call_graph = investigation.call_graph_context(
+                session_id,
+                str(primary.get("class", "")),
+                str(primary.get("method", "")),
+                descriptor=str(primary.get("descriptor", "")),
+                upstream_depth=max(0, min(int(call_up_depth), 5)),
+                downstream_depth=max(0, min(int(call_down_depth), 5)),
+                max_nodes=max(20, min(int(call_graph_max_nodes), 300)),
+                max_edges=max(60, min(int(call_graph_max_nodes) * 3, 900)),
+                max_paths=20,
+                expand_external=False,
+            )
+            stages.append(
+                {
+                    "stage": "call_graph",
+                    "ok": bool(call_graph.get("ok")),
+                    "nodes": call_graph.get("node_count", 0),
+                    "edges": call_graph.get("edge_count", 0),
+                    "paths": len(call_graph.get("representative_paths", [])),
+                    "runtime_confirmed_nodes": call_graph.get("runtime_confirmed_nodes", 0),
+                    "error": call_graph.get("error"),
+                }
+            )
+        except Exception as exc:
+            call_graph = {"ok": False, "error": str(exc)}
+            stages.append(
+                {
+                    "stage": "call_graph",
+                    "ok": False,
+                    "error": str(exc),
+                }
+            )
+
     focus = (
         (primary.get("matched_queries") or [None])[0]
         or planned_queries[0]
@@ -832,6 +944,21 @@ def investigate(
         "evidence_summary": explanation.get("summary", ""),
         "evidence_focus": explanation.get("focus", focus),
         "method_context": method_ctx,
+        "call_graph": (
+            {
+                "ok": call_graph.get("ok"),
+                "node_count": call_graph.get("node_count", 0),
+                "edge_count": call_graph.get("edge_count", 0),
+                "runtime_confirmed_nodes": call_graph.get("runtime_confirmed_nodes", 0),
+                "representative_paths": (call_graph.get("representative_paths") or [])[:8],
+                "upstream_paths": (call_graph.get("upstream_paths") or [])[:5],
+                "downstream_paths": (call_graph.get("downstream_paths") or [])[:5],
+                "limits": call_graph.get("limits", {}),
+                "error": call_graph.get("error"),
+            }
+            if call_graph is not None
+            else None
+        ),
         "stages": stages,
         "next_action": next_action,
     }
