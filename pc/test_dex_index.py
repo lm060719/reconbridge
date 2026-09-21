@@ -7,6 +7,7 @@ from reconbridge_mcp.dex_index import (
     index_is_ready,
     index_path_for_apk,
     index_status,
+    method_call_graph,
     method_relations,
     query_index,
     write_meta,
@@ -138,6 +139,68 @@ def test_method_relations_returns_callers_and_class_fields(tmp_path, monkeypatch
     assert result["callers"][0]["call_count"] == 2
     assert result["callees"] == []
     assert result["class_fields"][0]["field"] == "premiumStatus"
+
+
+def test_method_call_graph_expands_two_layers_each_direction(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    apk = tmp_path / "base.apk"
+    apk.write_bytes(b"fake-apk-content")
+    db_path = index_path_for_apk(apk)
+    _build_fake_index(apk, db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        extra_methods = [
+            ("Lcom/example/MainActivity;", "onVipClick", "()V", "public"),
+            ("Lcom/example/UserRepository;", "getMemberInfo", "()V", "public"),
+            ("Lcom/example/NetworkApi;", "queryVip", "()V", "public"),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO methods(class_name, method_name, descriptor, access)
+            VALUES (?, ?, ?, ?)
+            """,
+            extra_methods,
+        )
+
+        ids = {
+            row[1]: row[0]
+            for row in conn.execute("SELECT id, method_name FROM methods")
+        }
+        conn.executemany(
+            """
+            INSERT INTO method_calls(caller_method_id, callee_method_id, call_count)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (ids["onVipClick"], ids["onSubscribeClick"], 1),
+                (ids["checkVip"], ids["getMemberInfo"], 1),
+                (ids["getMemberInfo"], ids["queryVip"], 1),
+            ],
+        )
+        conn.commit()
+
+    result = method_call_graph(
+        apk,
+        "com.example.PayManager",
+        "checkVip",
+        descriptor="()Z",
+        upstream_depth=2,
+        downstream_depth=2,
+    )
+
+    assert result["ok"]
+    assert result["node_count"] >= 5
+    assert result["edge_count"] >= 4
+
+    texts = [item["text"] for item in result["representative_paths"]]
+    assert any(
+        "onVipClick" in text
+        and "onSubscribeClick" in text
+        and "checkVip" in text
+        and "getMemberInfo" in text
+        and "queryVip" in text
+        for text in texts
+    )
 
 
 def test_dex_index_invalidates_when_apk_changes(tmp_path, monkeypatch):
