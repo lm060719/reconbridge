@@ -37,7 +37,9 @@ description: >-
 - `search_target`：统一搜源码/字符串/类/方法/字段；已有 JADX 优先搜源码，否则查询 SQLite DEX 持久索引。首次索引由受限 Androguard worker 建立，之后不同关键词也不再解析 APK。
 - `prepare_index`：可主动预热/重建当前 APK 的 DEX SQLite 索引；适合准备连续做大量静态搜索时先调用一次。
 - `prepare_target`：只在确实需要完整源码时执行 JADX；已有结果直接复用。
-- `trace_target`：会话化 Java trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook；命中会自动写入证据图。
+- `rank_candidates`：综合字符串 xref、方法名/类名和 Evidence Graph 对候选方法做可解释排序。
+- `verify_candidates`：一次性给前 N 个候选装观测 Hook，共享一个采集窗口；触发一次行为即可知道谁真实命中。
+- `trace_target`：已知具体方法时的单方法精细 trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook；命中会自动写入证据图。
 - `evidence_graph`：查看当前会话的字符串、类、方法、字段、源码命中和运行时验证关系图。
 - `explain_evidence`：围绕一个关键词/方法/字段展开已有证据链，快速回答“为什么怀疑这里、哪些已运行时确认”。
 - `investigation_status`：查看会话资产、发现记录、运行时状态和证据图规模。
@@ -53,7 +55,7 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-默认：`open_target` → `search_target`。搜索结果自动进入证据图；首次 DEX 搜索会自动建立 SQLite 索引，若预计连续搜索很多次可先 `prepare_index`。定位出候选后用 `trace_target` 做运行时验证，再用 `explain_evidence` 汇总证据链。只有需要完整源码上下文时再 `prepare_target`；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `search_target` → `rank_candidates` → `verify_candidates` → `explain_evidence`。搜索结果自动进入证据图；首次 DEX 搜索会自动建立 SQLite 索引，若预计连续搜索很多次可先 `prepare_index`。只有已经明确具体方法并需要抓参数/字段时才直接 `trace_target`。需要完整源码上下文时再 `prepare_target`；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
