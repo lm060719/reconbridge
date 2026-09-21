@@ -2,31 +2,38 @@ package com.reconbridge.tracer
 
 import org.json.JSONArray
 import org.json.JSONObject
-import java.util.IdentityHashMap
+import java.lang.ref.WeakReference
 import java.util.LinkedHashMap
 
-internal data class TrackedClassLoader(
+internal class TrackedClassLoader(
     val id: String,
-    val loader: ClassLoader,
+    loader: ClassLoader,
     val className: String,
     val source: String,
     val firstSeenAt: Long,
     var lastSeenAt: Long,
     var lastLoadedClass: String = "",
 )
+{
+    private val reference = WeakReference(loader)
+
+    fun loaderOrNull(): ClassLoader?
+    {
+        return reference.get()
+    }
+}
 
 /**
  * 目标进程内的 ClassLoader 注册表。
  *
- * 使用对象身份而不是 equals/hashCode 区分 loader，避免插件框架自定义 equals 导致误合并。
- * Phase 2 只保存轻量元数据与 loader 强引用；生命周期与 App 进程一致。
+ * 以对象身份（===）区分 loader，并使用 WeakReference 保存实例，避免 Tracer 因为
+ * “曾经见过某个插件 ClassLoader”就阻止它被 GC。runtime status 只保留轻量元数据。
  */
 internal class ClassLoaderRegistry(
     initialLoader: ClassLoader,
 )
 {
     private val lock = Any()
-    private val byIdentity = IdentityHashMap<ClassLoader, TrackedClassLoader>()
     private val ordered = LinkedHashMap<String, TrackedClassLoader>()
     private var nextId = 1
 
@@ -46,8 +53,11 @@ internal class ClassLoaderRegistry(
     ): TrackedClassLoader
     {
         synchronized(lock) {
+            cleanupLocked()
             val now = System.currentTimeMillis()
-            val existing = byIdentity[loader]
+            val existing = ordered.values.firstOrNull { row ->
+                row.loaderOrNull() === loader
+            }
             if (existing != null) {
                 existing.lastSeenAt = now
                 if (loadedClass.isNotEmpty()) {
@@ -65,7 +75,6 @@ internal class ClassLoaderRegistry(
                 lastSeenAt = now,
                 lastLoadedClass = loadedClass,
             )
-            byIdentity[loader] = row
             ordered[row.id] = row
             return row
         }
@@ -74,14 +83,17 @@ internal class ClassLoaderRegistry(
     fun idOf(loader: ClassLoader): String
     {
         synchronized(lock) {
-            return byIdentity[loader]?.id
-                ?: register(loader, "late-register").id
+            cleanupLocked()
+            return ordered.values.firstOrNull {
+                it.loaderOrNull() === loader
+            }?.id ?: register(loader, "late-register").id
         }
     }
 
     fun loaders(): List<TrackedClassLoader>
     {
         synchronized(lock) {
+            cleanupLocked()
             return ordered.values.toList()
         }
     }
@@ -89,6 +101,7 @@ internal class ClassLoaderRegistry(
     fun size(): Int
     {
         synchronized(lock) {
+            cleanupLocked()
             return ordered.size
         }
     }
@@ -96,6 +109,7 @@ internal class ClassLoaderRegistry(
     fun snapshotJson(): JSONArray
     {
         synchronized(lock) {
+            cleanupLocked()
             val out = JSONArray()
             for (row in ordered.values) {
                 out.put(
@@ -106,10 +120,22 @@ internal class ClassLoaderRegistry(
                         put("first_seen_at", row.firstSeenAt)
                         put("last_seen_at", row.lastSeenAt)
                         put("last_loaded_class", row.lastLoadedClass)
+                        put("alive", row.loaderOrNull() != null)
                     }
                 )
             }
             return out
+        }
+    }
+
+    private fun cleanupLocked()
+    {
+        val dead = ordered.entries
+            .filter { it.value.loaderOrNull() == null }
+            .map { it.key }
+
+        for (id in dead) {
+            ordered.remove(id)
         }
     }
 }
