@@ -57,7 +57,9 @@
 | `search_target(session_id, query, kind="auto", limit=20)` | 统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
-| `trace_target(session_id, class_name, method, ...)` | 会话化 Java trace；自动包名/游标/唯一 Hook，默认命中即返回并自动清理临时 Hook；结果自动写证据图 |
+| `rank_candidates(session_id, query, limit=10, pool_limit=80)` | 综合字符串 xref、方法名/类名、历史 Evidence Graph 生成带 score/reasons 的候选排序 |
+| `verify_candidates(session_id, query, top_n=5, seconds=15, ...)` | 一次性给前 N 个候选装观测 Hook，共享采集窗口；一次目标行为即可验证真实命中 |
+| `trace_target(session_id, class_name, method, ...)` | 已知具体方法后的精细 Java trace；自动包名/游标/唯一 Hook，默认命中即返回并清理临时 Hook；结果自动写证据图 |
 | `evidence_graph(session_id, focus="", depth=2, limit=100)` | 查看证据关系图；可围绕关键词/类/方法/字段展开附近节点 |
 | `explain_evidence(session_id, focus, depth=3, limit=80)` | 汇总关联字符串、方法、字段和运行时确认情况，解释当前证据链 |
 | `investigation_status(session_id)` | 查看当前会话资产、发现记录、索引状态、证据图规模、游标与临时 Hook |
@@ -146,10 +148,11 @@ device_status
 → search_target(session_id, "会员")             # 直接查 SQLite 索引，不先全量 JADX
 → prepare_target(session_id)                    # 只有需要完整源码上下文时再做
 → search_target(session_id, "premiumStatus")
-→ trace_target(session_id, "com.target.PayManager", "checkVip")
+→ rank_candidates(session_id, "premiumStatus")
+→ verify_candidates(session_id, "premiumStatus", top_n=5)  # 触发一次目标行为
 → explain_evidence(session_id, "premiumStatus")
 ```
-同一个 APK 的索引只需构建一次；之后即使换不同关键词/类名/方法名，也直接查 SQLite，不再重复启动 Androguard。搜索和 trace 结果会自动沉淀进 Evidence Graph，APK 文件发生变化后索引会自动失效并重建。
+同一个 APK 的索引只需构建一次；之后即使换不同关键词/类名/方法名，也直接查 SQLite，不再重复启动 Androguard。候选排序会优先利用字符串 xref 与已有运行时证据；批量验证只需要一次行为触发。搜索和 trace 结果会自动沉淀进 Evidence Graph，APK 文件发生变化后索引会自动失效并重建。
 
 **B. 定位并观测一个 Java 方法（推荐）**
 ```
