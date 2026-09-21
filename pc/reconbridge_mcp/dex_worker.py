@@ -312,7 +312,8 @@ def run_search(apk_path: str, query: dict[str, Any]) -> dict[str, Any]:
                             if key in seen:
                                 continue
                             seen.add(key)
-                            row["matched_string"] = keyword
+                            row["matched_string"] = str(string_analysis.get_value())
+                            row["matched_query"] = keyword
                             results.append(row)
                             if len(results) >= limit:
                                 break
