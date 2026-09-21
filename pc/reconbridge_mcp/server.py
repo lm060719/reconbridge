@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import external, investigation
+from . import candidate, external, investigation
 
 mcp = FastMCP("reconbridge")
 
@@ -43,6 +43,69 @@ def _pkg_dir(package_name: str, sub: str) -> Path:
 # =====================================================================
 # 高层任务模式：围绕一个目标持续分析，减少原子工具往返
 # =====================================================================
+
+def _rank_target_candidates(
+    state: dict[str, Any],
+    query: str,
+    limit: int = 10,
+    pool_limit: int = 80,
+) -> dict:
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {"ok": False, "error": "当前会话没有 APK，无法生成候选方法"}
+
+    pool_limit = max(10, min(int(pool_limit), 300))
+    combined: list[dict[str, Any]] = []
+    searches = [
+        (
+            "string_xref",
+            {"find": "method", "using_strings": [query], "max_results": pool_limit},
+        ),
+        (
+            "method_name",
+            {"find": "method", "method_name": query, "max_results": pool_limit},
+        ),
+        (
+            "class_name",
+            {
+                "find": "method",
+                "class_name": query,
+                "method_name": "",
+                "max_results": pool_limit,
+            },
+        ),
+    ]
+
+    backends: set[str] = set()
+    errors: list[str] = []
+    for source, dex_query in searches:
+        result = external.dexkit_search(apk, dex_query)
+        if not result.get("ok"):
+            errors.append(f"{source}: {result.get('error', '搜索失败')}")
+            continue
+        backends.add(str(result.get("backend", "")))
+        for item in result.get("results", []):
+            row = dict(item)
+            row["_source"] = source
+            combined.append(row)
+
+    graph = state.get("evidence_graph") or {}
+    ranked = candidate.rank(
+        query,
+        combined,
+        graph=graph,
+        limit=limit,
+    )
+    return {
+        "ok": bool(ranked) or not errors,
+        "query": query,
+        "candidate_count": len(ranked),
+        "candidates": ranked,
+        "pool_size": len(combined),
+        "backends": sorted(x for x in backends if x),
+        "errors": errors,
+    }
+
 
 @mcp.tool()
 def open_target(package_name: str, auto_pull: bool = True, note: str = "") -> dict:
@@ -228,6 +291,244 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
         "session_id": session_id,
         "package": package,
         "strategy": strategy,
+    }
+
+
+@mcp.tool()
+def rank_candidates(
+    session_id: str,
+    query: str,
+    limit: int = 10,
+    pool_limit: int = 80,
+) -> dict:
+    """从字符串 xref、方法名、类名与 Evidence Graph 中生成可解释的候选方法排序。
+
+    每个候选返回 score + reasons；已有运行时命中证据会显著前置，但不会删除低分候选。
+    这个工具只做静态排序，不连接设备执行 Hook。
+    """
+    query = query.strip()
+    if not query:
+        return {"ok": False, "error": "query 不能为空", "session_id": session_id}
+
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    result = _rank_target_candidates(
+        state,
+        query,
+        limit=max(1, min(int(limit), 50)),
+        pool_limit=pool_limit,
+    )
+    if result.get("candidates"):
+        investigation.record_search_evidence(
+            session_id,
+            query,
+            "candidate-ranking",
+            result["candidates"],
+        )
+        investigation.add_discovery(
+            session_id,
+            {
+                "type": "candidate_ranking",
+                "query": query,
+                "count": len(result["candidates"]),
+            },
+        )
+    return {
+        **result,
+        "session_id": session_id,
+        "package": state["package"],
+    }
+
+
+@mcp.tool()
+def verify_candidates(
+    session_id: str,
+    query: str,
+    top_n: int = 5,
+    seconds: float = 15.0,
+    max_events: int = 200,
+    restart: bool = True,
+    hot: bool = False,
+    stack: bool = False,
+    cleanup: bool = True,
+) -> dict:
+    """把排名靠前的多个 Java 候选一次性装 Hook，并在一个共享窗口里验证谁真实命中。
+
+    调用后在 seconds 秒内触发一次目标行为即可。只会做观测，不篡改参数或返回值。
+    hot=True 时尝试向已运行目标热加全部候选；默认结束后逐个清理本次临时 Hook。
+    """
+    query = query.strip()
+    if not query:
+        return {"ok": False, "error": "query 不能为空", "session_id": session_id}
+
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    top_n = max(1, min(int(top_n), 8))
+    ranked_result = _rank_target_candidates(
+        state,
+        query,
+        limit=top_n,
+        pool_limit=max(60, top_n * 20),
+    )
+    ranked = ranked_result.get("candidates", [])
+    if not ranked:
+        return {
+            **ranked_result,
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": ranked_result.get("error") or "没有可验证的候选方法",
+        }
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    targets: list[dict[str, Any]] = []
+    hook_ids: list[str] = []
+    by_hook: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(ranked, 1):
+        class_name = candidate.normalize_class_name(str(item.get("class", "")))
+        method_name = str(item.get("method", ""))
+        safe_class = re.sub(r"[^A-Za-z0-9_]", "_", class_name.rsplit(".", 1)[-1])[:20] or "class"
+        safe_method = re.sub(r"[^A-Za-z0-9_]", "_", method_name)[:24] or "method"
+        hook_id = f"rbv_{session_id}_{index}_{safe_class}_{safe_method}"
+        hook_ids.append(hook_id)
+        by_hook[hook_id] = item
+        investigation.add_temporary_hook(session_id, hook_id)
+        targets.append(
+            {
+                "kind": "java",
+                "id": hook_id,
+                "class": class_name,
+                "method": method_name,
+                "capture": {
+                    "this": "class",
+                    "when": "after",
+                    "all_args": False,
+                    "stack": stack,
+                },
+            }
+        )
+
+    config: dict[str, Any] = {
+        "package": state["package"],
+        "restart": bool(restart and not hot),
+        "debug": False,
+        "targets": targets,
+    }
+    if hot:
+        config["restart"] = False
+        config["mode"] = "append"
+
+    posted: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    collect_error = ""
+    try:
+        posted = client.post_json("/hook", config)
+        events = client.collect_sse(
+            seconds=max(0.5, float(seconds)),
+            max_events=max(1, min(int(max_events), 1000)),
+            fold_stack=True,
+            include_recent=True,
+            since_seq=cursor,
+        )
+    except Exception as exc:
+        collect_error = str(exc)
+    finally:
+        if cleanup:
+            for hook_id in hook_ids:
+                try:
+                    unhook(state["package"], hook_id)
+                except Exception:
+                    pass
+                finally:
+                    investigation.remove_temporary_hook(session_id, hook_id)
+
+    try:
+        latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    events_by_hook: dict[str, list[dict[str, Any]]] = {hook_id: [] for hook_id in hook_ids}
+    for event in events:
+        hook_id = str(event.get("hook_id", ""))
+        if hook_id in events_by_hook:
+            events_by_hook[hook_id].append(event)
+            continue
+
+        event_class = candidate.normalize_class_name(str(event.get("class", "")))
+        event_method = str(event.get("method", ""))
+        for candidate_hook, item in by_hook.items():
+            if (
+                candidate.normalize_class_name(str(item.get("class", ""))) == event_class
+                and str(item.get("method", "")) == event_method
+            ):
+                events_by_hook[candidate_hook].append(event)
+                break
+
+    verified: list[dict[str, Any]] = []
+    for hook_id in hook_ids:
+        item = dict(by_hook[hook_id])
+        matched_events = events_by_hook.get(hook_id, [])
+        hits = len(matched_events)
+        item["hook_id"] = hook_id
+        item["verification_hits"] = hits
+        item["verified"] = hits > 0
+        verified.append(item)
+
+        if hits:
+            investigation.record_trace_evidence(
+                session_id,
+                candidate.normalize_class_name(str(item.get("class", ""))),
+                str(item.get("method", "")),
+                matched_events,
+            )
+
+    verified.sort(
+        key=lambda item: (
+            -int(item.get("verification_hits", 0)),
+            -int(item.get("score", 0)),
+            int(item.get("rank", 999)),
+        )
+    )
+    confirmed = [item for item in verified if item["verified"]]
+    missed = [item for item in verified if not item["verified"]]
+
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "candidate_verification",
+            "query": query,
+            "tested": len(verified),
+            "confirmed": len(confirmed),
+            "events": len(events),
+        },
+    )
+
+    return {
+        "ok": not bool(collect_error),
+        "session_id": session_id,
+        "package": state["package"],
+        "query": query,
+        "posted": posted,
+        "tested": len(verified),
+        "confirmed_count": len(confirmed),
+        "confirmed": confirmed,
+        "missed": missed,
+        "event_count": len(events),
+        "events": events[:100],
+        "event_cursor": latest,
+        "cleanup": cleanup,
+        "error": collect_error or None,
     }
 
 
