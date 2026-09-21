@@ -195,6 +195,80 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
 
 
 @mcp.tool()
+def trace_target(session_id: str, class_name: str, method: str,
+                 params: Optional[list] = None,
+                 seconds: float = 12.0,
+                 max_events: int = 80,
+                 hot: bool = False,
+                 restart: bool = True,
+                 cleanup: bool = True,
+                 stack: bool = False,
+                 paths: Optional[list] = None) -> dict:
+    """在当前会话目标上临时 trace 一个 Java 方法，命中即返回，并默认自动卸载 Hook。
+
+    这是 trace_java 的会话化快捷入口：自动使用会话包名、维护事件游标、生成唯一 hook_id，
+    默认 until_first_hit=True，避免每次手工拼 package/hook id/采集参数。
+    """
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    safe_method = re.sub(r"[^A-Za-z0-9_]", "_", method)[:30] or "method"
+    safe_class = re.sub(r"[^A-Za-z0-9_]", "_", class_name.rsplit(".", 1)[-1])[:24] or "class"
+    hook_id = f"rb_{session_id}_{safe_class}_{safe_method}"
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    investigation.add_temporary_hook(session_id, hook_id)
+    try:
+        result = trace_java(
+            package=state["package"],
+            class_name=class_name,
+            method=method,
+            params=params,
+            paths=paths,
+            stack=stack,
+            hook_id=hook_id,
+            restart=restart,
+            seconds=seconds,
+            max_events=max_events,
+            until_first_hit=True,
+            include_recent=True,
+            since_seq=cursor,
+            hot=hot,
+        )
+        try:
+            latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
+            investigation.set_event_cursor(session_id, latest)
+        except Exception:
+            latest = cursor
+
+        investigation.add_discovery(session_id, {
+            "type": "runtime_trace",
+            "class": class_name,
+            "method": method,
+            "hits": result.get("count", 0),
+        })
+        result.update({
+            "session_id": session_id,
+            "package": state["package"],
+            "hook_id": hook_id,
+            "event_cursor": latest,
+        })
+        return result
+    finally:
+        if cleanup:
+            try:
+                unhook(state["package"], hook_id)
+            finally:
+                investigation.remove_temporary_hook(session_id, hook_id)
+
+
+@mcp.tool()
 def close_investigation(session_id: str, cleanup_hooks: bool = True) -> dict:
     """结束分析会话；默认同时清理该目标包由分析过程留下的 hook。"""
     try:
