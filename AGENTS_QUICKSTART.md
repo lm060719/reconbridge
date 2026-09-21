@@ -58,6 +58,9 @@
 | `inspect_method(session_id, class_name, method, descriptor="", ...)` | 已知具体方法时查看一层 callers/callees、关联字符串、同类字段和 JADX 方法体；可自动准备源码 |
 | `inspect_call_graph(session_id, class_name, method, upstream_depth=2, downstream_depth=2, ...)` | 递归展开调用图；默认标准库/Android/Kotlin 节点只显示不继续扩，返回代表业务路径并标记 runtime 覆盖 |
 | `verify_call_path(session_id, class_name, method, path_index=0, seconds=15, ...)` | 对代表路径统一挂 before Hook；一次行为触发后返回真实时间线、节点/边覆盖率、同线程完整路径和相邻入口 delta_ms |
+| `capture_call_graph_scenario(session_id, name, class_name, method, ...)` | 围绕目标方法对整张局部调用图挂同一组 before Hook，采集一个可做 A/B 比较的命名场景 |
+| `list_call_graph_scenarios(session_id)` | 列出当前 Investigation 会话保存的调用图场景 |
+| `diff_call_graph_scenarios(session_id, a, b)` | 校验两次采集使用相同静态图+Hook 集合后，输出公共前缀、首次分叉、仅 A/仅 B 方法/边和共享边耗时差 |
 | `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
@@ -189,17 +192,31 @@ unhook(package="com.target.app")   # + 用外部 adb: adb shell am force-stop <p
 
 **D. native 层 hook（M3，非 Java）** —— 见 `m3/HOOK_PROTOCOL.md`，用 `post_hook` 下发 `lib+symbol`/`offset` 目标，`collect_events` 收命中。
 
-**E. "A 与 B 行为为何不同"（场景差分，P2）** —— 逆向里最常见的一类问题（如「查看X」跳转而「打开X」不跳、App 对话渲染答案卡而悬浮窗不渲染）。
+**E. "A 与 B 行为为何不同"（调用图场景差分，推荐）** —— 例如会员/非会员、打开/查看、成功/失败两个行为为什么走不同分支。
 ```
-# 1) 先 arm 一组【较宽】的 trace（可疑的跳转/渲染/编排方法都挂上）
-trace_java(...)  # 或多次 post_hook；目标进程带上这些 hook 运行
-# 2) 分别捕两个场景，各在窗口内做一次对应操作
-capture_scenario("查看")   # ← 做「查看X」
-capture_scenario("打开")   # ← 做「打开X」
-# 3) 直接看差异：只在某一侧命中的方法 / 同方法参数不同
-diff_scenarios("查看", "打开")
-# → only_in_a=[..跳转相关方法..]、differing_args=[..同方法不同参数..]，一眼定位分歧点
+# 先用 investigate 找到共同的关键目标方法，例如 PayManager.checkVip
+capture_call_graph_scenario(
+    session_id, "非会员",
+    class_name="com.target.PayManager", method="checkVip"
+)
+# ↑ 在采集窗口里执行一次“非会员”操作
+
+capture_call_graph_scenario(
+    session_id, "会员",
+    class_name="com.target.PayManager", method="checkVip"
+)
+# ↑ 用完全相同的静态调用图和 Hook 范围执行一次“会员”操作
+
+diff_call_graph_scenarios(session_id, "非会员", "会员")
+# → common_prefix: Entry.onClick → PayManager.checkVip
+# → a_next: Paywall.showPaywall
+# → b_next: Feature.enterFeature
+# → only_in_a / only_in_b / only_edges_a / only_edges_b
+# → shared_edge_timing: 两边共同边的入口耗时差
 ```
+两次采集会同时保存 `graph_fingerprint` 与 `hook_fingerprint`；任一不一致就拒绝给出“业务分叉”结论，避免第二次 Hook 少挂了方法导致假差异。场景事件经过压缩后独立保存在当前 Investigation 会话目录，不会持续膨胀主 session JSON。
+
+原来的 `capture_scenario / diff_scenarios` 仍保留，适合已经手工 arm 好一批任意 Hook、需要比较参数值差异的低层场景；新流程优先用于 Java 业务调用链分叉。
 
 ---
 
@@ -240,6 +257,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 触发一次行为确认真实链路。要完整静态图用 `inspect_call_graph`，只展开另一个方法用 `inspect_method`；确认链路后再 `trace_target` 抓精细参数/字段。
+3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 触发一次行为确认真实链路。若比较两个行为，分别 `capture_call_graph_scenario` 后用 `diff_call_graph_scenarios` 找首次分叉。要完整静态图用 `inspect_call_graph`，只展开另一个方法用 `inspect_method`；确认链路后再 `trace_target` 抓精细参数/字段。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
