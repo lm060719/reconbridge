@@ -296,7 +296,7 @@ def open_target(package_name: str, auto_pull: bool = True, note: str = "") -> di
     """开启一个持久化分析会话，并自动绑定该包现有 APK/JADX/so 产物。
 
     默认在本地没有 APK 时尝试从设备拉取；即使设备暂时不可用，也会保留会话并返回 warning。
-    后续优先使用 search_target / prepare_target / investigation_status，不必重复传包名和路径。
+    后续优先直接使用 investigate；需要手工展开具体方法时用 inspect_method / trace_target。
     """
     _validate_package_name(package_name)
     state = investigation.create(package_name, note=note)
@@ -309,7 +309,7 @@ def open_target(package_name: str, auto_pull: bool = True, note: str = "") -> di
             warning = f"自动拉取 APK 失败: {exc}"
 
     result = investigation.status(state["session_id"])
-    result["workflow"] = "open_target -> search_target；需要完整源码时调用 prepare_target"
+    result["workflow"] = "open_target -> investigate；已知具体方法后用 inspect_method / trace_target"
     if warning:
         result["warning"] = warning
     return result
