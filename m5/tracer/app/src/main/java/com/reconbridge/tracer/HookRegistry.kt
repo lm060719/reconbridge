@@ -435,11 +435,12 @@ internal class HookRegistry(
         var lastError = ""
 
         for (tracked in loaders) {
+            val loader = tracked.loaderOrNull() ?: continue
             try {
                 val result = ClassLoaderWatcher.runSuppressed {
                     installer(
                         JSONObject(spec.toString()),
-                        tracked.loader,
+                        loader,
                     )
                 }
                 if (result.handles.isNotEmpty()) {
