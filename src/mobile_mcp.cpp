@@ -419,8 +419,10 @@ static const json& tools() {
              schema({{"bundle_path", prop("string")}, {"output_dir", prop("string", "")}}, {"bundle_path"})),
         tool("post_hook", "下发 native 或 Java hook 配置。",
              schema({{"config", prop("object")}}, {"config"})),
-        tool("list_hooks", "列出当前 hook 配置。", schema()),
-        tool("unhook", "移除某包全部 hook 或指定 hook id。",
+        tool("list_hooks", "列出当前磁盘上的期望 hook 配置。", schema()),
+        tool("runtime_hook_status", "查看运行中 Tracer 的 HookRegistry 真实状态。",
+             schema({{"package", prop("string", "")}})),
+        tool("unhook", "移除某包全部 hook 或指定 hook id；运行中 M5 会立即 live unhook。",
              schema({{"package", prop("string")}, {"hook_id", prop("string", "")}}, {"package"})),
         tool("collect_events", "收集 hook 命中事件，支持最近事件补捞与早停。",
              schema({{"seconds", prop("number", 10.0)}, {"max_events", prop("integer", 200)},
@@ -722,6 +724,11 @@ static json invoke_tool(const std::string& name, const json& a) {
         return http_post("/hook", cfg);
     }
     if (name == "list_hooks") return http_get("/hooks");
+    if (name == "runtime_hook_status") {
+        std::string pkg = a.value("package", "");
+        if (!pkg.empty()) return http_get("/runtime_status", {{"package", pkg}});
+        return http_get("/runtime_status");
+    }
     if (name == "unhook") {
         json body = {{"package", a.value("package", "")}};
         if (!a.value("hook_id", "").empty()) body["id"] = a["hook_id"];
