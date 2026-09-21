@@ -44,6 +44,8 @@ description: >-
 - `capture_call_graph_scenario`：围绕同一目标方法对整张局部调用图挂同一组 before Hook，采集一次命名场景；默认不展开框架节点，结果独立存盘，不塞进主会话 JSON。
 - `diff_call_graph_scenarios`：比较两个同图同 Hook 集合的场景，输出公共前缀、首次分叉、仅 A/仅 B 节点与边，以及共享边耗时差。
 - `analyze_scenario_divergence`：取 A/B 公共前缀最后一个方法，自动回到 JADX 源码识别 if/else、switch、Kotlin when、三元表达式，按两侧下一跳方法做可解释排序，并生成只读 trace 探针计划。
+- `capture_divergence_probe`：按分叉条件排名自动执行一个安全探针；字段用 branch method 的 before 抓 `this.field`，条件方法用 after 抓返回值。结果压缩写回对应场景文件。
+- `compare_divergence_probes`：比较同一探针在 A/B 下的稳定值；布尔条件会检查是否与 `a_false_b_true / a_true_b_false` 源码方向一致。
 - `rank_candidates`：需要手工控制时，综合字符串 xref、方法名/类名和 Evidence Graph 对候选方法做可解释排序。
 - `verify_candidates`：一次性给前 N 个候选装观测 Hook，共享一个采集窗口；触发一次行为即可知道谁真实命中。
 - `trace_target`：已知具体方法时的单方法精细 trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook；命中会自动写入证据图。
@@ -62,7 +64,7 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-默认：`open_target` → `investigate(goal=...)` → 读取 `call_graph.representative_paths` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，在同一目标方法上分别调用两次 `capture_call_graph_scenario` → `diff_call_graph_scenarios` → `analyze_scenario_divergence`，直接从“首次分叉方法”继续收敛到具体 if/switch/字段/条件方法。条件里只有无接收者或 this/super 方法才自动生成同类 Hook 建议；如 `userManager.isPremium()` 只展示表达式，先解析接收者实际类型，避免错误 Hook。native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `investigate(goal=...)` → 读取 `call_graph.representative_paths` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes`。这样从首次分叉继续收敛到具体 if/switch/字段/条件方法，并用真实 A/B 值验证。条件里只有无接收者或 this/super 方法才自动生成同类 Hook；对象接收者先解析实际类型。native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
