@@ -64,6 +64,14 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon
 
+      - name: 上传 Tracer APK 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReconBridge-Tracer-debug
+          path: m5/tracer/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
   daemon-syntax:
     runs-on: ubuntu-latest
     timeout-minutes: 10
