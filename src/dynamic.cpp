@@ -278,6 +278,9 @@ static void reg_update_status(const std::shared_ptr<InjectConn>& c, const std::s
         return;
     }
     std::lock_guard<std::mutex> lk(g_conn_mutex);
+    if (status.contains("process") && status["process"].is_string()) {
+        c->process_name = status["process"].get<std::string>();
+    }
     c->runtime_status = std::move(status);
     c->status_updated_at = now_ms();
 }
