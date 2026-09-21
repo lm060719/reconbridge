@@ -516,6 +516,48 @@ def test_root_cause_ranking_annotations_are_written_to_evidence_nodes():
     assert origin["root_cause_score"] == 29
 
 
+def test_root_cause_hypothesis_verification_is_written_to_evidence():
+    graph = evidence.new_graph()
+    candidate = {
+        "candidate_type": "method",
+        "class": "com.example.Repo",
+        "method": "isVipEnabled",
+        "descriptor": "()Z",
+    }
+    comparison = {
+        "status": "internal_generation_supported",
+        "score_adjustment": 30,
+        "explanation": "入口可观测输入一致而输出不同",
+        "input_coverage_complete": True,
+        "differing_inputs": [],
+        "differing_outputs": [{"name": "return"}],
+    }
+
+    evidence.record_root_cause_hypothesis(
+        graph,
+        candidate,
+        comparison,
+    )
+
+    method = next(
+        node for node in graph["nodes"].values()
+        if node.get("type") == "method"
+    )
+    assert (
+        method["root_cause_hypothesis_status"]
+        == "internal_generation_supported"
+    )
+    assert method["root_cause_hypothesis_adjustment"] == 30
+    assert method["root_cause_hypothesis_differing_outputs"] == [
+        "return"
+    ]
+    assert any(
+        edge.get("relation") == "root_cause_hypothesis_verified"
+        and edge.get("status") == "internal_generation_supported"
+        for edge in graph["edges"]
+    )
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
