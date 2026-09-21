@@ -114,7 +114,7 @@
 |---|---|---|
 | `post_hook` | `(config)` | 下发原始 hook 配置（native 或 java，见协议）。**通用入口** |
 | `list_hooks` | `()` | 列磁盘上的**期望 Hook 配置** |
-| `runtime_hook_status` | `(package="")` | 查运行中 M5 Tracer 的**真实 HookRegistry + ClassLoaderRegistry**：installed/pending、member、loader、watcher、live unhook/replace 能力 |
+| `runtime_hook_status` | `(package="")` | 查运行中 M5 Runtime 真实状态：installed/pending、ClassLoader/watcher、Runtime State 各 scope 摘要、Event Bus handlers/counters、live unhook/replace 能力 |
 | `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 Hook；运行中的 M5 Java Hook 会立即 **live unhook**，无需 force-stop |
 | `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**；**`include_recent=True` 事后补捞**环形缓冲历史命中（命中发生在采集开始前也能拿到）；`fold_stack` 折叠栈顶 hook 框架帧 |
 | `recent_events` | `(limit=50, since_seq=0)` | **事后采集**：直接取守护进程环形缓冲里最近的命中，无需正连着 SSE。返回 `latest_seq` 可作游标只取增量 |
@@ -152,9 +152,9 @@
 - `capture`：`this`(class/tostring/none)、`when`(before/after/both/**none**=只篡改不出事件)、`args`/`all_args`、`ret`、`fields`(反射读私有字段)、`stack`。
 - `render`：`tostring`(数值/布尔原样，其余 toString 截断) / `class`(类名) / `json`(原样字符串交 PC 解析，适合参数本身是 JSON) / `deep`(反射深度序列化对象图，带深度/环/节点预算防爆)。
 - `paths`(嵌套字段路径捕获)：`[{"path":"args[1].payload.load_url","render":"tostring"}]`——直接拿深埋在 payload 对象里的值，不靠整对象 toString 撞运气。路径 `args[N]`/`this`/`ret` 起头，`.name` 逐层(反射字段→getter→Map key)，`[n]` 索引数组/List；裸字段名=`this.<name>`；解析不到标 `unresolved:true`。
-- `action`(篡改与 Action 流水线)：支持快捷覆盖入参 `replace_args:[{index,value,type}]`、覆盖返回值 `replace_return:{value,type}`、`skip_original`；同时支持高级动作链 `before_actions` / `after_actions`，包含 `call_method`(调用Java方法)、`set_field`(读写字段)、`construct`(构造对象)、`eval_js`(Rhino JS片段执行)、`eval_dex`(DEX动态执行)、`exec_shell`(执行Shell命令)。命中事件带 `tampered:true`。
+- `action`(篡改与 Action 流水线)：除 `replace_args/replace_return/skip_original/call_method/set_field/construct/eval_js/eval_dex/exec_shell` 外，还支持 `set_state/get_state/remove_state/clear_state/increment_state/append_state/emit_event`。State scope=`process/package/hook/thread`；模板和 condition 可直接读 `state.*`。`kind:"runtime"` target 或 Java target 的 `on_event/event_handlers` 可按 `event.*` 条件执行 Action。
 - `debug:true` 才逐命中打 logcat（默认安静）。
-- 配置同步是**全量 reconcile**：新 id 安装、同 id 改配置 live replace、缺失 id live remove；显式类若当前所有已知 loader 都找不到会进入 `pending_class`。常见 Path/Dex/InMemoryDexClassLoader 创建后会立刻重试，存在 pending 时还会临时监听 `ClassLoader.loadClass`。用 `runtime_hook_status` 看 `installed_count / pending_count / pending_hooks / class_loaders / class_loader_watch`。
+- 配置同步是**全量 reconcile**：新 id 安装、同 id改配置 live replace、缺失 id live remove；显式类若当前所有已知 loader 都找不到会进入 `pending_class`。Event handler 也作为 LiveHookHandle 跟随同一生命周期。同 ID replace 保留 hook-scope State；真正 remove/unhook 时会清理该 Hook 的 State 与事件订阅。用 `runtime_hook_status` 看 `installed_count / pending_count / class_loaders / runtime_state / event_bus`。
 
 ---
 
@@ -204,9 +204,64 @@ runtime_hook_status(package="com.target.app")  # 确认 installed_count 已回�
 > ——`skip_original` / `replace_return` / `replace_args` 秒级见效。验证通过后再把逻辑固化进 APK 模块，
 > 能省掉早期若干轮"改代码→编译→装→测"。
 
-**D. native 层 hook（M3，非 Java）** —— 见 `m3/HOOK_PROTOCOL.md`，用 `post_hook` 下发 `lib+symbol`/`offset` 目标，`collect_events` 收命中。
+**D. 跨 Hook 状态机 / Event → Action（M5 Runtime Phase 3）**
+```jsonc
+post_hook({
+  "package": "com.target.app",
+  "restart": false,
+  "targets": [
+    {
+      "kind": "java",
+      "id": "vip_source",
+      "class": "com.target.UserRepo",
+      "method": "refreshVip",
+      "capture": {"when": "none"},
+      "action": {
+        "after_actions": [
+          {
+            "action": "set_state",
+            "scope": "process",
+            "key": "vip",
+            "value": "${ret}"
+          },
+          {
+            "action": "emit_event",
+            "name": "vip_changed",
+            "payload": {"vip": "${ret}"}
+          }
+        ]
+      }
+    },
+    {
+      "kind": "runtime",
+      "id": "vip_listener",
+      "on_event": {
+        "name": "vip_changed",
+        "condition": {
+          "path": "event.vip",
+          "op": "eq",
+          "value": true
+        },
+        "actions": [
+          {
+            "action": "increment_state",
+            "scope": "process",
+            "key": "vip_true_hits"
+          }
+        ]
+      }
+    }
+  ]
+})
+runtime_hook_status("com.target.app")
+# → runtime_state.process.values.vip
+# → event_bus.handlers / emitted / delivered
+```
+Event Bus 同步运行在 emit 的当前线程；listener 对 State 的修改对后续 Hook 立即可见。纯 runtime handler 没有 this/args/ret，应使用 event/state 或静态 class 调用。
 
-**E. "A 与 B 行为为何不同"（调用图场景差分，推荐）** —— 例如会员/非会员、打开/查看、成功/失败两个行为为什么走不同分支。
+**E. native 层 hook（M3，非 Java）** —— 见 `m3/HOOK_PROTOCOL.md`，用 `post_hook` 下发 `lib+symbol`/`offset` 目标，`collect_events` 收命中。
+
+**F. "A 与 B 行为为何不同"（调用图场景差分，推荐）** —— 例如会员/非会员、打开/查看、成功/失败两个行为为什么走不同分支。
 ```
 # 先用 investigate 找到共同的关键目标方法，例如 PayManager.checkVip
 capture_call_graph_scenario(
