@@ -204,6 +204,69 @@ def test_partial_input_coverage_never_claims_strong_internal_generation():
     assert result["score_adjustment"] == 15
 
 
+def test_missing_runtime_field_prevents_strong_internal_confirmation():
+    plan = hypothesis_verify.plan_experiment(
+        _candidate(),
+        _context(),
+    )
+
+    def capture(name, ret):
+        return {
+            "scenario": name,
+            "hypothesis_fingerprint": plan["hypothesis_fingerprint"],
+            "candidate_key": plan["candidate_key"],
+            "analysis": {
+                "input_coverage": plan["input_coverage"],
+                "args": {
+                    "0": {
+                        "stable": True,
+                        "stable_value": {
+                            "type": "boolean",
+                            "value": False,
+                            "canonical": "false",
+                        },
+                    },
+                    "1": {
+                        "stable": True,
+                        "stable_value": {
+                            "type": "string",
+                            "value": "u1",
+                            "canonical": "u1",
+                        },
+                    },
+                },
+                # premiumStatus 在计划里，但本轮运行时没有实际读到。
+                "fields_before": {
+                    "premiumStatus": {
+                        "stable": False,
+                        "sample_count": 0,
+                        "stable_value": None,
+                    }
+                },
+                "fields_after": {},
+                "return": {
+                    "stable": True,
+                    "stable_value": {
+                        "type": "boolean",
+                        "value": ret,
+                        "canonical": "true" if ret else "false",
+                    },
+                },
+            },
+        }
+
+    result = hypothesis_verify.compare_captures(
+        capture("A", False),
+        capture("B", True),
+    )
+
+    assert result["planned_input_count"] == 3
+    assert result["comparable_input_count"] == 2
+    assert result["observed_input_complete"] is False
+    assert result["input_coverage_complete"] is False
+    assert result["status"] == "internal_generation_partial"
+
+
 def test_capture_uses_primary_thread_not_background_noise():
     plan = hypothesis_verify.plan_experiment(
         _candidate(),
