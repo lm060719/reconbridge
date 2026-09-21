@@ -406,6 +406,25 @@ def method_context(
     }
 
 
+def record_method_context_evidence(
+    session_id: str,
+    class_name: str,
+    method_name: str,
+    descriptor: str,
+    context: dict[str, Any],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_method_context(
+        graph,
+        class_name,
+        method_name,
+        descriptor,
+        context,
+    )
+    save(state)
+
+
 def source_search(session_id: str, query: str, limit: int = 20) -> dict[str, Any]:
     """对已有 JADX 源码做轻量流式文本搜索，不把完整源码读入内存。"""
     state = load(session_id, refresh=True)
