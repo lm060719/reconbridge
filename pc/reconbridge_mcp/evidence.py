@@ -137,6 +137,22 @@ def field_node(
     return node_id
 
 
+def origin_node(
+    graph: dict[str, Any],
+    kind: str,
+    label: str,
+    **attrs: Any,
+) -> str:
+    return add_node(
+        graph,
+        f"origin:{kind}:{_hash(label)}",
+        "state_origin",
+        label,
+        kind=kind,
+        **attrs,
+    )
+
+
 def source_node(graph: dict[str, Any], path: str, line: int) -> str:
     return add_node(
         graph,
@@ -549,6 +565,80 @@ def record_runtime_path(
             target_id,
             "runtime_sequence",
             delta_ms=edge.get("delta_ms"),
+        )
+
+
+def record_field_origin(
+    graph: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    """把字段 writer/reader 与可能来源写入 Evidence Graph。"""
+    if not context.get("ok"):
+        return
+    field = context.get("field") or {}
+    class_name = str(field.get("class", ""))
+    field_name = str(field.get("name", ""))
+    field_type = str(field.get("type", ""))
+    if not field_name:
+        return
+
+    fid = field_node(graph, class_name, field_name, field_type)
+
+    for writer in (context.get("writers") or [])[:100]:
+        mid = method_node(
+            graph,
+            str(writer.get("class", "")),
+            str(writer.get("method", "")),
+            str(writer.get("descriptor", "")),
+            access=writer.get("access", ""),
+            runtime_confirmed=bool(writer.get("runtime_confirmed")),
+            runtime_hits=int(writer.get("runtime_hits", 0) or 0),
+        )
+        add_edge(
+            graph,
+            mid,
+            fid,
+            "writes_field",
+            offset=int(writer.get("offset", 0) or 0),
+            writer_rank=int(writer.get("rank", 0) or 0),
+        )
+
+        for assignment in (writer.get("assignments") or [])[:12]:
+            for hint in (assignment.get("source_hints") or [])[:4]:
+                kind = str(hint.get("kind", "unknown"))
+                label = str(hint.get("reason") or kind)
+                oid = origin_node(
+                    graph,
+                    kind,
+                    label,
+                    confidence=float(hint.get("confidence", 0) or 0),
+                    expression=str(assignment.get("expression", ""))[:1000],
+                )
+                add_edge(
+                    graph,
+                    oid,
+                    mid,
+                    "feeds_writer",
+                    field=field_name,
+                    expression=str(assignment.get("expression", ""))[:1000],
+                )
+
+    for reader in (context.get("readers") or [])[:100]:
+        mid = method_node(
+            graph,
+            str(reader.get("class", "")),
+            str(reader.get("method", "")),
+            str(reader.get("descriptor", "")),
+            access=reader.get("access", ""),
+            runtime_confirmed=bool(reader.get("runtime_confirmed")),
+            runtime_hits=int(reader.get("runtime_hits", 0) or 0),
+        )
+        add_edge(
+            graph,
+            fid,
+            mid,
+            "read_by",
+            offset=int(reader.get("offset", 0) or 0),
         )
 
 
