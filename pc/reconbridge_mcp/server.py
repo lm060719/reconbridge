@@ -4653,6 +4653,183 @@ def runtime_activity_action(
     )
 
 
+def _normalize_runtime_program_manifest(manifest: dict | str) -> dict:
+    if isinstance(manifest, str):
+        try:
+            manifest = json.loads(manifest)
+        except Exception as exc:
+            raise ReconError(
+                f"Runtime Program manifest JSON 解析失败: {exc}"
+            ) from exc
+    if not isinstance(manifest, dict):
+        raise ReconError("Runtime Program manifest 必须是 JSON object")
+    return manifest
+
+
+def _runtime_program_write(
+    package: str,
+    manifest: dict | str,
+    *,
+    mode: str,
+    enable: Optional[bool],
+    restart: bool,
+    timeout_ms: int,
+    expected_revision: int,
+) -> dict:
+    _validate_package_name(package)
+    body: dict[str, Any] = {
+        "package": package,
+        "manifest": _normalize_runtime_program_manifest(manifest),
+        "mode": mode,
+        "restart": bool(restart),
+        "timeout_ms": max(200, min(int(timeout_ms), 10000)),
+    }
+    if enable is not None:
+        body["enable"] = bool(enable)
+    if int(expected_revision) > 0:
+        body["expected_revision"] = int(expected_revision)
+    return client.post_json("/runtime_program/install", body)
+
+
+@mcp.tool()
+def runtime_program_install(
+    package: str,
+    manifest: dict | str,
+    enable: bool = True,
+    restart: bool = False,
+    timeout_ms: int = 3000,
+) -> dict:
+    """安装一个命名 Runtime Program。
+
+    manifest 至少包含 id；可包含 name/version/description、targets、state_init、state_cleanup。
+    target id 会被命名空间化为 rp:<program>:<local_id>，避免不同 Program 冲突。
+    """
+    return _runtime_program_write(
+        package,
+        manifest,
+        mode="install",
+        enable=enable,
+        restart=restart,
+        timeout_ms=timeout_ms,
+        expected_revision=0,
+    )
+
+
+@mcp.tool()
+def runtime_program_replace(
+    package: str,
+    manifest: dict | str,
+    enable: Optional[bool] = None,
+    expected_revision: int = 0,
+    restart: bool = False,
+    timeout_ms: int = 3000,
+) -> dict:
+    """替换已安装 Runtime Program，并把旧版本压入最多 5 层 rollback 历史。
+
+    expected_revision>0 时启用乐观并发检查，避免覆盖另一端刚更新的版本。
+    enable=None 时沿用 Program 当前启用状态。
+    """
+    return _runtime_program_write(
+        package,
+        manifest,
+        mode="replace",
+        enable=enable,
+        restart=restart,
+        timeout_ms=timeout_ms,
+        expected_revision=expected_revision,
+    )
+
+
+def _runtime_program_toggle(
+    package: str,
+    program_id: str,
+    *,
+    enabled: bool,
+    restart: bool,
+    timeout_ms: int,
+) -> dict:
+    _validate_package_name(package)
+    body = {
+        "package": package,
+        "id": program_id,
+        "restart": bool(restart),
+        "timeout_ms": max(200, min(int(timeout_ms), 10000)),
+    }
+    endpoint = (
+        "/runtime_program/enable"
+        if enabled
+        else "/runtime_program/disable"
+    )
+    return client.post_json(endpoint, body)
+
+
+@mcp.tool()
+def runtime_program_enable(
+    package: str,
+    program_id: str,
+    restart: bool = False,
+    timeout_ms: int = 3000,
+) -> dict:
+    """启用已安装 Runtime Program，并 live reconcile + 应用 state_init。"""
+    return _runtime_program_toggle(
+        package,
+        program_id,
+        enabled=True,
+        restart=restart,
+        timeout_ms=timeout_ms,
+    )
+
+
+@mcp.tool()
+def runtime_program_disable(
+    package: str,
+    program_id: str,
+    restart: bool = False,
+    timeout_ms: int = 3000,
+) -> dict:
+    """禁用 Runtime Program；只移除该 Program 的 targets，并执行 state_cleanup。"""
+    return _runtime_program_toggle(
+        package,
+        program_id,
+        enabled=False,
+        restart=restart,
+        timeout_ms=timeout_ms,
+    )
+
+
+@mcp.tool()
+def runtime_program_rollback(
+    package: str,
+    program_id: str,
+    restart: bool = False,
+    timeout_ms: int = 3000,
+) -> dict:
+    """回滚 Runtime Program 到上一份 manifest；revision 继续单调递增。"""
+    _validate_package_name(package)
+    return client.post_json(
+        "/runtime_program/rollback",
+        {
+            "package": package,
+            "id": program_id,
+            "restart": bool(restart),
+            "timeout_ms": max(200, min(int(timeout_ms), 10000)),
+        },
+    )
+
+
+@mcp.tool()
+def runtime_program_status(
+    package: str,
+    program_id: str = "",
+) -> dict:
+    """查看一个包已持久化的 Runtime Program、版本、启用状态和 rollback 深度。"""
+    _validate_package_name(package)
+    params = {"package": package}
+    if program_id:
+        params["id"] = program_id
+    return client.get_json("/runtime_programs", params=params)
+
+
 @mcp.tool()
 def unhook(package: str, hook_id: str = "") -> dict:
     """移除某包 hook；运行中的 M5 Tracer 会立即 live unhook。
