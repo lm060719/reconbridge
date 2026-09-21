@@ -178,17 +178,85 @@ daemon 下发的配置被视为“完整期望状态”，运行中收到新配�
 查询分两层：
 
 - `GET /hooks` / MCP `list_hooks`：磁盘上的**期望配置**；
-- `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**真实 HookRegistry 状态**，包含进程、pid、实际已安装 id、member 数、fingerprint，以及 `live_unhook/replace_supported`。
+- `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**真实 HookRegistry / ClassLoader 状态**，包含进程、pid、installed/pending Hook、member、fingerprint、ClassLoader 注册表，以及 live unhook / replace / pending 能力。
+
+## 动态 ClassLoader / Pending Hook（Runtime Phase 2）
+
+显式指定 `"class":"com.foo.PluginEntry"` 的 Java target 在同步时会依次尝试当前已知 ClassLoader。若所有已知 loader 都抛出 `ClassNotFoundException / NoClassDefFoundError`，它不会计为安装失败，而是进入：
+
+```text
+state = pending_class
+```
+
+进程内现在有两层 ClassLoader 发现机制：
+
+1. **BaseDexClassLoader 构造监听**：常驻但低频，用来发现常见的 `PathClassLoader` / `DexClassLoader` / `InMemoryDexClassLoader`。新 loader 一出现就立刻拿它重试所有 pending target，不需要等目标类被业务代码主动调用。
+2. **ClassLoader.loadClass 监听**：仅当 `pending_count > 0` 时临时启用，并只对 pending 的精确类名触发安装回调。pending 清空后立即卸载 watcher，减少长期类加载开销。
+
+Watcher 与 HookRegistry 都有线程递归保护；Registry 自己为了安装 target 调用 `loader.loadClass()` 时不会再次进入 pending 安装回调。
+
+pending 与 live replace 可以组合：如果同一个 Hook ID 的旧版本已经 installed，而新版本把目标改成了尚未加载的插件类，则旧 Hook **继续保持生效**，新 spec 以 `replacing_installed:true` 等待；只有新类在某个 loader 上成功安装后，Registry 才卸载旧 Hook 并完成 replace。
+
+`unhook(package, id)` / 全量 reconcile 删除 ID 时会同时删除对应 pending；不会出现“已经取消，但以后插件类出现又突然装回来”的情况。
+
+ClassLoaderRegistry 对 loader 实例使用**弱引用**。运行时状态保存 loader id / 实现类 / first_seen / last_seen / last_loaded_class 等轻量元数据，但不会仅因为监控就永久阻止可卸载插件 ClassLoader 被 GC。
+
+典型 `runtime_hook_status(package)` 片段：
+
+```jsonc
+{
+  "installed_count": 1,
+  "pending_count": 1,
+  "pending_hook_supported": true,
+  "dynamic_classloader_supported": true,
+  "hooks": [
+    {
+      "id": "main_check",
+      "state": "installed",
+      "class_loader_id": "cl1",
+      "class_loader_class": "dalvik.system.PathClassLoader"
+    }
+  ],
+  "pending_hooks": [
+    {
+      "id": "plugin_check",
+      "class": "com.foo.plugin.Checker",
+      "state": "pending_class",
+      "attempts": 2,
+      "last_error": "java.lang.ClassNotFoundException: ...",
+      "replacing_installed": false
+    }
+  ],
+  "class_loader_count": 2,
+  "class_loaders": [
+    {
+      "id": "cl1",
+      "class": "dalvik.system.PathClassLoader",
+      "source": "lpparam.classLoader",
+      "alive": true
+    }
+  ],
+  "class_loader_watch": {
+    "base_dex_constructor_watch": true,
+    "load_class_watch": true
+  }
+}
+```
+
+注意：
+- 自动 pending 最可靠的是**显式 `class` target**。只有 `using_strings`、没有确定类名的搜索型 target 仍依赖当前能扫描到的 DEX，不能保证在未来插件 DEX 出现后自动重新做字符串搜索。
+- 极少数完全绕过标准 `BaseDexClassLoader` / `ClassLoader.loadClass` 语义的自定义 native loader 仍可能观察不到。
+- 首次让 Tracer 进入目标进程的限制仍然存在：如果目标进程启动时完全没有 M5 配置，Tracer 不会建立长期控制通道。第一次下发到一个已运行且从未连接过的进程，仍建议 `restart:true`。
 
 ## 语义与限制
 
 - **trace（观测）+ 实时篡改（action）** 均支持。篡改在 Xposed before（改参数/skip）/after（改返回值）阶段生效。
-- 类解析用目标进程主 classloader（`lpparam.classLoader`）；动态加载进独立 classloader 的类暂不覆盖。
+- 类解析不再只限主 loader：HookRegistry 会先尝试所有已知 loader；找不到的显式类进入 pending，并由 BaseDexClassLoader / loadClass watcher 后续自动补装。
 - 首个 hook 仍需目标进程先加载 Tracer；最稳妥的起手式仍是 `restart:true`。
 - 进程已连接后，`restart:false` 会走实时 reconcile：daemon 用 `'R'` 下发**完整期望配置**，
   HookRegistry 自动 add/remove/replace。PC 侧 `trace_java(hot=True)` 继续可免重启追加；
   同 ID target 发生变化时会 live replace，`unhook` 会 live remove。
-- tracer 通过 `'S'` 帧持续回报 HookRegistry 真实状态；`runtime_hook_status` 可核对“配置已下发”与“进程里实际已安装”是否一致。
+- tracer 通过 `'S'` 帧持续回报 HookRegistry + ClassLoaderRegistry 真实状态；`runtime_hook_status` 可核对“配置已下发”“当前 installed”“仍在 pending”“被哪个 loader 安装”。
 - native M3 目标不发送 `'H'/'S'`，因此这些 live reconcile 能力目前只保证 M5 Java Hook。
 - 复杂对象默认只 `toString()` + 类名；要看内部状态用 `fields`（点名反射某字段）、`paths`（按路径取深埋值）
   或 `render:"deep"`（整棵对象图序列化，有深度/环/节点预算防爆）。
