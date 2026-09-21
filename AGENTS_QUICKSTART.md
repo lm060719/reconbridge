@@ -54,7 +54,8 @@
 | 工具 | 用途 |
 |---|---|
 | `open_target(package_name, auto_pull=True, note="")` | 创建持久化分析会话；自动绑定本地 APK/JADX/so，本地没 APK 时默认尝试从设备拉取 |
-| `investigate(session_id, goal, verify_runtime=True, top_n=5, seconds=15, ...)` | **默认首选**：自然语言目标自动执行关键词规划、索引、多词候选排序、批量运行时验证和证据汇总；运行时失败自动保留静态结果 |
+| `investigate(session_id, goal, verify_runtime=True, top_n=5, seconds=15, ...)` | **默认首选**：自然语言目标自动执行关键词规划、索引、多词候选排序、批量运行时验证，并自动展开主候选 callers/callees + JADX 源码上下文；运行时失败仍保留静态与源码结果 |
+| `inspect_method(session_id, class_name, method, descriptor="", ...)` | 已知具体方法时直接查看调用者、被调用方法、关联字符串、同类字段和 JADX 方法体；可自动准备源码 |
 | `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
@@ -146,12 +147,12 @@
 device_status
 → open_target("com.target.app")                 # 返回 session_id
 → investigate(session_id, goal="找到会员状态判断方法", top_n=5)
-# ↑ 自动：关键词规划 → SQLite 索引 → 多词候选合并 → 批量 Hook → 证据汇总
+# ↑ 自动：关键词规划 → SQLite v2 索引 → 多词候选合并 → 批量 Hook → callers/callees → JADX 方法体 → 证据汇总
 # 如果此轮需要 runtime 验证，在采集窗口里触发一次目标行为即可
 → prepare_target(session_id)                    # 只有需要完整源码上下文时再做
 → trace_target(session_id, "com.target.PayManager", "checkVip")  # 已明确方法后精细抓参数/字段
 ```
-同一个 APK 的索引只需构建一次；之后即使换不同关键词/类名/方法名，也直接查 SQLite，不再重复启动 Androguard。候选排序会优先利用字符串 xref 与已有运行时证据；批量验证只需要一次行为触发。搜索和 trace 结果会自动沉淀进 Evidence Graph，APK 文件发生变化后索引会自动失效并重建。
+同一个 APK 的索引只需构建一次；DEX 索引 v2 额外持久化方法调用边，所以 callers/callees 也无需重新启动 Androguard。旧版索引首次使用会自动重建。候选排序会优先利用字符串 xref 与已有运行时证据；批量验证只需要一次行为触发。主候选确定后会自动准备/复用 JADX 并附带方法体源码。搜索、调用关系和 trace 结果都会沉淀进 Evidence Graph。
 
 **B. 定位并观测一个 Java 方法（推荐）**
 ```
@@ -234,6 +235,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 默认直接 `investigate(session_id, goal=...)`；需要完整源码才 `prepare_target`；已明确具体方法后再 `trace_target` 做精细观测。
+3. 默认直接 `investigate(session_id, goal=...)`；结果会自动带主候选调用关系与源码。要手工展开另一个方法用 `inspect_method`；已明确具体方法后再 `trace_target` 做精细运行时观测。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
