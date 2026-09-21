@@ -41,6 +41,28 @@ def _add(
 
 
 def _next_action(candidate: dict[str, Any]) -> str:
+    verification = candidate.get("hypothesis_verification") or {}
+    status = str(verification.get("status", ""))
+    if status == "internal_generation_supported":
+        return (
+            "最小假设实验显示入口可观测输入一致而输出不同；"
+            "优先检查该方法内部条件、局部计算、隐藏字段和下游调用返回值构造"
+        )
+    if status == "internal_generation_partial":
+        return (
+            "已观测输入一致但覆盖不完整；继续补未捕获字段/全局状态，"
+            "确认差异是否真的在方法内部产生"
+        )
+    if status == "upstream_input_difference":
+        return (
+            "实验显示差异进入该方法之前就已存在；降低当前方法优先级，"
+            "沿 differing_inputs 对应参数/字段继续追上游生产者"
+        )
+    if status == "not_reproduced":
+        return (
+            "本轮没有复现该候选的输出差异；确认触发条件，或优先检查其他高排名候选"
+        )
+
     if candidate.get("is_first_runtime_difference"):
         return (
             "优先 inspect_method / trace_target 检查该方法的入参、对象字段与返回值构造；"
@@ -74,6 +96,7 @@ def _next_action(candidate: dict[str, Any]) -> str:
 def rank_root_causes(
     lineage: dict[str, Any],
     runtime_comparison: dict[str, Any] | None = None,
+    hypothesis_results: dict[str, dict[str, Any]] | None = None,
     selected_path_index: int = 0,
     limit: int = 5,
 ) -> dict[str, Any]:
@@ -245,10 +268,41 @@ def rank_root_causes(
                     "该 writer 在运行时真实改变了目标条件字段",
                 )
 
+        verification = (
+            (hypothesis_results or {}).get(key)
+            if hypothesis_results
+            else None
+        )
+        if isinstance(verification, dict):
+            adjustment = int(
+                verification.get("score_adjustment", 0) or 0
+            )
+            if adjustment:
+                _add(
+                    breakdown,
+                    "root_cause_hypothesis",
+                    adjustment,
+                    str(
+                        verification.get("explanation")
+                        or f"根因假设实验: {verification.get('status', '')}"
+                    ),
+                )
+
         raw_score = sum(int(item["points"]) for item in breakdown)
         score = max(0, min(100, raw_score))
 
-        if is_first and runtime_available:
+        verification_status = (
+            str(verification.get("status", ""))
+            if isinstance(verification, dict)
+            else ""
+        )
+        if verification_status == "internal_generation_supported":
+            evidence_level = "hypothesis_internal_supported"
+        elif verification_status == "upstream_input_difference":
+            evidence_level = "hypothesis_upstream"
+        elif verification_status == "not_reproduced":
+            evidence_level = "hypothesis_not_reproduced"
+        elif is_first and runtime_available:
             evidence_level = "runtime_divergence"
         elif is_writer and writer_changed:
             evidence_level = "runtime_writer"
@@ -272,6 +326,28 @@ def rank_root_causes(
             "is_first_runtime_difference": is_first,
             "is_writer": is_writer,
             "writer_changed": bool(is_writer and writer_changed),
+            "hypothesis_verification": (
+                {
+                    "status": verification.get("status"),
+                    "score_adjustment": int(
+                        verification.get("score_adjustment", 0) or 0
+                    ),
+                    "explanation": verification.get("explanation", ""),
+                    "differing_inputs": verification.get(
+                        "differing_inputs",
+                        [],
+                    )[:8],
+                    "differing_outputs": verification.get(
+                        "differing_outputs",
+                        [],
+                    )[:8],
+                    "input_coverage_complete": bool(
+                        verification.get("input_coverage_complete")
+                    ),
+                }
+                if isinstance(verification, dict)
+                else None
+            ),
         }
 
         if node_type == "method":
