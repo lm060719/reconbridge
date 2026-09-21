@@ -277,6 +277,13 @@ internal class HookRegistry(
         }
     }
 
+    fun isPendingClass(className: String): Boolean
+    {
+        synchronized(lock) {
+            return pending.values.any { it.className == className }
+        }
+    }
+
     fun clear(): Int
     {
         synchronized(lock) {
@@ -330,6 +337,7 @@ internal class HookRegistry(
                 )
             }
 
+            val loaderSnapshot = classLoaders.snapshotJson()
             return JSONObject().apply {
                 put("package", packageName)
                 put("process", processName)
@@ -340,12 +348,12 @@ internal class HookRegistry(
                 put("dynamic_classloader_supported", true)
                 put("installed_count", installed.size)
                 put("pending_count", pending.size)
-                put("class_loader_count", classLoaders.size())
+                put("class_loader_count", loaderSnapshot.length())
                 put("last_sync_at", lastSyncAt)
                 put("last_pending_resolve_at", lastPendingResolveAt)
                 put("hooks", hooks)
                 put("pending_hooks", pendingHooks)
-                put("class_loaders", classLoaders.snapshotJson())
+                put("class_loaders", loaderSnapshot)
             }
         }
     }
@@ -431,11 +439,14 @@ internal class HookRegistry(
     ): InstallAttempt
     {
         val loaders = classLoaders.loaders()
+        var attempted = 0
         var classNotFoundCount = 0
+        var nonClassError = ""
         var lastError = ""
 
         for (tracked in loaders) {
             val loader = tracked.loaderOrNull() ?: continue
+            attempted++
             try {
                 val result = ClassLoaderWatcher.runSuppressed {
                     installer(
@@ -452,19 +463,19 @@ internal class HookRegistry(
                     )
                 }
                 lastError = "安装结果为空"
+                if (nonClassError.isEmpty()) {
+                    nonClassError = lastError
+                }
             } catch (t: Throwable) {
                 lastError = t.toString()
                 if (isClassNotFound(t)) {
                     classNotFoundCount++
                     continue
                 }
-
-                return InstallAttempt(
-                    result = null,
-                    loader = null,
-                    classNotFoundOnly = false,
-                    error = lastError,
-                )
+                if (nonClassError.isEmpty()) {
+                    nonClassError = lastError
+                }
+                // 不立即失败：另一个已知插件 loader 可能拥有同名类的正确版本。
             }
         }
 
@@ -472,10 +483,10 @@ internal class HookRegistry(
             result = null,
             loader = null,
             classNotFoundOnly = (
-                loaders.isNotEmpty() &&
-                classNotFoundCount == loaders.size
+                attempted > 0 &&
+                classNotFoundCount == attempted
             ),
-            error = lastError,
+            error = nonClassError.ifEmpty { lastError },
         )
     }
 
