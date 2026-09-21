@@ -13,7 +13,8 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
 
 ## 组成
 - `tracer/` —— 通用 LSPosed 模块（Kotlin/Gradle），本身无任何特定 App 逻辑。
-  - `HookEntry.kt` —— 读配置、按 `kind:java` 目标装 XposedBridge trace/action 回调。
+  - `HookEntry.kt` —— LSPosed 入口，把完整期望配置交给进程级 HookRegistry 做实时同步。
+  - `HookRegistry.kt` —— 保存真实 Xposed Unhook handle，支持 live add/remove/replace 和运行时状态快照。
   - `ActionExecutor.kt` —— 动作流水线执行器（支持调用 Java 方法、修改/读取字段、构造对象、执行 JS/DEX 片段、执行 shell 命令、组合 before/after callback）。
   - `InjectSocket.kt` —— 复刻 M3 的 `@reconbridge_inject` 抽象 socket 分帧协议。
 **中文** | [English](README_en.md)
@@ -52,4 +53,4 @@ cd m5/tracer && ./gradlew.bat :app:assembleDebug
 （仓库在非 ASCII 路径，`gradle.properties` 里已加 `android.overridePathCheck=true`；内置 Rhino JS 引擎，支持脚本动态计算。）
 
 ## 边界与能力
-支持 Trace（观测）、字符串特征反查（`using_strings` 自动定位混淆方法）、免重启热加（`hot=True`）、实时篡改（参数/返回值覆盖/Skip原方法/深层字段与 Map key 篡改 `mutate_return`）、条件执行（`condition` / `if`）、`after` 阶段返回值 Path 读写、**Action Pipeline**（调用 Java 方法/改写字段/构造对象/Rhino JS片段/DEX动态执行/shell命令）及模板变量 `${...}`。需 LSPosed 并在管理器里勾选作用域；类解析走主 classloader。详见 `JAVA_HOOK_PROTOCOL.md`。
+支持 Trace（观测）、字符串特征反查、实时 add/remove/replace、真正 live unhook、`runtime_hook_status` 查询当前进程真实 HookRegistry、实时篡改（参数/返回值覆盖/Skip原方法/深层字段与 Map key 篡改）、条件执行、`after` 阶段返回值 Path 读写、**Action Pipeline**（调用 Java 方法/改写字段/构造对象/Rhino JS片段/DEX动态执行/shell命令）及模板变量 `${...}`。需 LSPosed 并在管理器里勾选作用域；当前类解析仍走主 classloader，动态 ClassLoader Watch 留到 Runtime Phase 2。详见 `JAVA_HOOK_PROTOCOL.md`。
