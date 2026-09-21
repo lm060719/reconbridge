@@ -2908,10 +2908,15 @@ def rank_root_causes(
         },
     )
 
+    top_hypothesis = top.get("hypothesis_verification") or {}
     if missing_runtime:
         next_action = (
             "当前排名包含静态证据；要提升到运行时根因排序，请分别调用 verify_value_lineage，"
             "capture_for=" + " / ".join(missing_runtime)
+        )
+    elif top_hypothesis.get("status"):
+        next_action = str(top.get("next_action", "")) or (
+            "该候选已完成最小假设实验；按验证结论继续追内部计算或上游输入"
         )
     elif top.get("is_first_runtime_difference"):
         next_action = (
