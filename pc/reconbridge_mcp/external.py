@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import shutil
 import sys
@@ -142,6 +144,19 @@ def decompile_apk(apk_path: str, output_dir: str = "", no_res: bool = True) -> d
 # ---------------------------------------------------------------------------
 # dexkit_search —— 用 androguard 做类/方法/字段/字符串定位
 # ---------------------------------------------------------------------------
+def _dexkit_cache_path(apk: Path, query: dict) -> Path:
+    stat = apk.stat()
+    apk_key = hashlib.sha256(
+        f"{apk.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8")
+    ).hexdigest()[:24]
+    query_key = hashlib.sha256(
+        json.dumps(query, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    cache_dir = settings.workdir / ".cache" / "dexkit" / apk_key
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{query_key}.json"
+
+
 def dexkit_search(apk_path: str, query: dict) -> dict:
     """在独立 worker 中运行 Androguard，任务结束后由操作系统一次性回收分析堆。"""
     apk = Path(apk_path)
@@ -150,6 +165,15 @@ def dexkit_search(apk_path: str, query: dict) -> dict:
 
     import json as _json
     import tempfile
+
+    cache_path = _dexkit_cache_path(apk, query)
+    if cache_path.exists():
+        try:
+            cached = _json.loads(cache_path.read_text(encoding="utf-8"))
+            cached["cache_hit"] = True
+            return cached
+        except Exception:
+            cache_path.unlink(missing_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="reconbridge-dexkit-") as td:
         td_path = Path(td)
@@ -200,6 +224,15 @@ def dexkit_search(apk_path: str, query: dict) -> dict:
         result["memory_limit_mb"] = settings.dexkit_memory_mb
         if p.log_tail:
             result["log_tail"] = p.log_tail
+        result["cache_hit"] = False
+        if result.get("ok"):
+            try:
+                cache_path.write_text(
+                    _json.dumps(result, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         return result
 
 
