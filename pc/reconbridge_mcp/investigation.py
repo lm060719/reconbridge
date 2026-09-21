@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .dex_index import index_status
 from .settings import settings
 
 _SESSION_RE = re.compile(r"^[a-f0-9]{12}$")
@@ -112,10 +113,14 @@ def load(session_id: str, refresh: bool = False) -> dict[str, Any]:
 def status(session_id: str) -> dict[str, Any]:
     state = load(session_id, refresh=True)
     artifacts = state["artifacts"]
+    primary_apk = state.get("primary_apk", "")
+    dex_index = index_status(primary_apk) if primary_apk else {"ready": False, "path": "", "bytes": 0}
     return {
         "session_id": state["session_id"],
         "package": state["package"],
-        "primary_apk": state.get("primary_apk", ""),
+        "primary_apk": primary_apk,
+        "dex_index": dex_index,
+        "dex_index_ready": bool(dex_index.get("ready")),
         "apk_count": len(artifacts.get("apks", [])),
         "lib_count": len(artifacts.get("libs", [])),
         "jadx_ready": bool(artifacts.get("jadx_dirs")),
