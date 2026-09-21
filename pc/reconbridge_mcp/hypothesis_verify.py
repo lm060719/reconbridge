@@ -590,9 +590,20 @@ def compare_captures(
 
     coverage_a = analysis_a.get("input_coverage") or {}
     coverage_b = analysis_b.get("input_coverage") or {}
+    planned_input_count = max(
+        int(coverage_a.get("captured_argument_count", 0) or 0)
+        + int(coverage_a.get("captured_field_count", 0) or 0),
+        int(coverage_b.get("captured_argument_count", 0) or 0)
+        + int(coverage_b.get("captured_field_count", 0) or 0),
+    )
+    observed_input_complete = bool(
+        planned_input_count > 0
+        and len(comparable_inputs) == planned_input_count
+    )
     input_coverage_complete = bool(
         coverage_a.get("complete")
         and coverage_b.get("complete")
+        and observed_input_complete
     )
 
     if differing_outputs and differing_inputs:
@@ -649,7 +660,9 @@ def compare_captures(
         "status": status,
         "score_adjustment": score_adjustment,
         "input_coverage_complete": input_coverage_complete,
+        "planned_input_count": planned_input_count,
         "comparable_input_count": len(comparable_inputs),
+        "observed_input_complete": observed_input_complete,
         "differing_inputs": differing_inputs,
         "same_inputs": same_inputs,
         "outputs": outputs,
