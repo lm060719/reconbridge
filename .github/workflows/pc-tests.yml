@@ -1,0 +1,42 @@
+name: PC MCP Tests
+
+on:
+  push:
+    branches:
+      - master
+      - "chatgpt/**"
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: pc
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pc/requirements.txt
+
+      - name: 安装依赖
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 PC 侧测试
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: pytest -q
