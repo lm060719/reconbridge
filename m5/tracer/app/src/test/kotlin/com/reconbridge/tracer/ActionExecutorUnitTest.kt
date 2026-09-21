@@ -145,7 +145,7 @@ class ActionExecutorUnitTest {
                     put("action", "set_state")
                     put("scope", "process")
                     put("key", "last_text")
-                    put("value", "${args[0]}")
+                    put("value", "\${args[0]}")
                 }
             )
             .put(
@@ -161,7 +161,7 @@ class ActionExecutorUnitTest {
                     put("action", "append_state")
                     put("scope", "package")
                     put("key", "history")
-                    put("value", "${args[0]}")
+                    put("value", "\${args[0]}")
                 }
             )
         val actionJson = JSONObject().put(
@@ -234,7 +234,7 @@ class ActionExecutorUnitTest {
                     put("action", "set_state")
                     put("scope", "process")
                     put("key", "vip_value")
-                    put("value", "${event.vip}")
+                    put("value", "\${event.vip}")
                 }
             )
             .put(
@@ -277,7 +277,7 @@ class ActionExecutorUnitTest {
         )
         val payload = JSONObject().put(
             "vip",
-            "${args[0]}",
+            "\${args[0]}",
         )
         val emitAction = JSONObject().put(
             "before_actions",
@@ -412,7 +412,7 @@ class ActionExecutorUnitTest {
                   "action": "set_state",
                   "scope": "process",
                   "key": "vip_value",
-                  "value": "${event.vip}"
+                  "value": "\${event.vip}"
                 },
                 {
                   "action": "increment_state",
@@ -456,7 +456,7 @@ class ActionExecutorUnitTest {
                   "action": "emit_event",
                   "name": "vip_changed",
                   "payload": {
-                    "vip": "${args[0]}"
+                    "vip": "\${args[0]}"
                   }
                 }
               ]
@@ -574,7 +574,7 @@ class ActionExecutorUnitTest {
                   "action": "set_state",
                   "scope": "process",
                   "key": "vip_value",
-                  "value": "${event.vip}"
+                  "value": "\${event.vip}"
                 },
                 {
                   "action": "increment_state",
@@ -768,7 +768,7 @@ class ActionExecutorUnitTest {
                   "action": "emit_event",
                   "name": "vip_changed",
                   "payload": {
-                    "vip": "${args[0]}"
+                    "vip": "\${args[0]}"
                   }
                 }
               ]
@@ -942,7 +942,7 @@ class ActionExecutorUnitTest {
                   "action": "emit_event",
                   "name": "vip_changed",
                   "payload": {
-                    "vip": "${args[0]}"
+                    "vip": "\${args[0]}"
                   }
                 }
               ]
@@ -1060,7 +1060,7 @@ class ActionExecutorUnitTest {
                   "action": "set_state",
                   "scope": "process",
                   "key": "vip_value",
-                  "value": "${event.vip}"
+                  "value": "\${event.vip}"
                 },
                 {
                   "action": "increment_state",
@@ -1254,7 +1254,7 @@ class ActionExecutorUnitTest {
                   "action": "emit_event",
                   "name": "vip_changed",
                   "payload": {
-                    "vip": "${args[0]}"
+                    "vip": "\${args[0]}"
                   }
                 }
               ]
