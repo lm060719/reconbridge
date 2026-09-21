@@ -244,6 +244,7 @@ struct InjectConn {
     int fd;
     std::string base_pkg;
     std::string process_name;
+    std::mutex write_mutex;
     bool reload_capable = false;
     json runtime_status = nullptr;
     int64_t status_updated_at = 0;
@@ -313,16 +314,26 @@ static json runtime_status_snapshot(const std::string& package_filter) {
 
 // 向某包所有支持 live reconcile 的 tracer 下发 'R'，payload=完整期望配置 JSON。
 static int hot_reload(const std::string& base_pkg, const std::string& cfg) {
-    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    std::vector<std::shared_ptr<InjectConn>> targets;
+    {
+        std::lock_guard<std::mutex> lk(g_conn_mutex);
+        for (const auto& c : g_conns) {
+            if (c->base_pkg == base_pkg && c->reload_capable)
+                targets.push_back(c);
+        }
+    }
+
     int n = 0;
     char hdr[5];
     uint32_t l = (uint32_t)cfg.size();
     hdr[0] = 'R';
     memcpy(hdr + 1, &l, 4);
-    for (auto& c : g_conns) {
-        if (c->base_pkg == base_pkg && c->reload_capable) {
-            if (sock_write_full(c->fd, hdr, 5) && (l == 0 || sock_write_full(c->fd, cfg.data(), l)))
-                n++;
+
+    for (const auto& c : targets) {
+        std::lock_guard<std::mutex> write_lk(c->write_mutex);
+        if (sock_write_full(c->fd, hdr, 5) &&
+            (l == 0 || sock_write_full(c->fd, cfg.data(), l))) {
+            n++;
         }
     }
     return n;
