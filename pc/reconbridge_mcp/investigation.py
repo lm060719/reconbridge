@@ -1026,6 +1026,16 @@ def record_runtime_lineage_evidence(
     save(state)
 
 
+def record_root_cause_ranking(
+    session_id: str,
+    ranking: dict[str, Any],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_root_cause_ranking(graph, ranking)
+    save(state)
+
+
 def call_graph_context(
     session_id: str,
     class_name: str,
