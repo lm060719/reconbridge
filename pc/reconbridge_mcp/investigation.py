@@ -1036,6 +1036,21 @@ def record_root_cause_ranking(
     save(state)
 
 
+def record_root_cause_hypothesis_evidence(
+    session_id: str,
+    candidate: dict[str, Any],
+    comparison: dict[str, Any],
+) -> None:
+    state = load(session_id)
+    graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.record_root_cause_hypothesis(
+        graph,
+        candidate,
+        comparison,
+    )
+    save(state)
+
+
 def call_graph_context(
     session_id: str,
     class_name: str,
