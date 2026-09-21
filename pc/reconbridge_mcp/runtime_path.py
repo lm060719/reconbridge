@@ -26,7 +26,7 @@ def path_methods(path: dict[str, Any], max_hooks: int = 12) -> list[dict[str, An
 
     for index, node in enumerate(path.get("nodes") or []):
         key = method_key(node)
-        if not key[0] or not key[1] or key in seen:
+        if not key[0] or not key[1] or key[1] == "<clinit>" or key in seen:
             continue
         seen.add(key)
         result.append(
