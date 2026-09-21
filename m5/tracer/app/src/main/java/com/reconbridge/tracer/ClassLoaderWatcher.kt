@@ -14,6 +14,7 @@ import de.robv.android.xposed.XposedBridge
  * runSuppressed 包裹，避免“安装 hook -> loadClass -> watcher -> 再安装”的递归。
  */
 internal class ClassLoaderWatcher(
+    private val shouldResolveClass: (String) -> Boolean,
     private val onLoaderAvailable: (ClassLoader, String) -> Unit,
     private val onClassLoaded: (ClassLoader, String) -> Unit,
 )
@@ -112,6 +113,9 @@ internal class ClassLoaderWatcher(
                 val requested = param.args.firstOrNull() as? String
                 val className = loaded.name.ifEmpty {
                     requested ?: return
+                }
+                if (!shouldResolveClass(className)) {
+                    return
                 }
 
                 runSuppressed {
