@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import external
+from . import external, investigation
 
 mcp = FastMCP("reconbridge")
 
@@ -38,6 +38,180 @@ def _pkg_dir(package_name: str, sub: str) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     return d
 
+
+
+# =====================================================================
+# 高层任务模式：围绕一个目标持续分析，减少原子工具往返
+# =====================================================================
+
+@mcp.tool()
+def open_target(package_name: str, auto_pull: bool = True, note: str = "") -> dict:
+    """开启一个持久化分析会话，并自动绑定该包现有 APK/JADX/so 产物。
+
+    默认在本地没有 APK 时尝试从设备拉取；即使设备暂时不可用，也会保留会话并返回 warning。
+    后续优先使用 search_target / prepare_target / investigation_status，不必重复传包名和路径。
+    """
+    _validate_package_name(package_name)
+    state = investigation.create(package_name, note=note)
+    warning = ""
+    if auto_pull and not state.get("primary_apk"):
+        try:
+            pull_apk(package_name)
+            state = investigation.load(state["session_id"], refresh=True)
+        except Exception as exc:
+            warning = f"自动拉取 APK 失败: {exc}"
+
+    result = investigation.status(state["session_id"])
+    result["workflow"] = "open_target -> search_target；需要完整源码时调用 prepare_target"
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+@mcp.tool()
+def investigation_status(session_id: str) -> dict:
+    """查看分析会话当前绑定的 APK、JADX 目录、发现记录和运行时游标。"""
+    try:
+        return investigation.status(session_id)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+
+@mcp.tool()
+def prepare_target(session_id: str, force: bool = False) -> dict:
+    """为会话准备 JADX 源码。已有反编译产物时直接复用，否则只反编译当前主 APK。"""
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    jadx_dirs = state["artifacts"].get("jadx_dirs", [])
+    if jadx_dirs and not force:
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "package": state["package"],
+            "reused": True,
+            "jadx_dirs": jadx_dirs,
+        }
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "error": "当前会话没有 APK；先确保设备可连接后重新 open_target(auto_pull=true)，或使用 pull_apk",
+        }
+
+    result = external.decompile_apk(apk)
+    refreshed = investigation.status(session_id)
+    return {
+        **result,
+        "session_id": session_id,
+        "package": state["package"],
+        "reused": False,
+        "jadx_ready": refreshed["jadx_ready"],
+        "jadx_dirs": refreshed["jadx_dirs"],
+    }
+
+
+@mcp.tool()
+def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 20) -> dict:
+    """在当前分析目标中统一搜索源码 / 字符串 / 类 / 方法 / 字段。
+
+    kind: auto|source|string|method|class|field。auto 会优先复用已有 JADX 源码；没有源码或未命中时，
+    自动走受内存限制且带持久缓存的 Androguard worker。结果默认只返回前 20 条，避免污染模型上下文。
+    """
+    query = query.strip()
+    if not query:
+        return {"ok": False, "error": "query 不能为空", "session_id": session_id}
+    limit = max(1, min(int(limit), 100))
+    kind = kind.lower().strip()
+    if kind not in {"auto", "source", "string", "method", "class", "field"}:
+        return {"ok": False, "error": f"不支持的 kind: {kind}", "session_id": session_id}
+
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    package = state["package"]
+    if kind in {"auto", "source"} and state["artifacts"].get("jadx_dirs"):
+        source = investigation.source_search(session_id, query, limit=limit)
+        if kind == "source" or source["count"] > 0:
+            investigation.add_discovery(session_id, {
+                "type": "search", "query": query, "strategy": source["strategy"], "count": source["count"]
+            })
+            return {"ok": True, "session_id": session_id, "package": package, **source}
+    elif kind == "source":
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": package,
+            "error": "当前没有 JADX 源码；先调用 prepare_target",
+        }
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": package,
+            "error": "当前会话没有 APK，无法执行 DEX 搜索",
+        }
+
+    if kind == "string":
+        dex_query = {"find": "string", "string": query, "max_results": limit}
+    elif kind == "class":
+        dex_query = {"find": "class", "class_name": query, "max_results": limit}
+    elif kind == "field":
+        dex_query = {"find": "field", "field_name": query, "max_results": limit}
+    elif kind == "method":
+        dex_query = {"find": "method", "method_name": query, "max_results": limit}
+    else:
+        # 自然语言/界面文本最常见的定位方式：先找引用该字符串的方法。
+        dex_query = {"find": "method", "using_strings": [query], "max_results": limit}
+
+    result = external.dexkit_search(apk, dex_query)
+
+    # auto 的字符串引用搜索没有结果时，再退回方法名搜索；两种结果都会被持久缓存。
+    if kind == "auto" and result.get("ok") and not result.get("results"):
+        result = external.dexkit_search(
+            apk,
+            {"find": "method", "method_name": query, "max_results": limit},
+        )
+
+    strategy = f"dex-{result.get('backend', 'worker')}"
+    if result.get("ok"):
+        investigation.add_discovery(session_id, {
+            "type": "search", "query": query, "strategy": strategy, "count": result.get("count", 0)
+        })
+    return {
+        **result,
+        "session_id": session_id,
+        "package": package,
+        "strategy": strategy,
+    }
+
+
+@mcp.tool()
+def close_investigation(session_id: str, cleanup_hooks: bool = True) -> dict:
+    """结束分析会话；默认同时清理该目标包由分析过程留下的 hook。"""
+    try:
+        state = investigation.load(session_id)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    cleanup = None
+    if cleanup_hooks:
+        try:
+            cleanup = unhook(state["package"])
+        except Exception as exc:
+            cleanup = {"ok": False, "error": str(exc)}
+    closed = investigation.close(session_id)
+    if cleanup is not None:
+        closed["hook_cleanup"] = cleanup
+    return closed
 
 
 # =====================================================================
