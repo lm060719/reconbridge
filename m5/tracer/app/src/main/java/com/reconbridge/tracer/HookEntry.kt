@@ -61,53 +61,61 @@ class HookEntry : IXposedHookLoadPackage {
             log("[$pkg] 配置解析失败: $t")
             return
         }
-        // 全局详细日志开关：配置里 debug:true 才逐命中打日志
+
         traceVerbose = cfg.optBoolean("debug", false)
         vlog("[$pkg] 取到配置 ${cfgText.length} 字节 debug=$traceVerbose")
-        val targets = cfg.optJSONArray("targets") ?: return
 
-        // 已装 target id 集合（免重启热加时去重，只加不删）；线程安全供热加读线程用
-        val installedIds = java.util.Collections.synchronizedSet(HashSet<String>())
-        val installed = installTargets(lpparam, io, targets, installedIds)
-        if (installed > 0) log("[$pkg] 装上 $installed 个 java hook") else vlog("[$pkg] 无 java 目标")
+        val registry = HookRegistry(
+            packageName = pkg,
+            processName = lpparam.processName,
+            pid = Process.myPid(),
+        ) { target ->
+            installJavaHook(lpparam, io, target)
+        }
 
-        // 免重启热加（P0-2）：声明可热加并监听 daemon 下发的新配置，收到时增量装新 target。
-        // classLoader/lpparam 随闭包持久化，进程活着就能随时追加 hook，无需 force-stop 重启。
-        io.enableHotReload { cfgText ->
+        val initialTargets = cfg.optJSONArray("targets") ?: JSONArray()
+        val initial = registry.reconcile(initialTargets)
+        logSyncResult(pkg, "初始同步", initial)
+        io.sendRuntimeStatus(registry.snapshotJson().toString())
+
+        // daemon 下发的是“完整期望配置”。每次 reload 都做 reconcile，
+        // 因而同一条通道同时具备 live add / remove / replace，而不再只是增量追加。
+        io.enableHotReload { newCfgText ->
             try {
-                val newTargets = JSONObject(cfgText).optJSONArray("targets") ?: return@enableHotReload
-                val added = installTargets(lpparam, io, newTargets, installedIds)
-                if (added > 0) log("[$pkg] 热加装上 $added 个新 java hook")
+                val newCfg = JSONObject(newCfgText)
+                traceVerbose = newCfg.optBoolean("debug", traceVerbose)
+                val newTargets = newCfg.optJSONArray("targets") ?: JSONArray()
+                val sync = registry.reconcile(newTargets)
+                logSyncResult(pkg, "实时同步", sync)
+                io.sendRuntimeStatus(registry.snapshotJson().toString())
             } catch (t: Throwable) {
-                log("[$pkg] 热加解析/安装失败: $t")
+                log("[$pkg] 实时配置同步失败: $t")
             }
         }
     }
 
-    /** 安装一批 java 目标，按 id 去重（已装的跳过——热加只加不删）。返回本次实际新装的方法数。 */
-    private fun installTargets(
-        lpparam: XC_LoadPackage.LoadPackageParam,
-        io: InjectSocket,
-        targets: JSONArray,
-        installedIds: MutableSet<String>,
-    ): Int {
-        var installed = 0
-        for (i in 0 until targets.length()) {
-            val t = targets.optJSONObject(i) ?: continue
-            if (t.optString("kind", "native") != "java") continue  // native 目标由 M3 执行器负责
-            val id = t.optString("id", "j$i")
-            if (installedIds.contains(id)) continue                // 已装，去重
-            try {
-                val c = installJavaHook(lpparam, io, t)
-                if (c > 0) {
-                    installedIds.add(id)
-                    installed += c
-                }
-            } catch (th: Throwable) {
-                log("[${lpparam.packageName}] 目标 ${t.optString("class")}.${t.optString("method")} 安装失败: $th")
-            }
+    private fun logSyncResult(
+        pkg: String,
+        stage: String,
+        result: HookSyncResult,
+    ) {
+        if (
+            result.added > 0 ||
+            result.replaced > 0 ||
+            result.removed > 0 ||
+            result.failed > 0
+        ) {
+            log(
+                "[$pkg] $stage added=${result.added} replaced=${result.replaced} " +
+                    "removed=${result.removed} unchanged=${result.unchanged} failed=${result.failed}"
+            )
+        } else {
+            vlog("[$pkg] $stage 无变化 unchanged=${result.unchanged}")
         }
-        return installed
+
+        for (error in result.errors) {
+            log("[$pkg] HookRegistry: $error")
+        }
     }
 
     /** 按一个 java 目标解析类/方法/重载并挂 trace 回调，支持使用 using_strings 按字符串特征搜索定位方法。 */
@@ -115,7 +123,7 @@ class HookEntry : IXposedHookLoadPackage {
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
         t: JSONObject,
-    ): Int {
+    ): HookInstallResult {
         val usingStrings = mutableListOf<String>()
         val usingArr = t.optJSONArray("using_strings")
             ?: t.optJSONObject("search")?.optJSONArray("using_strings")
@@ -136,10 +144,11 @@ class HookEntry : IXposedHookLoadPackage {
             val matches = DexStringSearcher.findMatches(lpparam, usingStrings, classFilter, methodFilter)
             if (matches.isEmpty()) {
                 log("[${lpparam.packageName}] using_strings $usingStrings 未查到匹配方法")
-                return 0
+                return HookInstallResult(emptyList(), emptyList())
             }
             log("[${lpparam.packageName}] using_strings $usingStrings 查到 ${matches.size} 个匹配方法: ${matches.map { "${it.className}.${it.methodName}" }}")
-            var count = 0
+            val handles = mutableListOf<LiveHookHandle>()
+            val members = mutableListOf<String>()
             for (m in matches) {
                 try {
                     val subT = JSONObject(t.toString())
@@ -148,12 +157,14 @@ class HookEntry : IXposedHookLoadPackage {
                     if (!t.has("params")) {
                         subT.put("params", JSONArray(m.paramTypes))
                     }
-                    count += installExplicitJavaHook(lpparam, io, subT)
+                    val installed = installExplicitJavaHook(lpparam, io, subT)
+                    handles.addAll(installed.handles)
+                    members.addAll(installed.members)
                 } catch (th: Throwable) {
                     log("[${lpparam.packageName}] 搜索挂钩 ${m.className}.${m.methodName} 失败: $th")
                 }
             }
-            return count
+            return HookInstallResult(handles, members)
         }
 
         return installExplicitJavaHook(lpparam, io, t)
@@ -163,10 +174,12 @@ class HookEntry : IXposedHookLoadPackage {
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
         t: JSONObject,
-    ): Int {
+    ): HookInstallResult {
         val cl = lpparam.classLoader
         val className = t.optString("class")
-        if (className.isEmpty()) return 0
+        if (className.isEmpty()) {
+            return HookInstallResult(emptyList(), emptyList())
+        }
         val methodName = t.optString("method")
         val clazz = cl.loadClass(className)
         val callback = TraceCallback(io, lpparam.packageName, cl, t)
@@ -176,22 +189,43 @@ class HookEntry : IXposedHookLoadPackage {
         if (methodName == "<init>") {
             return if (paramsSpec != null) {
                 val ctor = clazz.getDeclaredConstructor(*resolveParams(cl, paramsSpec))
-                XposedBridge.hookMethod(ctor, callback)
-                1
+                val handle = XposedBridge.hookMethod(ctor, callback)
+                HookInstallResult(
+                    handles = listOf(XposedLiveHookHandle(handle)),
+                    members = listOf(ctor.toString()),
+                )
             } else {
-                XposedBridge.hookAllConstructors(clazz, callback).size
+                val handles = XposedBridge.hookAllConstructors(clazz, callback)
+                    .map { XposedLiveHookHandle(it) }
+                HookInstallResult(
+                    handles = handles,
+                    members = clazz.declaredConstructors.map { it.toString() },
+                )
             }
         }
 
-        if (methodName.isEmpty()) return 0
+        if (methodName.isEmpty()) {
+            return HookInstallResult(emptyList(), emptyList())
+        }
 
         return if (paramsSpec != null) {
             val m = findMethodRecursive(clazz, methodName, resolveParams(cl, paramsSpec))
                 ?: throw NoSuchMethodException("$className.$methodName(指定参数)")
-            XposedBridge.hookMethod(m, callback)
-            1
+            val handle = XposedBridge.hookMethod(m, callback)
+            HookInstallResult(
+                handles = listOf(XposedLiveHookHandle(handle)),
+                members = listOf(m.toString()),
+            )
         } else {
-            XposedBridge.hookAllMethods(clazz, methodName, callback).size
+            val handles = XposedBridge.hookAllMethods(clazz, methodName, callback)
+                .map { XposedLiveHookHandle(it) }
+            val members = clazz.declaredMethods
+                .filter { it.name == methodName }
+                .map { it.toString() }
+            HookInstallResult(
+                handles = handles,
+                members = members,
+            )
         }
     }
 
