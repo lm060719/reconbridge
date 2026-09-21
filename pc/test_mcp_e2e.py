@@ -31,8 +31,8 @@ def test_mcp_import_and_registration():
         "list_scenarios", "diff_scenarios", "recent_events", "trace_java",
         "patch_java", "dump_dex", "list_dumps", "list_artifacts",
         "toolchain_status", "open_target", "investigation_status", "prepare_index",
-        "prepare_target", "search_target", "trace_target", "evidence_graph",
-        "explain_evidence", "close_investigation",
+        "prepare_target", "search_target", "rank_candidates", "verify_candidates",
+        "trace_target", "evidence_graph", "explain_evidence", "close_investigation",
     }
     assert expected.issubset(tool_names)
 
@@ -88,13 +88,15 @@ async def test_mcp_stdio_e2e():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) >= 34
+            assert len(tools) >= 36
             names = {t.name for t in tools}
             assert "device_status" in names
             assert "toolchain_status" in names
             assert "open_target" in names
             assert "search_target" in names
             assert "prepare_index" in names
+            assert "rank_candidates" in names
+            assert "verify_candidates" in names
             assert "trace_target" in names
             assert "evidence_graph" in names
             assert "explain_evidence" in names
