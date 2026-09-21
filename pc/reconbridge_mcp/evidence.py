@@ -642,6 +642,83 @@ def record_field_origin(
         )
 
 
+def record_value_lineage(
+    graph: dict[str, Any],
+    lineage: dict[str, Any],
+) -> None:
+    """把跨方法 Value Lineage 图写入 Evidence Graph。"""
+    if not lineage.get("ok"):
+        return
+
+    id_map: dict[str, str] = {}
+    for node in (lineage.get("nodes") or [])[:300]:
+        node_type = str(node.get("type", ""))
+        source_id = str(node.get("id", ""))
+        if not source_id:
+            continue
+
+        if node_type == "method":
+            target_id = method_node(
+                graph,
+                str(node.get("class_name", "")),
+                str(node.get("method_name", "")),
+                str(node.get("descriptor", "")),
+                runtime_confirmed=bool(node.get("runtime_confirmed")),
+                runtime_hits=int(node.get("runtime_hits", 0) or 0),
+            )
+        elif node_type == "field":
+            target_id = field_node(
+                graph,
+                str(node.get("class_name", "")),
+                str(node.get("field_name", "")),
+                str(node.get("field_type", "")),
+            )
+        elif node_type == "origin":
+            target_id = origin_node(
+                graph,
+                str(node.get("kind", "unknown")),
+                str(node.get("label", "来源")),
+                confidence=float(node.get("confidence", 0) or 0),
+                expression=str(node.get("expression", ""))[:1000],
+            )
+        elif node_type == "expression":
+            target_id = add_node(
+                graph,
+                f"value_expr:{_hash(str(node.get('label', '')) + source_id)}",
+                "value_expression",
+                str(node.get("label", ""))[:500],
+                owner_class=node.get("owner_class", ""),
+                owner_method=node.get("owner_method", ""),
+                line_offset=node.get("line_offset"),
+            )
+        else:
+            target_id = add_node(
+                graph,
+                f"lineage:{_hash(source_id)}",
+                f"value_{node_type or 'node'}",
+                str(node.get("label", ""))[:500],
+            )
+        id_map[source_id] = target_id
+
+    for edge in (lineage.get("edges") or [])[:1200]:
+        source = id_map.get(str(edge.get("source", "")))
+        target = id_map.get(str(edge.get("target", "")))
+        if not source or not target:
+            continue
+        attrs = {
+            key: value
+            for key, value in edge.items()
+            if key not in {"source", "target", "relation"}
+        }
+        add_edge(
+            graph,
+            source,
+            target,
+            str(edge.get("relation", "value_flow")),
+            **attrs,
+        )
+
+
 def summary(graph: dict[str, Any]) -> dict[str, Any]:
     _ensure(graph)
     type_counts: dict[str, int] = {}
