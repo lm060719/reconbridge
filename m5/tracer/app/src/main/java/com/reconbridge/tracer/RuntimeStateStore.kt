@@ -264,6 +264,22 @@ internal class RuntimeStateStore(
         return true
     }
 
+    fun view(hookId: String = ""): Map<String, Any?>
+    {
+        val hookSnapshot = synchronized(hookLock) {
+            hookStates[hookId]?.snapshot() ?: LinkedHashMap()
+        }
+        val threadSnapshot = threadState.get()?.snapshot()
+            ?: LinkedHashMap()
+
+        return linkedMapOf(
+            "process" to processState.snapshot(),
+            "package" to packageState.snapshot(),
+            "hook" to hookSnapshot,
+            "thread" to threadSnapshot,
+        )
+    }
+
     fun snapshotJson(): JSONObject
     {
         val hooks = JSONObject()
