@@ -31,7 +31,19 @@ def _capture(name, value):
                         "value": value,
                     }
                 ],
-            }
+            },
+            {
+                "phase": "after",
+                "ts": 120,
+                "tid": 7,
+                "fields": [
+                    {
+                        "target": "this",
+                        "name": "premiumStatus",
+                        "value": value,
+                    }
+                ],
+            },
         ],
         probe,
     )
@@ -46,7 +58,7 @@ def _capture(name, value):
 def test_field_probe_extracts_boolean_value():
     capture = _capture("非会员", "false")
 
-    assert capture["summary"]["sample_count"] == 1
+    assert capture["summary"]["sample_count"] == 2
     assert capture["summary"]["stable"] is True
     assert capture["summary"]["stable_value"]["type"] == "boolean"
     assert capture["summary"]["stable_value"]["value"] is False
@@ -87,9 +99,48 @@ def test_boolean_probe_confirms_branch_orientation():
     assert result["ok"] is True
     assert result["status"] == "branch_orientation_confirmed"
     assert result["orientation_match"] is True
-    assert result["evidence_level"] == "direct"
+    assert result["evidence_level"] == "strong_correlated"
     assert result["a"]["value"]["value"] is False
     assert result["b"]["value"]["value"] is True
+
+
+def test_condition_method_return_is_direct_branch_evidence():
+    probe = {
+        "kind": "condition_method",
+        "class": "com.example.PayManager",
+        "method": "isPremiumUser",
+        "condition_rank": 1,
+        "condition_line": 50,
+        "condition": "isPremiumUser()",
+    }
+
+    def capture(name, value):
+        return {
+            "scenario": name,
+            "probe_fingerprint": condition_probe.probe_fingerprint(probe),
+            "probe": probe,
+            "summary": condition_probe.summarize_values(
+                [
+                    {
+                        "phase": "after",
+                        "ret": value,
+                        "ts": 100,
+                        "tid": 7,
+                    }
+                ],
+                probe,
+            ),
+        }
+
+    result = condition_probe.compare_captures(
+        capture("A", False),
+        capture("B", True),
+        branch_orientation="a_false_b_true",
+    )
+
+    assert result["status"] == "branch_orientation_confirmed"
+    assert result["evidence_level"] == "direct"
+    assert "条件方法返回值" in result["explanation"]
 
 
 def test_same_stable_value_does_not_explain_divergence():
