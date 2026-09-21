@@ -114,7 +114,7 @@
 |---|---|---|
 | `post_hook` | `(config)` | 下发原始 hook 配置（native 或 java，见协议）。**通用入口** |
 | `list_hooks` | `()` | 列磁盘上的**期望 Hook 配置** |
-| `runtime_hook_status` | `(package="")` | 查运行中 M5 Runtime 真实状态：installed/pending、ClassLoader/watcher、Runtime State 各 scope 摘要、Event Bus handlers/counters、live unhook/replace 能力 |
+| `runtime_hook_status` | `(package="")` | 查运行中 M5 Runtime 真实状态：installed/pending、ClassLoader/watcher、Runtime State、Event Bus、ContextRegistry、Lifecycle Runtime、live unhook/replace 能力 |
 | `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 Hook；运行中的 M5 Java Hook 会立即 **live unhook**，无需 force-stop |
 | `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**；**`include_recent=True` 事后补捞**环形缓冲历史命中（命中发生在采集开始前也能拿到）；`fold_stack` 折叠栈顶 hook 框架帧 |
 | `recent_events` | `(limit=50, since_seq=0)` | **事后采集**：直接取守护进程环形缓冲里最近的命中，无需正连着 SSE。返回 `latest_seq` 可作游标只取增量 |
@@ -152,9 +152,9 @@
 - `capture`：`this`(class/tostring/none)、`when`(before/after/both/**none**=只篡改不出事件)、`args`/`all_args`、`ret`、`fields`(反射读私有字段)、`stack`。
 - `render`：`tostring`(数值/布尔原样，其余 toString 截断) / `class`(类名) / `json`(原样字符串交 PC 解析，适合参数本身是 JSON) / `deep`(反射深度序列化对象图，带深度/环/节点预算防爆)。
 - `paths`(嵌套字段路径捕获)：`[{"path":"args[1].payload.load_url","render":"tostring"}]`——直接拿深埋在 payload 对象里的值，不靠整对象 toString 撞运气。路径 `args[N]`/`this`/`ret` 起头，`.name` 逐层(反射字段→getter→Map key)，`[n]` 索引数组/List；裸字段名=`this.<name>`；解析不到标 `unresolved:true`。
-- `action`(篡改与 Action 流水线)：除 `replace_args/replace_return/skip_original/call_method/set_field/construct/eval_js/eval_dex/exec_shell` 外，还支持 `set_state/get_state/remove_state/clear_state/increment_state/append_state/emit_event`。State scope=`process/package/hook/thread`；模板和 condition 可直接读 `state.*`。`kind:"runtime"` target 或 Java target 的 `on_event/event_handlers` 可按 `event.*` 条件执行 Action。
+- `action`(篡改与 Action 流水线)：除 `replace_args/replace_return/skip_original/call_method/set_field/construct/eval_js/eval_dex/exec_shell` 外，还支持 `set_state/get_state/remove_state/clear_state/increment_state/append_state/emit_event`。State scope=`process/package/hook/thread`；模板和 condition 可直接读 `state.* / event.* / application / context / activity / lifecycle.*`。`kind:"runtime"` target 或 Java target 可用 `on_event` / `on_lifecycle` 执行动作。
 - `debug:true` 才逐命中打 logcat（默认安静）。
-- 配置同步是**全量 reconcile**：新 id 安装、同 id改配置 live replace、缺失 id live remove；显式类若当前所有已知 loader 都找不到会进入 `pending_class`。Event handler 也作为 LiveHookHandle 跟随同一生命周期。同 ID replace 保留 hook-scope State；真正 remove/unhook 时会清理该 Hook 的 State 与事件订阅。用 `runtime_hook_status` 看 `installed_count / pending_count / class_loaders / runtime_state / event_bus`。
+- 配置同步是**全量 reconcile**：新 id 安装、同 id改配置 live replace、缺失 id live remove；显式类若当前所有已知 loader 都找不到会进入 `pending_class`。Event/Lifecycle handler 也作为 LiveHookHandle 跟随同一生命周期。同 ID replace 保留 hook-scope State；真正 remove/unhook 时会清理该 Hook 的 State 与事件订阅。用 `runtime_hook_status` 看 `installed_count / pending_count / class_loaders / runtime_state / event_bus / context_runtime / lifecycle_runtime`。
 
 ---
 
@@ -259,9 +259,53 @@ runtime_hook_status("com.target.app")
 ```
 Event Bus 同步运行在 emit 的当前线程；listener 对 State 的修改对后续 Hook 立即可见。纯 runtime handler 没有 this/args/ret，应使用 event/state 或静态 class 调用。
 
-**E. native 层 hook（M3，非 Java）** —— 见 `m3/HOOK_PROTOCOL.md`，用 `post_hook` 下发 `lib+symbol`/`offset` 目标，`collect_events` 收命中。
+**E. Lifecycle / Context Runtime（M5 Runtime Phase 4）**
+```jsonc
+post_hook({
+  "package": "com.target.app",
+  "restart": false,
+  "targets": [
+    {
+      "kind": "runtime",
+      "id": "vip_screen_lifecycle",
+      "on_lifecycle": {
+        "stage": "resumed",
+        "activity": "VipActivity",
+        "actions": [
+          {
+            "action": "set_state",
+            "scope": "process",
+            "key": "current_screen",
+            "value": "${lifecycle.activity_class}"
+          },
+          {
+            "action": "set_state",
+            "scope": "process",
+            "key": "activity_title",
+            "value": "${activity.title}"
+          },
+          {
+            "action": "call_method",
+            "target": "activity",
+            "method": "getIntent",
+            "save_to": "$intent"
+          }
+        ]
+      }
+    }
+  ]
+})
+runtime_hook_status("com.target.app")
+# → context_runtime.application_available
+# → context_runtime.activity_class / activity_state
+# → lifecycle_runtime.callbacks_registered / lifecycle_events
+```
 
-**F. "A 与 B 行为为何不同"（调用图场景差分，推荐）** —— 例如会员/非会员、打开/查看、成功/失败两个行为为什么走不同分支。
+内置事件包括 `lifecycle.application_attached` 和 `lifecycle.activity_created/started/resumed/paused/stopped/save_instance_state/destroyed`。Activity 使用弱引用，不会因为 Tracer 监控而被长期保活；`context` 会优先当前 Activity，再回退 applicationContext/Application。也可以在普通 Java Hook Action 中直接使用 `${application}`、`${context}`、`${activity}`、`${lifecycle.activity_state}`。Lifecycle runtime status 刷新在后台合并发送，不会在 Activity 主线程同步写完整状态。
+
+**F. native 层 hook（M3，非 Java）** —— 见 `m3/HOOK_PROTOCOL.md`，用 `post_hook` 下发 `lib+symbol`/`offset` 目标，`collect_events` 收命中。
+
+**G. "A 与 B 行为为何不同"（调用图场景差分，推荐）** —— 例如会员/非会员、打开/查看、成功/失败两个行为为什么走不同分支。
 ```
 # 先用 investigate 找到共同的关键目标方法，例如 PayManager.checkVip
 capture_call_graph_scenario(
@@ -419,7 +463,7 @@ compare_root_cause_hypothesis(
 3. **稀疏事件的采集时序**：**优先 `until_first_hit=True`**（命中即返回，不必和窗口掐点）。守护进程带**最近 ~400 条环形缓冲**，故命中即便发生在采集开始前也能捞回——用 `collect_events(include_recent=True)` 或直接 `recent_events()`（推荐流程：post_hook 后 `recent_events(limit=0)` 记游标 → 触发 → 事后 `recent_events(since_seq=游标)` 补捞）。`seconds` 只当兜底。
 4. **控制台中文可能显示成乱码**：多为终端编码问题（如 Windows Git Bash），数据本身是 UTF-8。验证时写 UTF-8 文件再用 Read 看，或设 `PYTHONUTF8=1 PYTHONIOENCODING=utf-8`。
 5. **改了 `pc/reconbridge_mcp/*.py` 要重启 MCP server** 才生效（新会话天然是新 server，不受影响）。
-6. **LSPosed 模块必须人工启用 + 勾作用域**；悬浮窗/自绘/Compose 类 UI 不一定走 `Activity.onResume`，验证挑必然会走的业务方法。
+6. **LSPosed 模块必须人工启用 + 勾作用域**；Lifecycle Runtime 能稳定覆盖 Application/Activity，但 Fragment/Compose/悬浮窗/自绘内部状态不一定对应独立 Activity 生命周期，必要时仍应 Hook 业务方法。
 7. **多设备/多链路** → MCP 自动挑唯一在线设备、忽略离线残链；仅**多台都在线**时才需设 `RECONBRIDGE_SERIAL`。
 8. **篡改用完要恢复**：M5 直接 `unhook(package, hook_id)` 或清整包即可 live 卸载；随后用 `runtime_hook_status(package)` 核对。只有旧 Tracer/非 M5 native Hook 才仍需重启进程。
 9. **模块日志**：`XposedBridge.log` 不一定进 logcat；模块另有 `android.util.Log`（tag `ReconTracer`），`adb logcat -s ReconTracer` 可看装 hook/错误（逐命中日志需配置 `debug:true`）。
