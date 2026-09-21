@@ -215,6 +215,9 @@ runtime_hook_status(package="com.target.app")  # 确认 installed_count 已回�
 ```text
 runtime_state_set("com.target.app", key="debug_enabled", value=true)
 runtime_state_get("com.target.app", key="debug_enabled")
+runtime_state_increment("com.target.app", key="debug_hits", delta=1)
+runtime_state_append("com.target.app", key="debug_history", value={"enabled": true})
+runtime_state_remove("com.target.app", key="debug_enabled")
 
 runtime_event_emit(
     "com.target.app",
@@ -232,7 +235,7 @@ runtime_activity_action(
 )
 ```
 
-多进程 App 不传 `process` 会对每个在线 Runtime 分别执行并返回 `results[]`；只操作主进程或 `:service` 时显式传 process。远程 Runtime State 不支持 thread scope，因为 ThreadLocal 只能代表实际业务线程，不能由 socket 命令线程可靠访问。
+多进程 App 不传 `process` 会对每个在线 Runtime 分别执行并返回 `results[]`；只操作主进程或 `:service` 时显式传 process。远程 Runtime State 支持 get/set/remove/increment/append/clear，scope 为 process/package/hook；不支持 thread scope，因为 ThreadLocal 只能代表实际业务线程，不能由 socket 命令线程可靠访问。Activity Action 会在真实 Activity 主线程执行。
 
 **D. 跨 Hook 状态机 / Event → Action（M5 Runtime Phase 3）**
 ```jsonc
