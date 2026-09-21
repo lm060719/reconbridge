@@ -93,8 +93,8 @@ internal class HookRegistry(
     private val processName: String,
     private val pid: Int,
     initialClassLoader: ClassLoader,
-    private val installer: (JSONObject, ClassLoader) -> HookInstallResult,
     private val onHookRemoved: (String) -> Unit = {},
+    private val installer: (JSONObject, ClassLoader) -> HookInstallResult,
 )
 {
     private val lock = Any()
