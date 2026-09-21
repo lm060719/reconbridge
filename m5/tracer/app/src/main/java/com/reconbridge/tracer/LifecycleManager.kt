@@ -8,6 +8,7 @@ import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import org.json.JSONObject
 import java.lang.ref.WeakReference
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -28,6 +29,8 @@ internal class LifecycleManager(
     private var registeredApplication = WeakReference<Application>(null)
     private val lifecycleEvents = AtomicLong()
     private val attachEvents = AtomicLong()
+    private val statusPublishScheduled = AtomicBoolean(false)
+    private val statusGeneration = AtomicLong()
 
     @Volatile
     private var statusPublisher: (() -> Unit)? = null
@@ -334,9 +337,48 @@ internal class LifecycleManager(
 
     private fun notifyStatusChanged()
     {
-        try {
-            statusPublisher?.invoke()
-        } catch (_: Throwable) {
+        statusGeneration.incrementAndGet()
+        if (!statusPublishScheduled.compareAndSet(false, true)) {
+            return
+        }
+
+        Thread({
+            try {
+                while (true) {
+                    val generation = statusGeneration.get()
+                    try {
+                        Thread.sleep(120)
+                    } catch (_: InterruptedException) {
+                    }
+
+                    try {
+                        statusPublisher?.invoke()
+                    } catch (_: Throwable) {
+                    }
+
+                    if (statusGeneration.get() == generation) {
+                        break
+                    }
+                }
+            } finally {
+                statusPublishScheduled.set(false)
+
+                // 防止最后一次检查与 scheduled=false 之间刚好又有生命周期事件。
+                val generation = statusGeneration.get()
+                try {
+                    Thread.sleep(1)
+                } catch (_: InterruptedException) {
+                }
+                if (
+                    statusGeneration.get() != generation &&
+                    statusPublisher != null
+                ) {
+                    notifyStatusChanged()
+                }
+            }
+        }, "ReconTracer-lifecycle-status").apply {
+            isDaemon = true
+            start()
         }
     }
 }
