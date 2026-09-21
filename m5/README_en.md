@@ -10,7 +10,10 @@ The target users are already in LSPosed; LSPosed internally is a mature ART hook
 ## Components
 - `tracer/` — the generic LSPosed module (Kotlin/Gradle), with no app-specific logic of its own.
   - `HookEntry.kt` — reads config, installs XposedBridge trace/action callbacks for `kind:java` targets.
-  - `ActionExecutor.kt` — Action Pipeline executor (supports method invocation, field modifications, constructor calls, Rhino JS / DEX execution, shell commands, before/after callbacks).
+  - `ContextRegistry.kt` — weakly tracks Application/Context/current Activity and exposes lifecycle roots to Action expressions.
+  - `LifecycleManager.kt` — hooks `Application.attach`, registers `ActivityLifecycleCallbacks`, and bridges lifecycle transitions into Runtime Events.
+  - `LifecycleTrigger.kt` — normalizes `on_lifecycle` declarations and filters by Activity class/regex.
+  - `ActionExecutor.kt` — Action Pipeline executor with Java calls/fields/JS/DEX/shell plus State, Event, and Lifecycle/Context Runtime access.
   - `InjectSocket.kt` — reproduces M3's `@reconbridge_inject` abstract socket framing protocol.
 - `ReconBridge-Tracer.apk` — prebuilt artifact (debug self-signed, installable directly).
 - `JAVA_HOOK_PROTOCOL.md` — push config / event format / Action Pipeline protocol / semantics and limitations.
@@ -30,4 +33,4 @@ cd m5/tracer && ./gradlew.bat :app:assembleDebug
 (The repo is under a non-ASCII path; `gradle.properties` already sets `android.overridePathCheck=true`; bundles embedded Rhino JS engine for dynamic script evaluations.)
 
 ## Capabilities & Boundaries
-Supports Trace (observation), live add/remove/replace, true live unhook, **pending hooks with dynamic ClassLoader watching**, and **Runtime State + Event Bus**. Hooks can share bounded process/package/hook/thread state, atomically increment counters, append bounded histories, emit named events, and react through event-only `kind:"runtime"` targets or `on_event` handlers attached to Java targets. Existing path/template/condition syntax can read `state.*` and `event.*`; Rhino JS receives `$state`, `$stateStore`, and `$event`. Hook-scoped state is cleared on real removal but preserved across same-ID replace. Explicit classes not visible from known loaders still enter `pending_class` and auto-install when a suitable loader appears. Requires LSPosed with scope enabled. See `JAVA_HOOK_PROTOCOL.md` for details.
+Supports Trace (observation), live add/remove/replace, true live unhook, **pending hooks with dynamic ClassLoader watching**, **Runtime State + Event Bus**, and **Lifecycle + Context Runtime**. Hooks can share bounded process/package/hook/thread state, emit named events, and react through runtime targets. Action paths/templates/conditions can read `application`, `context`, `activity`, and `lifecycle.*`; Rhino JS receives `$application`, `$context`, `$activity`, and `$lifecycle`. Lifecycle tracking uses `Application.attach` plus `ActivityLifecycleCallbacks`; current Activity is held through a weak reference. `on_lifecycle` can subscribe to resumed/paused/destroyed and filter by Activity class. Explicit classes not visible from known loaders still enter `pending_class` and auto-install when a suitable loader appears. Requires LSPosed with scope enabled. See `JAVA_HOOK_PROTOCOL.md` for details.
