@@ -489,6 +489,69 @@ def record_call_graph(
         )
 
 
+def record_runtime_path(
+    graph: dict[str, Any],
+    path: dict[str, Any],
+    analysis: dict[str, Any],
+) -> None:
+    """把一次代表路径动态验证结果写入 Evidence Graph。"""
+    static_nodes = path.get("nodes") or []
+    by_index = {
+        index: node
+        for index, node in enumerate(static_nodes)
+    }
+
+    # 命中的节点标记 runtime_confirmed，并累加本轮命中次数。
+    for hit in analysis.get("node_hits") or []:
+        index = int(hit.get("path_index", -1))
+        count = int(hit.get("hits", 0) or 0)
+        node = by_index.get(index)
+        if not node or count <= 0:
+            continue
+        mid = method_node(
+            graph,
+            str(node.get("class", "")),
+            str(node.get("method", "")),
+            str(node.get("descriptor", "")),
+            runtime_confirmed=True,
+        )
+        existing = graph["nodes"].get(mid, {})
+        existing["runtime_hits"] = max(
+            int(existing.get("runtime_hits", 0) or 0),
+            count,
+        )
+
+    # 静态相邻边一旦在时间线上按序观测到，额外记录 runtime_sequence。
+    for edge in analysis.get("edges") or []:
+        if not edge.get("observed"):
+            continue
+        source = by_index.get(int(edge.get("source_index", -1)))
+        target = by_index.get(int(edge.get("target_index", -1)))
+        if not source or not target:
+            continue
+        source_id = method_node(
+            graph,
+            str(source.get("class", "")),
+            str(source.get("method", "")),
+            str(source.get("descriptor", "")),
+            runtime_confirmed=True,
+        )
+        target_id = method_node(
+            graph,
+            str(target.get("class", "")),
+            str(target.get("method", "")),
+            str(target.get("descriptor", "")),
+            runtime_confirmed=True,
+        )
+        add_edge(
+            graph,
+            source_id,
+            target_id,
+            "runtime_sequence",
+            delta_ms=edge.get("delta_ms"),
+        )
+
+
 def summary(graph: dict[str, Any]) -> dict[str, Any]:
     _ensure(graph)
     type_counts: dict[str, int] = {}
