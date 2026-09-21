@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import candidate, external, investigation, pipeline, runtime_path
+from . import candidate, external, investigation, pipeline, runtime_path, scenario_path
 
 mcp = FastMCP("reconbridge")
 
@@ -438,6 +438,185 @@ def _verify_static_call_path(
         "events": events[:200],
         "event_cursor": latest,
         "hooked_methods": methods,
+        "cleanup": cleanup,
+        "error": collect_error or None,
+    }
+
+
+def _capture_call_graph_scenario(
+    session_id: str,
+    state: dict[str, Any],
+    name: str,
+    call_graph: dict[str, Any],
+    seconds: float = 20.0,
+    quiet_ms: int = 1500,
+    max_events: int = 800,
+    max_hooks: int = 24,
+    include_external: bool = False,
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+) -> dict:
+    """用同一张局部调用图上的方法集合采集一次可比较业务场景。"""
+    methods = scenario_path.graph_methods(
+        call_graph,
+        max_hooks=max_hooks,
+        include_external=include_external,
+    )
+    if not methods:
+        return {
+            "ok": False,
+            "error": "调用图中没有可用于场景采集的 Java 方法",
+            "analysis": {},
+        }
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    targets: list[dict[str, Any]] = []
+    hook_ids: list[str] = []
+    hook_map: dict[str, dict[str, Any]] = {}
+
+    for index, item in enumerate(methods, 1):
+        safe_class = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            item["class"].rsplit(".", 1)[-1],
+        )[:18] or "class"
+        safe_method = re.sub(
+            r"[^A-Za-z0-9_]",
+            "_",
+            item["method"],
+        )[:22] or "method"
+        hook_id = f"rbsc_{session_id}_{index}_{safe_class}_{safe_method}"
+        hook_ids.append(hook_id)
+        hook_map[hook_id] = item
+        investigation.add_temporary_hook(session_id, hook_id)
+        targets.append(
+            {
+                "kind": "java",
+                "id": hook_id,
+                "class": item["class"],
+                "method": item["method"],
+                "capture": {
+                    "this": "class",
+                    "when": "before",
+                    "all_args": False,
+                    "stack": False,
+                },
+            }
+        )
+
+    config: dict[str, Any] = {
+        "package": state["package"],
+        "restart": bool(restart and not hot),
+        "debug": False,
+        "targets": targets,
+    }
+    if hot:
+        config["restart"] = False
+        config["mode"] = "append"
+
+    posted: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    collect_error = ""
+
+    try:
+        posted = client.post_json("/hook", config)
+        events = client.collect_sse(
+            seconds=max(0.5, float(seconds)),
+            max_events=max(1, min(int(max_events), 3000)),
+            fold_stack=True,
+            include_recent=True,
+            since_seq=cursor,
+            quiet_ms=max(0, int(quiet_ms)),
+        )
+    except Exception as exc:
+        collect_error = str(exc)
+    finally:
+        if cleanup:
+            for hook_id in hook_ids:
+                try:
+                    unhook(state["package"], hook_id)
+                except Exception:
+                    pass
+                finally:
+                    investigation.remove_temporary_hook(session_id, hook_id)
+
+    try:
+        latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    analysis = scenario_path.analyze_graph_scenario(
+        call_graph,
+        events,
+        hook_map,
+    )
+
+    for hook_id, meta in hook_map.items():
+        matched = [
+            event
+            for event in events
+            if (
+                str(event.get("hook_id", "")) == hook_id
+                or (
+                    candidate.normalize_class_name(str(event.get("class", ""))) == meta["class"]
+                    and str(event.get("method", "")) == meta["method"]
+                )
+            )
+        ]
+        if matched:
+            investigation.record_trace_evidence(
+                session_id,
+                meta["class"],
+                meta["method"],
+                matched,
+            )
+
+    payload = {
+        "name": name,
+        "package": state["package"],
+        "captured_at": int(time.time() * 1000),
+        "target": {
+            "class": call_graph.get("targets", [{}])[0].get("class", ""),
+            "method": call_graph.get("targets", [{}])[0].get("method", ""),
+            "descriptor": call_graph.get("targets", [{}])[0].get("descriptor", ""),
+        },
+        "graph_fingerprint": scenario_path.graph_fingerprint(call_graph),
+        "hook_fingerprint": scenario_path.hook_fingerprint(methods),
+        "graph": {
+            "node_count": call_graph.get("node_count", 0),
+            "edge_count": call_graph.get("edge_count", 0),
+            "limits": call_graph.get("limits", {}),
+        },
+        "hooked_methods": methods,
+        "analysis": analysis,
+    }
+    saved = investigation.save_call_scenario(session_id, name, payload)
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "call_graph_scenario",
+            "name": name,
+            "target": payload["target"],
+            "events": analysis.get("event_count", 0),
+            "observed_nodes": analysis.get("observed_nodes", 0),
+            "primary_tid": analysis.get("primary_tid"),
+        },
+    )
+
+    return {
+        "ok": not bool(collect_error),
+        "name": name,
+        "posted": posted,
+        "analysis": analysis,
+        "saved": saved,
+        "event_cursor": latest,
+        "hooked_method_count": len(methods),
         "cleanup": cleanup,
         "error": collect_error or None,
     }
@@ -890,6 +1069,168 @@ def verify_call_path(
     if not include_events:
         payload.pop("events", None)
     return payload
+
+
+@mcp.tool()
+def capture_call_graph_scenario(
+    session_id: str,
+    name: str,
+    class_name: str,
+    method: str,
+    descriptor: str = "",
+    upstream_depth: int = 2,
+    downstream_depth: int = 2,
+    seconds: float = 20.0,
+    quiet_ms: int = 1500,
+    max_events: int = 800,
+    max_hooks: int = 24,
+    include_external: bool = False,
+    restart: bool = True,
+    hot: bool = False,
+    cleanup: bool = True,
+) -> dict:
+    """围绕同一目标方法采集一次可做 A/B 差分的真实调用图场景。
+
+    会先生成局部静态调用图，再给图中的应用方法统一挂 before Hook。调用后在窗口内执行一次场景操作；
+    命中会压缩为真实方法集合、静态边覆盖和主线程顺序并单独存盘。A/B 比较时会校验静态图和 Hook 集合指纹。
+    """
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "当前会话没有 APK，无法采集调用图场景",
+        }
+
+    prepared = external.ensure_dex_index(apk)
+    if not prepared.get("ok"):
+        return {
+            **prepared,
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+        }
+
+    graph = investigation.call_graph_context(
+        session_id,
+        class_name,
+        method,
+        descriptor=descriptor,
+        upstream_depth=max(0, min(int(upstream_depth), 5)),
+        downstream_depth=max(0, min(int(downstream_depth), 5)),
+        max_nodes=max(40, min(int(max_hooks) * 4, 300)),
+        max_edges=max(120, min(int(max_hooks) * 12, 900)),
+        max_paths=30,
+        expand_external=False,
+    )
+    if not graph.get("ok"):
+        return {
+            **graph,
+            "session_id": session_id,
+            "package": state["package"],
+        }
+
+    result = _capture_call_graph_scenario(
+        session_id,
+        state,
+        name,
+        graph,
+        seconds=seconds,
+        quiet_ms=quiet_ms,
+        max_events=max_events,
+        max_hooks=max_hooks,
+        include_external=include_external,
+        restart=restart,
+        hot=hot,
+        cleanup=cleanup,
+    )
+    return {
+        **result,
+        "session_id": session_id,
+        "package": state["package"],
+        "target": {
+            "class": candidate.normalize_class_name(class_name),
+            "method": method,
+            "descriptor": descriptor,
+        },
+        "call_graph": {
+            "node_count": graph.get("node_count", 0),
+            "edge_count": graph.get("edge_count", 0),
+        },
+    }
+
+
+@mcp.tool()
+def list_call_graph_scenarios(session_id: str) -> dict:
+    """列出当前 Investigation 会话保存的调用图动态场景。"""
+    try:
+        state = investigation.load(session_id)
+        items = investigation.list_call_scenarios(session_id)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "package": state["package"],
+        "count": len(items),
+        "scenarios": items,
+    }
+
+
+@mcp.tool()
+def diff_call_graph_scenarios(session_id: str, a: str, b: str) -> dict:
+    """比较两个调用图场景，直接找共同链路、仅 A/仅 B、首次分叉和共享边耗时差。
+
+    两个场景必须来自相同静态调用图和相同 Hook 集合；否则返回 comparable=false，
+    避免把采集范围变化误判成业务分支变化。
+    """
+    try:
+        state = investigation.load(session_id)
+        scenario_a = investigation.load_call_scenario(session_id, a)
+        scenario_b = investigation.load_call_scenario(session_id, b)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    result = scenario_path.diff_graph_scenarios(scenario_a, scenario_b)
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "call_graph_scenario_diff",
+            "a": a,
+            "b": b,
+            "comparable": result.get("comparable", False),
+            "only_in_a": len(result.get("only_in_a", [])),
+            "only_in_b": len(result.get("only_in_b", [])),
+            "common_prefix": len(
+                (result.get("first_divergence") or {}).get("common_prefix", [])
+            ),
+        },
+    )
+
+    divergence = result.get("first_divergence") or {}
+    if result.get("comparable"):
+        if divergence.get("a_next") or divergence.get("b_next"):
+            result["next_action"] = (
+                "优先 inspect_method/trace_target 检查首次分叉两侧的方法，"
+                "它们最可能承载场景条件判断或分支动作"
+            )
+        else:
+            result["next_action"] = (
+                "主线程顺序没有明显分叉；优先查看 only_edges 与 shared_edge_timing，"
+                "或扩大调用图深度后重新采集"
+            )
+
+    return {
+        **result,
+        "session_id": session_id,
+        "package": state["package"],
+    }
 
 
 @mcp.tool()
