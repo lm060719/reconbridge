@@ -460,7 +460,8 @@ static const json& tools() {
                      {"trace", prop("boolean", true)}, {"capture_args", nullable("array")},
                      {"this", prop("string", "class")}, {"when", prop("string", "after")},
                      {"hook_id", prop("string", "")}, {"debug", prop("boolean", false)},
-                     {"restart", prop("boolean", true)}, {"seconds", prop("number", 0.0)},
+                     {"restart", prop("boolean", true)}, {"hot", prop("boolean", false)},
+                     {"seconds", prop("number", 0.0)},
                      {"max_events", prop("integer", 100)}}, {"package", "class_name", "method"})),
         tool("dump_dex", "下发内存 DEX dump hook。",
              schema({{"package", prop("string")}, {"symbol", prop("string", "")},
@@ -830,6 +831,7 @@ static json invoke_tool(const std::string& name, const json& a) {
         if(a.contains("after_actions")&&!a["after_actions"].is_null()) action["after_actions"]=a["after_actions"];
         if(a.value("skip_original",false)) action["skip_original"]=true; if(!action.empty()) target["action"]=action;
         json cfg={{"package",a.value("package","")},{"restart",a.value("restart",true)},{"debug",a.value("debug",false)},{"targets",json::array({target})}};
+        if(a.value("hot",false)){cfg["restart"]=false;cfg["mode"]="append";}
         json posted=http_post("/hook",cfg), result={{"posted",posted}}; if(a.value("seconds",0.0)>0){json ev=collect_events(a);result["count"]=ev["count"];result["seconds"]=a["seconds"];result["events"]=ev["events"];} return result;
     }
     if (name == "dump_dex") {
