@@ -422,6 +422,34 @@ static const json& tools() {
         tool("list_hooks", "列出当前磁盘上的期望 hook 配置。", schema()),
         tool("runtime_hook_status", "查看运行中 Tracer 的 HookRegistry 真实状态。",
              schema({{"package", prop("string", "")}})),
+        tool("runtime_state_get", "直接读取在线 M5 Runtime State，不创建临时 Hook。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"scope", prop("string", "process")}, {"hook_id", prop("string", "")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key"})),
+        tool("runtime_state_set", "直接写入在线 M5 Runtime State。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"value", json::object()}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key", "value"})),
+        tool("runtime_state_clear", "清空在线 M5 Runtime 的一个 State scope。",
+             schema({{"package", prop("string")}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package"})),
+        tool("runtime_event_emit", "从手机 MCP 直接向在线 M5 Runtime EventBus 发事件。",
+             schema({{"package", prop("string")}, {"name", prop("string")},
+                     {"payload", nullable("object")}, {"source_hook", prop("string", "__remote__")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "name"})),
+        tool("runtime_context_status", "实时读取目标进程 Application Context Activity Lifecycle 状态。",
+             schema({{"package", prop("string")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}}, {"package"})),
+        tool("runtime_activity_action", "在当前 Activity 上直接执行 Action Pipeline，不创建 Java Hook。",
+             schema({{"package", prop("string")}, {"actions", prop("array")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "actions"})),
         tool("unhook", "移除某包全部 hook 或指定 hook id；运行中 M5 会立即 live unhook。",
              schema({{"package", prop("string")}, {"hook_id", prop("string", "")}}, {"package"})),
         tool("collect_events", "收集 hook 命中事件，支持最近事件补捞与早停。",
@@ -729,6 +757,62 @@ static json invoke_tool(const std::string& name, const json& a) {
         std::string pkg = a.value("package", "");
         if (!pkg.empty()) return http_get("/runtime_status", {{"package", pkg}});
         return http_get("/runtime_status");
+    }
+    if (
+        name == "runtime_state_get" ||
+        name == "runtime_state_set" ||
+        name == "runtime_state_clear" ||
+        name == "runtime_event_emit" ||
+        name == "runtime_context_status" ||
+        name == "runtime_activity_action"
+    ) {
+        json command = json::object();
+        if (name == "runtime_state_get") {
+            command = {
+                {"op", "state_get"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_state_set") {
+            command = {
+                {"op", "state_set"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")},
+                {"value", a.contains("value") ? a["value"] : json(nullptr)}
+            };
+        } else if (name == "runtime_state_clear") {
+            command = {
+                {"op", "state_clear"},
+                {"scope", a.value("scope", "process")},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_event_emit") {
+            command = {
+                {"op", "event_emit"},
+                {"name", a.value("name", "")},
+                {"payload", a.contains("payload") && !a["payload"].is_null()
+                    ? a["payload"] : json::object()},
+                {"source_hook", a.value("source_hook", "__remote__")}
+            };
+        } else if (name == "runtime_context_status") {
+            command = {{"op", "context_status"}};
+        } else {
+            command = {
+                {"op", "activity_action"},
+                {"actions", a.value("actions", json::array())}
+            };
+        }
+
+        json body = {
+            {"package", a.value("package", "")},
+            {"timeout_ms", a.value("timeout_ms", 3000)},
+            {"command", command}
+        };
+        const std::string process = a.value("process", "");
+        if (!process.empty()) body["process"] = process;
+        return http_post("/runtime_command", body);
     }
     if (name == "unhook") {
         json body = {{"package", a.value("package", "")}};
