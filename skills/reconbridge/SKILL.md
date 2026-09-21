@@ -28,10 +28,19 @@ description: >-
 
 ## 开工前（每次）
 1. **先 `device_status`**：返回 `/health` 即连得上，顺带看传输方式与 base_url。连不上先排这里。
-2. 这些工具在会话里可能是**延迟加载**的：先 `ToolSearch("select:mcp__reconbridge__device_status,mcp__reconbridge__list_packages,...")` 拿 schema 再调。
-3. 传输默认 **adb**（自动 `adb forward` + 自动读设备 token，localhost-only）；多设备会自动挑唯一在线设备，仅当多台都在线才要你设 `RECONBRIDGE_SERIAL`。
+2. **默认进入任务模式**：已知包名后先 `open_target(package_name)`，拿到 `session_id`。后续优先 `search_target` / `prepare_target` / `trace_target` / `investigation_status`，不要再手工串 `pull_apk → dexkit_search → recent_events → unhook`，除非高层入口覆盖不了需求。
+3. 这些工具在会话里可能是**延迟加载**的：优先搜索 `device_status,open_target,search_target,prepare_target,trace_target,investigation_status,close_investigation`；只有特殊需求再加载原子工具。
+4. 传输默认 **adb**（自动 `adb forward` + 自动读设备 token，localhost-only）；多设备会自动挑唯一在线设备，仅当多台都在线才要你设 `RECONBRIDGE_SERIAL`。
 
-## 25 个工具（按用途分组，签名详见各工具描述）
+## 默认高层工具（优先使用）
+- `open_target`：创建持久分析会话，自动绑定/按需拉取 APK 与已有产物。
+- `search_target`：统一搜源码/字符串/类/方法/字段；已有 JADX 优先搜源码，否则走受限 Androguard worker；重复查询命中持久缓存。
+- `prepare_target`：只在确实需要完整源码时执行 JADX；已有结果直接复用。
+- `trace_target`：会话化 Java trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook。
+- `investigation_status`：查看会话资产、发现记录、运行时状态。
+- `close_investigation`：结束会话并默认清理目标 Hook。
+
+## 原子工具（高级/兜底用途，签名详见各工具描述）
 - **设备原子能力（7）**：`device_status` `list_packages` `pull_apk` `pull_libs` `read_remote_file` `proc_info` `remote_shell`（白名单）
 - **静态反编译（5）**：`decompile_apk`(jadx) `dexkit_search`(androguard 后端) `ghidra_analyze` `hermes_decompile`(RN Hermes) `toolchain_status`
 - **动态 hook / 事件（native，M3/M4）**：`post_hook` `list_hooks` `unhook` `collect_events` `recent_events`（环形缓冲事后补捞） `dump_dex`(脱壳) `list_dumps`
@@ -41,10 +50,10 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-`list_packages` → `pull_apk` → `decompile_apk`(jadx) → `dexkit_search` 按字符串/方法特征定位类与方法。native 逻辑：`pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `search_target`。只有需要完整源码上下文时再 `prepare_target`；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
-`trace_java`（Java，走 LSPosed）或 `post_hook`（native，走 Zygisk）装 hook → 触发一次目标行为 → `collect_events`（实时早返回）或 `recent_events`（事后从环形缓冲补捞）。要挖对象内部字段用 `capture.paths` + `render:"deep"`。看完 `unhook`，Java 篡改类还要 `am force-stop` 目标恢复。
+默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
 
 **C. 场景差分** —— 「A 操作与 B 操作为什么行为不同」
 装 hook → `capture_scenario("A")` 做操作 A → `capture_scenario("B")` 做操作 B → `diff_scenarios("A","B")` 拿方法级差异（只在 A / 只在 B / 参数不同）。
