@@ -161,7 +161,8 @@ def query_index(apk_path: str | Path, query: dict[str, Any]) -> dict[str, Any]:
                             "method": row["method_name"],
                             "descriptor": row["descriptor"],
                             "access": row["access"],
-                            "matched_string": keyword,
+                            "matched_string": row["value"],
+                            "matched_query": keyword,
                         })
                         if len(results) >= limit:
                             break
