@@ -133,6 +133,56 @@ def test_runtime_lineage_restores_return_order_and_writer_change():
     assert result["writer_change"]["distinct_changes"][0]["after"]["value"] is True
 
 
+def test_primary_thread_value_summary_ignores_background_noise():
+    events = [
+        {
+            "hook_id": "h1",
+            "phase": "after",
+            "ts": 100,
+            "seq": 1,
+            "tid": 7,
+            "ret": True,
+        },
+        {
+            "hook_id": "h2",
+            "phase": "before",
+            "ts": 105,
+            "seq": 2,
+            "tid": 7,
+            "fields": [{"name": "premiumStatus", "value": "false"}],
+        },
+        {
+            "hook_id": "h2",
+            "phase": "after",
+            "ts": 120,
+            "seq": 3,
+            "tid": 7,
+            "ret": None,
+            "fields": [{"name": "premiumStatus", "value": "true"}],
+        },
+        {
+            "hook_id": "h1",
+            "phase": "after",
+            "ts": 130,
+            "seq": 4,
+            "tid": 99,
+            "ret": False,
+        },
+    ]
+
+    result = runtime_lineage.analyze_capture(
+        _path(),
+        events,
+        _hook_map(),
+    )
+
+    repo = result["observations"][0]
+    assert result["primary_tid"] == 7
+    assert repo["returns"]["stable"] is True
+    assert repo["returns"]["stable_value"]["value"] is True
+    assert repo["returns_all_threads"]["stable"] is False
+
+
 def test_runtime_lineage_path_methods_skips_external_by_default():
     path = _path()
     path["nodes"].insert(
