@@ -194,6 +194,39 @@ def test_call_graph_runtime_annotation_marks_paths():
     assert call_graph["edges"][0]["runtime_observed"] is True
 
 
+def test_runtime_path_records_observed_sequence_edges():
+    graph = evidence.new_graph()
+    path = {
+        "nodes": [
+            {"class": "com.example.A", "method": "start", "descriptor": "()V"},
+            {"class": "com.example.B", "method": "load", "descriptor": "()V"},
+        ]
+    }
+    analysis = {
+        "node_hits": [
+            {"path_index": 0, "hits": 1},
+            {"path_index": 1, "hits": 1},
+        ],
+        "edges": [
+            {
+                "source_index": 0,
+                "target_index": 1,
+                "observed": True,
+                "delta_ms": 12.0,
+            }
+        ],
+    }
+
+    evidence.record_runtime_path(graph, path, analysis)
+
+    runtime_edges = [
+        edge for edge in graph["edges"]
+        if edge.get("relation") == "runtime_sequence"
+    ]
+    assert len(runtime_edges) == 1
+    assert runtime_edges[0]["delta_ms"] == 12.0
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
