@@ -37,7 +37,8 @@ description: >-
 - `search_target`：统一搜源码/字符串/类/方法/字段；已有 JADX 优先搜源码，否则查询 SQLite DEX 持久索引。首次索引由受限 Androguard worker 建立，之后不同关键词也不再解析 APK。
 - `prepare_index`：可主动预热/重建当前 APK 的 DEX SQLite 索引；适合准备连续做大量静态搜索时先调用一次。
 - `prepare_target`：只在确实需要完整源码时执行 JADX；已有结果直接复用。
-- `investigate`：默认首选的一键调查入口；自然语言目标会自动走“关键词规划 → 索引 → 多词候选排序 → 可选批量 runtime 验证 → 证据汇总”，运行时不可用时自动降级保留静态候选。
+- `investigate`：默认首选的一键调查入口；自然语言目标会自动走“关键词规划 → 索引 → 多词候选排序 → 可选批量 runtime 验证 → 主候选 callers/callees + JADX 源码上下文 → 证据汇总”，运行时不可用时仍保留静态与源码结果。
+- `inspect_method`：已知具体类/方法时，直接展开 callers、callees、关联字符串、同类字段和 JADX 方法体；没有源码时默认自动准备一次。
 - `rank_candidates`：需要手工控制时，综合字符串 xref、方法名/类名和 Evidence Graph 对候选方法做可解释排序。
 - `verify_candidates`：一次性给前 N 个候选装观测 Hook，共享一个采集窗口；触发一次行为即可知道谁真实命中。
 - `trace_target`：已知具体方法时的单方法精细 trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook；命中会自动写入证据图。
@@ -56,7 +57,7 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-默认：`open_target` → `investigate(goal=...)`。只有需要人工拆解调查过程时，才使用 `search_target → rank_candidates → verify_candidates → explain_evidence`。首次 DEX 搜索会自动建立 SQLite 索引；若预计连续搜索很多次可先 `prepare_index`。已经明确具体方法并需要抓参数/字段时用 `trace_target`。需要完整源码上下文时再 `prepare_target`；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `investigate(goal=...)`。调查结果会自动附带主候选的调用关系和 JADX 源码片段；需要手工换候选或深入另一个方法时用 `inspect_method`。只有需要人工拆解调查过程时，才使用 `search_target → rank_candidates → verify_candidates → explain_evidence`。DEX 索引 v2 会一次性持久化方法调用边，旧索引首次使用时会自动重建。已明确具体方法并需要抓运行时参数/字段时用 `trace_target`；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
