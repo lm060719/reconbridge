@@ -222,6 +222,25 @@ object ActionExecutor {
         }
     }
 
+    fun executeEventHandler(
+        ctx: ActionContext,
+        handler: JSONObject,
+    )
+    {
+        val condition = handler.opt("condition") ?: handler.opt("if")
+        if (
+            condition != null &&
+            !evaluateCondition(ctx, condition)
+        ) {
+            return
+        }
+
+        val actions = handler.optJSONArray("actions")
+            ?: handler.optJSONArray("steps")
+            ?: JSONArray()
+        runPipeline(ctx, actions)
+    }
+
     private fun runPipeline(ctx: ActionContext, steps: JSONArray) {
         for (i in 0 until steps.length()) {
             val step = steps.optJSONObject(i) ?: continue
@@ -251,6 +270,7 @@ object ActionExecutor {
             "set_arg" -> stepSetArg(ctx, step)
             "set_result", "replace_return" -> stepSetResult(ctx, step)
             "set_state" -> stepSetState(ctx, step)
+            "get_state" -> stepGetState(ctx, step)
             "remove_state" -> stepRemoveState(ctx, step)
             "clear_state" -> stepClearState(ctx, step)
             "increment_state", "inc_state" -> stepIncrementState(ctx, step)
@@ -690,6 +710,212 @@ object ActionExecutor {
 
     private fun stepSetResult(ctx: ActionContext, step: JSONObject) {
         ctx.result = resolveValueItem(ctx, step.opt("value"))
+    }
+
+    private fun stepSetState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("set_state.key 不能为空")
+        }
+
+        val value = resolveStructuredValue(
+            ctx,
+            step.opt("value"),
+        )
+        state.set(scope, key, value, ctx.hookId)
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = value
+        }
+    }
+
+    private fun stepGetState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("get_state.key 不能为空")
+        }
+
+        val value = state.get(scope, key, ctx.hookId)
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = value
+        }
+    }
+
+    private fun stepRemoveState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("remove_state.key 不能为空")
+        }
+
+        val removed = state.remove(scope, key, ctx.hookId)
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = removed
+        }
+    }
+
+    private fun stepClearState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val count = state.clear(scope, ctx.hookId)
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = count
+        }
+    }
+
+    private fun stepIncrementState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("increment_state.key 不能为空")
+        }
+
+        val rawDelta = resolveValueItem(
+            ctx,
+            if (step.has("delta")) {
+                step.opt("delta")
+            } else {
+                1
+            },
+        )
+        val delta = when (rawDelta) {
+            is Number -> rawDelta.toDouble()
+            else -> rawDelta?.toString()?.toDoubleOrNull() ?: 1.0
+        }
+        val value = state.increment(
+            scope,
+            key,
+            delta,
+            ctx.hookId,
+        )
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = value
+        }
+    }
+
+    private fun stepAppendState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("append_state.key 不能为空")
+        }
+
+        val value = resolveStructuredValue(
+            ctx,
+            step.opt("value"),
+        )
+        val list = state.append(
+            scope,
+            key,
+            value,
+            ctx.hookId,
+        )
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = list
+        }
+    }
+
+    private fun stepEmitEvent(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val bus = ctx.eventBus
+            ?: throw IllegalStateException("Runtime Event Bus 未初始化")
+        val rawName = resolveValueItem(
+            ctx,
+            step.opt("name") ?: step.opt("event"),
+        )
+        val name = rawName?.toString()?.trim().orEmpty()
+        if (name.isEmpty()) {
+            throw IllegalArgumentException("emit_event.name 不能为空")
+        }
+
+        val payload = LinkedHashMap<String, Any?>()
+        val rawPayload = step.optJSONObject("payload")
+        if (rawPayload != null) {
+            val iterator = rawPayload.keys()
+            while (iterator.hasNext()) {
+                val key = iterator.next()
+                payload[key] = resolveStructuredValue(
+                    ctx,
+                    rawPayload.opt(key),
+                )
+            }
+        }
+
+        val delivered = bus.emit(
+            RuntimeEvent(
+                name = name,
+                payload = payload,
+                sourceHookId = ctx.hookId,
+            )
+        )
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = delivered
+        }
     }
 
     private fun applyReplaceArgs(ctx: ActionContext, replaceArgs: JSONArray) {
