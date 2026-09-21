@@ -78,6 +78,31 @@ def investigation_status(session_id: str) -> dict:
 
 
 @mcp.tool()
+def prepare_index(session_id: str, force: bool = False) -> dict:
+    """预热当前目标的 DEX SQLite 索引；首次解析 APK，之后所有新查询直接查数据库。"""
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "当前会话没有 APK，无法建立 DEX 索引",
+        }
+
+    result = external.ensure_dex_index(apk, force=force)
+    return {
+        **result,
+        "session_id": session_id,
+        "package": state["package"],
+    }
+
+
+@mcp.tool()
 def prepare_target(session_id: str, force: bool = False) -> dict:
     """为会话准备 JADX 源码。已有反编译产物时直接复用，否则只反编译当前主 APK。"""
     try:
@@ -120,7 +145,7 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
     """在当前分析目标中统一搜索源码 / 字符串 / 类 / 方法 / 字段。
 
     kind: auto|source|string|method|class|field。auto 会优先复用已有 JADX 源码；没有源码或未命中时，
-    自动走受内存限制且带持久缓存的 Androguard worker。结果默认只返回前 20 条，避免污染模型上下文。
+    自动使用 SQLite DEX 持久索引。索引首次由受内存限制的 Androguard worker 建立，后续新查询不再解析 APK。
     """
     query = query.strip()
     if not query:
@@ -174,7 +199,7 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
 
     result = external.dexkit_search(apk, dex_query)
 
-    # auto 的字符串引用搜索没有结果时，再退回方法名搜索；两种结果都会被持久缓存。
+    # auto 的字符串引用搜索没有结果时，再退回方法名搜索；两次都直接复用同一个 SQLite 索引。
     if kind == "auto" and result.get("ok") and not result.get("results"):
         result = external.dexkit_search(
             apk,
