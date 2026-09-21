@@ -114,7 +114,7 @@
 |---|---|---|
 | `post_hook` | `(config)` | 下发原始 hook 配置（native 或 java，见协议）。**通用入口** |
 | `list_hooks` | `()` | 列磁盘上的**期望 Hook 配置** |
-| `runtime_hook_status` | `(package="")` | 查运行中 M5 Tracer 的**真实 HookRegistry**：进程/pid、实际安装 id、member 数、live unhook/replace 能力 |
+| `runtime_hook_status` | `(package="")` | 查运行中 M5 Tracer 的**真实 HookRegistry + ClassLoaderRegistry**：installed/pending、member、loader、watcher、live unhook/replace 能力 |
 | `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 Hook；运行中的 M5 Java Hook 会立即 **live unhook**，无需 force-stop |
 | `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**；**`include_recent=True` 事后补捞**环形缓冲历史命中（命中发生在采集开始前也能拿到）；`fold_stack` 折叠栈顶 hook 框架帧 |
 | `recent_events` | `(limit=50, since_seq=0)` | **事后采集**：直接取守护进程环形缓冲里最近的命中，无需正连着 SSE。返回 `latest_seq` 可作游标只取增量 |
@@ -154,7 +154,7 @@
 - `paths`(嵌套字段路径捕获)：`[{"path":"args[1].payload.load_url","render":"tostring"}]`——直接拿深埋在 payload 对象里的值，不靠整对象 toString 撞运气。路径 `args[N]`/`this`/`ret` 起头，`.name` 逐层(反射字段→getter→Map key)，`[n]` 索引数组/List；裸字段名=`this.<name>`；解析不到标 `unresolved:true`。
 - `action`(篡改与 Action 流水线)：支持快捷覆盖入参 `replace_args:[{index,value,type}]`、覆盖返回值 `replace_return:{value,type}`、`skip_original`；同时支持高级动作链 `before_actions` / `after_actions`，包含 `call_method`(调用Java方法)、`set_field`(读写字段)、`construct`(构造对象)、`eval_js`(Rhino JS片段执行)、`eval_dex`(DEX动态执行)、`exec_shell`(执行Shell命令)。命中事件带 `tampered:true`。
 - `debug:true` 才逐命中打 logcat（默认安静）。
-- 配置同步是**全量 reconcile**：新 id 安装、同 id 改配置 live replace、缺失 id live remove；`runtime_hook_status` 用来核对进程里实际装了什么。
+- 配置同步是**全量 reconcile**：新 id 安装、同 id 改配置 live replace、缺失 id live remove；显式类若当前所有已知 loader 都找不到会进入 `pending_class`。常见 Path/Dex/InMemoryDexClassLoader 创建后会立刻重试，存在 pending 时还会临时监听 `ClassLoader.loadClass`。用 `runtime_hook_status` 看 `installed_count / pending_count / pending_hooks / class_loaders / class_loader_watch`。
 
 ---
 
@@ -360,7 +360,7 @@ compare_root_cause_hypothesis(
 ## 6. 高频坑（务必记住）
 
 1. **adb + Git Bash（Windows）**：所有 adb 命令前 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`，否则 `/data/...` 被改写成 Windows 路径。
-2. **首个 hook 先让 Tracer 进程上线，之后走 live reconcile**：最稳妥的首发仍用 `restart:true`；一旦 M5 Tracer 已连接，`restart:false` / `hot=True` 会同步完整期望配置，HookRegistry 可 live add/remove/replace。同 ID target 改配置会即时替换；`unhook` 会即时卸载。`runtime_hook_status` 用来确认真实安装状态。native M3 目标目前仍需 restart/下次启动生效。
+2. **首个 hook 先让 Tracer 进程上线，之后走 live reconcile**：最稳妥的首发仍用 `restart:true`；一旦 M5 Tracer 已连接，`restart:false` / `hot=True` 会同步完整期望配置，HookRegistry 可 live add/remove/replace。显式插件类暂时不存在时会进入 pending，而不是失败；触发插件加载后应看到 pending→installed。同 ID target 改配置会即时替换；`unhook` 会即时卸载并删除 pending。`runtime_hook_status` 用来确认 installed/pending/loader 状态。native M3 目标目前仍需 restart/下次启动生效。
 3. **稀疏事件的采集时序**：**优先 `until_first_hit=True`**（命中即返回，不必和窗口掐点）。守护进程带**最近 ~400 条环形缓冲**，故命中即便发生在采集开始前也能捞回——用 `collect_events(include_recent=True)` 或直接 `recent_events()`（推荐流程：post_hook 后 `recent_events(limit=0)` 记游标 → 触发 → 事后 `recent_events(since_seq=游标)` 补捞）。`seconds` 只当兜底。
 4. **控制台中文可能显示成乱码**：多为终端编码问题（如 Windows Git Bash），数据本身是 UTF-8。验证时写 UTF-8 文件再用 Read 看，或设 `PYTHONUTF8=1 PYTHONIOENCODING=utf-8`。
 5. **改了 `pc/reconbridge_mcp/*.py` 要重启 MCP server** 才生效（新会话天然是新 server，不受影响）。
