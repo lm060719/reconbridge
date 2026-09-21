@@ -13,7 +13,7 @@ from typing import Any
 
 from .settings import settings
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def apk_cache_key(apk: Path) -> str:
@@ -72,6 +72,8 @@ def index_status(apk_path: str | Path) -> dict[str, Any]:
                 "strings",
                 "string_method_xrefs",
                 "method_calls",
+                "field_reads",
+                "field_writes",
             ):
                 result[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
     except sqlite3.Error:
@@ -369,6 +371,99 @@ def method_relations(
             }
             for row in fields
         ],
+        "index_path": str(path),
+    }
+
+
+def field_relations(
+    apk_path: str | Path,
+    class_name: str,
+    field_name: str,
+    field_type: str = "",
+    limit: int = 100,
+) -> dict[str, Any]:
+    """返回字段定义，以及所有静态读取/写入它的方法和 DEX offset。"""
+    apk = Path(apk_path)
+    if not index_is_ready(apk):
+        return {"ok": False, "error": "DEX 持久索引尚未建立"}
+
+    limit = max(1, min(int(limit), 500))
+    path = index_path_for_apk(apk)
+    variants = _class_variants(class_name)
+    placeholders = ",".join("?" for _ in variants)
+    params: list[Any] = [*variants, field_name]
+    type_sql = ""
+    if field_type:
+        type_sql = " AND type = ?"
+        params.append(field_type)
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        targets = list(
+            conn.execute(
+                f"""
+                SELECT id, class_name, field_name, type
+                FROM fields
+                WHERE class_name IN ({placeholders})
+                  AND field_name = ?
+                  {type_sql}
+                ORDER BY type
+                LIMIT 20
+                """,
+                params,
+            )
+        )
+        if not targets:
+            return {
+                "ok": False,
+                "error": "索引中找不到目标字段",
+                "class": class_name,
+                "field": field_name,
+                "type": field_type,
+            }
+
+        field_ids = [int(row["id"]) for row in targets]
+        ph = ",".join("?" for _ in field_ids)
+
+        def load_access(table: str) -> list[dict[str, Any]]:
+            rows = conn.execute(
+                f"""
+                SELECT m.class_name, m.method_name, m.descriptor, m.access,
+                       x.offset
+                FROM {table} x
+                JOIN methods m ON m.id = x.method_id
+                WHERE x.field_id IN ({ph})
+                ORDER BY m.class_name, m.method_name, x.offset
+                LIMIT ?
+                """,
+                [*field_ids, limit],
+            )
+            return [
+                {
+                    **_method_dict(row),
+                    "offset": int(row["offset"] or 0),
+                }
+                for row in rows
+            ]
+
+        readers = load_access("field_reads")
+        writers = load_access("field_writes")
+
+    return {
+        "ok": True,
+        "backend": "sqlite-index",
+        "fields": [
+            {
+                "class": row["class_name"],
+                "field": row["field_name"],
+                "type": row["type"],
+            }
+            for row in targets
+        ],
+        "readers": readers,
+        "writers": writers,
+        "reader_count": len(readers),
+        "writer_count": len(writers),
         "index_path": str(path),
     }
 
