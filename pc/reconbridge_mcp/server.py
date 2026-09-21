@@ -2176,6 +2176,142 @@ def verify_condition_writer(
 
 
 @mcp.tool()
+def inspect_value_lineage(
+    session_id: str,
+    a: str,
+    b: str,
+    condition_rank: int = 1,
+    probe_index: int = 0,
+    writer_rank: int = 1,
+    max_depth: int = 4,
+    max_nodes: int = 60,
+) -> dict:
+    """跨方法递归追踪已确认 A/B 分叉条件的值来源。
+
+    字段条件从指定 writer 的赋值右值开始，按 DEX callee 与 JADX return 继续上溯；
+    条件方法直接从 return 表达式开始。解析不唯一时会保留 ambiguities，不会擅自选类。
+    """
+    origin_result = inspect_condition_origin(
+        session_id,
+        a,
+        b,
+        condition_rank=condition_rank,
+        probe_index=probe_index,
+        writer_limit=max(40, int(writer_rank)),
+    )
+    if not origin_result.get("ok"):
+        return origin_result
+
+    state = investigation.load(session_id, refresh=True)
+    origin_kind = str(origin_result.get("origin_kind", ""))
+
+    if origin_kind == "field":
+        field_origin = origin_result.get("field_origin") or {}
+        field = field_origin.get("field") or {}
+        lineage = investigation.field_value_lineage(
+            session_id,
+            str(field.get("class", "")),
+            str(field.get("name", "")),
+            field_type=str(field.get("type", "")),
+            writer_rank=max(1, int(writer_rank)),
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+        )
+        if lineage.get("ok"):
+            investigation.record_value_lineage_evidence(session_id, lineage)
+
+        investigation.add_discovery(
+            session_id,
+            {
+                "type": "value_lineage",
+                "kind": "field",
+                "field": field.get("name", ""),
+                "writer_rank": writer_rank,
+                "nodes": lineage.get("node_count", 0),
+                "edges": lineage.get("edge_count", 0),
+                "paths": len(lineage.get("origin_paths", [])),
+                "ambiguities": len(lineage.get("ambiguities", [])),
+            },
+        )
+
+        if lineage.get("ambiguities"):
+            next_action = (
+                "存在同名 callee 歧义；优先查看 ambiguities 的候选类，结合 writer 源码接收者类型后再收窄"
+            )
+        elif lineage.get("origin_paths"):
+            next_action = (
+                "优先查看 origin_paths 中最长且 runtime_confirmed 节点最多的链；"
+                "需要确认真实数据流时可对链上关键方法继续 trace_target"
+            )
+        else:
+            next_action = (
+                "没有形成完整来源路径；检查 unresolved_calls，或确认值是否来自反射/native/序列化框架"
+            )
+
+        return {
+            "ok": bool(lineage.get("ok")),
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "condition": origin_result.get("condition"),
+            "probe": origin_result.get("probe"),
+            "origin_kind": "field",
+            "field": field,
+            "writer_rank": max(1, int(writer_rank)),
+            "lineage": lineage,
+            "next_action": next_action,
+        }
+
+    if origin_kind == "condition_method":
+        probe = origin_result.get("probe") or {}
+        lineage = investigation.condition_method_value_lineage(
+            session_id,
+            str(probe.get("class", "")),
+            str(probe.get("method", "")),
+            max_depth=max_depth,
+            max_nodes=max_nodes,
+        )
+        if lineage.get("ok"):
+            investigation.record_value_lineage_evidence(session_id, lineage)
+
+        investigation.add_discovery(
+            session_id,
+            {
+                "type": "value_lineage",
+                "kind": "condition_method",
+                "method": f"{probe.get('class', '')}.{probe.get('method', '')}",
+                "nodes": lineage.get("node_count", 0),
+                "edges": lineage.get("edge_count", 0),
+                "paths": len(lineage.get("origin_paths", [])),
+                "ambiguities": len(lineage.get("ambiguities", [])),
+            },
+        )
+        return {
+            "ok": bool(lineage.get("ok")),
+            "session_id": session_id,
+            "package": state["package"],
+            "a": a,
+            "b": b,
+            "condition": origin_result.get("condition"),
+            "probe": probe,
+            "origin_kind": "condition_method",
+            "lineage": lineage,
+            "next_action": (
+                "查看 origin_paths；若某层出现 ambiguities，先解析接收者实际类型，"
+                "否则对链上 Repository/API/模型 getter 做 runtime trace 继续确认"
+            ),
+        }
+
+    return {
+        "ok": False,
+        "session_id": session_id,
+        "package": state["package"],
+        "error": f"暂不支持 Value Lineage 的 origin_kind: {origin_kind}",
+    }
+
+
+@mcp.tool()
 def investigate(
     session_id: str,
     goal: str,
