@@ -180,6 +180,60 @@ daemon 下发的配置被视为“完整期望状态”，运行中收到新配�
 - `GET /hooks` / MCP `list_hooks`：磁盘上的**期望配置**；
 - `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**完整 M5 Runtime 状态**，包含 HookRegistry / ClassLoader、Runtime State / Event Bus，以及 Context / Lifecycle Runtime。
 
+## 远程 Runtime Command（Runtime Phase 5）
+
+Phase 5 复用现有 `@reconbridge_inject` 双向 socket，不再通过“临时 Hook”间接操作 Runtime：
+
+```text
+Tracer -> K                 # 声明支持 Runtime Command
+daemon -> C + JSON          # 下发命令，带 request_id
+Tracer -> A + JSON          # Ack，带同一个 request_id
+```
+
+daemon 暴露 `POST /runtime_command`，PC / 手机 MCP 提供对应高层工具：
+
+- `runtime_state_get`
+- `runtime_state_set`
+- `runtime_state_remove`
+- `runtime_state_increment`
+- `runtime_state_append`
+- `runtime_state_clear`
+- `runtime_event_emit`
+- `runtime_context_status`
+- `runtime_activity_action`
+
+示例：
+
+```text
+runtime_state_set("com.target.app", key="debug", value=true)
+runtime_state_increment("com.target.app", key="hits", delta=1)
+runtime_state_append("com.target.app", key="history", value={"page":"vip"})
+runtime_state_remove("com.target.app", key="debug")
+
+runtime_event_emit(
+    "com.target.app",
+    name="debug.toggle",
+    payload={"enabled": true}
+)
+
+runtime_context_status("com.target.app")
+
+runtime_activity_action(
+    "com.target.app",
+    actions=[
+        {"action":"call_method","target":"activity","method":"finish"}
+    ]
+)
+```
+
+State 的远程 scope 支持 `process/package/hook`。远程命令**不支持 thread scope**：socket command 线程的 ThreadLocal 不能代表真实 Hook 业务线程。hook scope 必须传 `hook_id`。
+
+多进程 App 未指定 `process` 时，daemon 会把命令并行发给该包所有在线且声明 `K` 能力的 Tracer，并返回 `results[]`；需要只操作主进程或 `:service` 时显式传完整 process name。
+
+`activity_action` 直接复用现有 Action Pipeline；若当前有真实 Android Activity，会把动作调度到主线程并等待 Ack。没有当前 Activity 时明确失败，不会偷偷回退 application context。HTTP `timeout_ms` 会被限制在 200–10000ms。
+
+Runtime Command 不修改 `hooks/<pkg>.json`，也不创建临时 Hook，因此适合交互式调试、状态开关、远程触发 Event Bus 和当前 Activity 操作。Tracer 每次命令后会重新发布 runtime status，便于 `runtime_hook_status` 看到最新 State/Event/Context 状态。
+
 ## Runtime State + Event Bus（Runtime Phase 3）
 
 Phase 3 让不同 Hook 不再彼此独立。每个目标 App **进程**拥有一份 `RuntimeStateStore` 和 `RuntimeEventBus`，Java Hook、动态 ClassLoader 后补装 Hook、以及纯事件 target 都共享它们。
