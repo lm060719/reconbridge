@@ -34,7 +34,8 @@ description: >-
 
 ## 默认高层工具（优先使用）
 - `open_target`：创建持久分析会话，自动绑定/按需拉取 APK 与已有产物。
-- `search_target`：统一搜源码/字符串/类/方法/字段；已有 JADX 优先搜源码，否则走受限 Androguard worker；重复查询命中持久缓存。
+- `search_target`：统一搜源码/字符串/类/方法/字段；已有 JADX 优先搜源码，否则查询 SQLite DEX 持久索引。首次索引由受限 Androguard worker 建立，之后不同关键词也不再解析 APK。
+- `prepare_index`：可主动预热/重建当前 APK 的 DEX SQLite 索引；适合准备连续做大量静态搜索时先调用一次。
 - `prepare_target`：只在确实需要完整源码时执行 JADX；已有结果直接复用。
 - `trace_target`：会话化 Java trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook。
 - `investigation_status`：查看会话资产、发现记录、运行时状态。
@@ -50,7 +51,7 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-默认：`open_target` → `search_target`。只有需要完整源码上下文时再 `prepare_target`；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `search_target`。首次 DEX 搜索会自动建立 SQLite 索引；若预计连续搜索很多次，可先 `prepare_index`。只有需要完整源码上下文时再 `prepare_target`；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
