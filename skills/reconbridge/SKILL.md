@@ -46,6 +46,8 @@ description: >-
 - `analyze_scenario_divergence`：取 A/B 公共前缀最后一个方法，自动回到 JADX 源码识别 if/else、switch、Kotlin when、三元表达式，按两侧下一跳方法做可解释排序，并生成只读 trace 探针计划。
 - `capture_divergence_probe`：按分叉条件排名自动执行一个安全探针；字段用 branch method 的 before 抓 `this.field`，条件方法用 after 抓返回值。结果压缩写回对应场景文件。
 - `compare_divergence_probes`：比较同一探针在 A/B 下的稳定值；布尔条件会检查是否与 `a_false_b_true / a_true_b_false` 源码方向一致。
+- `inspect_condition_origin`：从已验证的字段/条件方法继续追值来源。DEX v3 会直接给出字段所有 reader/writer 与 bytecode offset；JADX 再解释 writer 赋值右值来自 Preferences、Intent/Bundle、数据库/缓存、Repository/API、用户模型、参数或常量。
+- `verify_condition_writer`：对同类实例字段的高排名 writer 同时抓 before/after 字段值，判断该方法是否真的在一次行为里改变目标条件字段。
 - `rank_candidates`：需要手工控制时，综合字符串 xref、方法名/类名和 Evidence Graph 对候选方法做可解释排序。
 - `verify_candidates`：一次性给前 N 个候选装观测 Hook，共享一个采集窗口；触发一次行为即可知道谁真实命中。
 - `trace_target`：已知具体方法时的单方法精细 trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook；命中会自动写入证据图。
@@ -64,7 +66,7 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-默认：`open_target` → `investigate(goal=...)` → 读取 `call_graph.representative_paths` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes`。这样从首次分叉继续收敛到具体 if/switch/字段/条件方法，并用真实 A/B 值验证。条件里只有无接收者或 this/super 方法才自动生成同类 Hook；对象接收者先解析实际类型。native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `investigate(goal=...)` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin`。若条件是字段，再用 `verify_condition_writer` 动态确认哪个 writer 真正改变状态。DEX 索引 v3 会持久化字段 read/write xref；旧索引首次使用自动重建。对象接收者先解析实际类型；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
