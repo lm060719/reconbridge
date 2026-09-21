@@ -374,6 +374,14 @@ object ActionExecutor {
         val expr = pathExpr.trim()
         if (expr.isEmpty()) return false
 
+        if (expr.startsWith("state.")) {
+            return ctx.runtimeState?.setPath(
+                expr,
+                newValue,
+                ctx.hookId,
+            ) == true
+        }
+
         var lastDotOrBracket = -1
         var inQuote = false
         var quoteChar = ' '
@@ -642,6 +650,30 @@ object ActionExecutor {
             ScriptableObject.putProperty(scope, "\$ret", org.mozilla.javascript.Context.javaToJS(ctx.result, scope))
             ScriptableObject.putProperty(scope, "\$ctx", org.mozilla.javascript.Context.javaToJS(ctx, scope))
             ScriptableObject.putProperty(scope, "\$regs", org.mozilla.javascript.Context.javaToJS(ctx.registers, scope))
+            ScriptableObject.putProperty(
+                scope,
+                "\$state",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.runtimeState?.view(ctx.hookId),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$stateStore",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.runtimeState,
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$event",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.runtimeEvent?.asMap(),
+                    scope,
+                ),
+            )
 
             val res = jsCtx.evaluateString(scope, script, "<m5_script>", 1, null)
             return when (res) {
@@ -943,6 +975,24 @@ object ActionExecutor {
         var s: String
 
         when {
+            expr.startsWith("state.") -> {
+                return ctx.runtimeState?.resolve(
+                    expr,
+                    ctx.hookId,
+                ) ?: MISSING
+            }
+            expr == "event" ||
+                expr.startsWith("event.") ||
+                expr.startsWith("event[") -> {
+                val eventMap = ctx.runtimeEvent?.asMap()
+                    ?: return MISSING
+                cur = eventMap
+                s = if (expr == "event") {
+                    ""
+                } else {
+                    expr.substring(5)
+                }
+            }
             expr == "this" || expr.startsWith("this.") || expr.startsWith("this[") -> {
                 cur = ctx.thisObject
                 s = if (expr == "this") "" else expr.substring(4)
@@ -1107,6 +1157,55 @@ object ActionExecutor {
             }
         }
         return vObj
+    }
+
+    private fun resolveStructuredValue(
+        ctx: ActionContext,
+        value: Any?,
+    ): Any?
+    {
+        if (value == null || value === JSONObject.NULL) {
+            return null
+        }
+
+        return when (value) {
+            is JSONObject -> {
+                if (
+                    value.has("path") ||
+                    value.has("var") ||
+                    value.has("value") ||
+                    value.has("type")
+                ) {
+                    resolveValue(ctx, value)
+                } else {
+                    val out = LinkedHashMap<String, Any?>()
+                    val iterator = value.keys()
+                    while (iterator.hasNext()) {
+                        val key = iterator.next()
+                        out[key] = resolveStructuredValue(
+                            ctx,
+                            value.opt(key),
+                        )
+                    }
+                    out
+                }
+            }
+
+            is JSONArray -> {
+                val out = ArrayList<Any?>()
+                for (index in 0 until value.length()) {
+                    out.add(
+                        resolveStructuredValue(
+                            ctx,
+                            value.opt(index),
+                        )
+                    )
+                }
+                out
+            }
+
+            else -> resolveValueItem(ctx, value)
+        }
     }
 
     private fun interpolateTemplateString(ctx: ActionContext, str: String): String {
