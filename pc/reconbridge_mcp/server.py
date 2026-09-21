@@ -3170,6 +3170,42 @@ def _capture_root_cause_hypothesis(
     }
 
 
+def _saved_hypothesis_candidate_for_rank(
+    session_id: str,
+    scenario_name: str,
+    candidate_rank: int,
+) -> dict[str, Any] | None:
+    """从另一侧场景复用已固定的候选，避免首侧命中导致排名漂移后 A/B 错配。"""
+    try:
+        data = investigation.load_call_scenario(
+            session_id,
+            scenario_name,
+        )
+    except (ValueError, FileNotFoundError):
+        return None
+
+    captures = data.get("root_cause_hypothesis_captures") or {}
+    ordered = sorted(
+        (
+            item
+            for item in captures.values()
+            if isinstance(item, dict)
+        ),
+        key=lambda item: int(item.get("saved_at", 0) or 0),
+        reverse=True,
+    )
+    for item in ordered:
+        candidate_row = item.get("candidate") or {}
+        if (
+            int(candidate_row.get("rank", 0) or 0)
+            == int(candidate_rank)
+            and candidate_row.get("candidate_type") == "method"
+            and candidate_row.get("candidate_key")
+        ):
+            return dict(candidate_row)
+    return None
+
+
 @mcp.tool()
 def verify_root_cause_hypothesis(
     session_id: str,
@@ -3222,14 +3258,22 @@ def verify_root_cause_hypothesis(
     if not baseline.get("ok"):
         return baseline
 
-    selected = next(
-        (
-            item
-            for item in (baseline.get("candidates") or [])
-            if int(item.get("rank", 0) or 0) == candidate_rank
-        ),
-        None,
+    other_name = b if capture_for == a else a
+    selected = _saved_hypothesis_candidate_for_rank(
+        session_id,
+        other_name,
+        candidate_rank,
     )
+    candidate_pinned_from_other_scenario = selected is not None
+    if selected is None:
+        selected = next(
+            (
+                item
+                for item in (baseline.get("candidates") or [])
+                if int(item.get("rank", 0) or 0) == candidate_rank
+            ),
+            None,
+        )
     if selected is None:
         return {
             "ok": False,
@@ -3300,6 +3344,9 @@ def verify_root_cause_hypothesis(
             "capture_for": capture_for,
             "candidate_rank": candidate_rank,
             "baseline_candidate": selected,
+            "candidate_pinned_from_other_scenario": (
+                candidate_pinned_from_other_scenario
+            ),
             "baseline_top_candidate": baseline.get(
                 "top_candidate"
             ),
@@ -3391,14 +3438,26 @@ def compare_root_cause_hypothesis(
     if not baseline.get("ok"):
         return baseline
 
-    selected = next(
-        (
-            item
-            for item in (baseline.get("candidates") or [])
-            if int(item.get("rank", 0) or 0) == candidate_rank
-        ),
-        None,
+    selected = _saved_hypothesis_candidate_for_rank(
+        session_id,
+        a,
+        candidate_rank,
     )
+    if selected is None:
+        selected = _saved_hypothesis_candidate_for_rank(
+            session_id,
+            b,
+            candidate_rank,
+        )
+    if selected is None:
+        selected = next(
+            (
+                item
+                for item in (baseline.get("candidates") or [])
+                if int(item.get("rank", 0) or 0) == candidate_rank
+            ),
+            None,
+        )
     if selected is None or selected.get("candidate_type") != "method":
         return {
             "ok": False,
