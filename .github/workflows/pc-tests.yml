@@ -40,3 +40,40 @@ jobs:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: utf-8
         run: pytest -q
+
+  tracer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: m5/tracer
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: 运行 M5 Tracer 单元测试并编译 APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon
+
+  daemon-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 检查 daemon 动态层 C++ 语法
+        run: |
+          g++ -std=c++17 -pthread -Isrc -fsyntax-only src/dynamic.cpp
+          g++ -std=c++17 -pthread -Isrc -fsyntax-only src/mobile_mcp.cpp
+
