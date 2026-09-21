@@ -178,7 +178,7 @@ daemon 下发的配置被视为“完整期望状态”，运行中收到新配�
 查询分两层：
 
 - `GET /hooks` / MCP `list_hooks`：磁盘上的**期望配置**；
-- `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**真实 HookRegistry / ClassLoader 状态**，包含进程、pid、installed/pending Hook、member、fingerprint、ClassLoader 注册表，以及 live unhook / replace / pending 能力。
+- `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**完整 M5 Runtime 状态**，包含 HookRegistry / ClassLoader、Runtime State / Event Bus，以及 Context / Lifecycle Runtime。
 
 ## Runtime State + Event Bus（Runtime Phase 3）
 
@@ -422,6 +422,178 @@ listener actions / state mutation
 
 纯事件 handler 的 ActionContext 没有方法调用上下文，因此 `this / args / ret` 不可用；应主要使用 `event.*`、`state.*`、静态 `class:...` 调用或自行 construct/eval_js/eval_dex。
 
+## Lifecycle + Context Runtime（Runtime Phase 4）
+
+Phase 4 把 Android 进程里的 `Application / Context / 当前 Activity / Activity 生命周期` 接入现有 ActionContext 和 Event Bus。
+
+实现策略不是给每个 Activity 子类逐个挂 `onResume()` Hook，而是：
+
+```text
+Application.attach(Context)
+        ↓
+ContextRegistry 记录 Application / applicationContext
+        ↓
+Application.registerActivityLifecycleCallbacks(...)
+        ↓
+Activity created/started/resumed/paused/stopped/destroyed
+        ↓
+ContextRegistry 更新当前 Activity
+        ↓
+RuntimeEventBus.emit("lifecycle....")
+```
+
+当前 Activity 只通过 **WeakReference** 保存；Runtime 不会为了提供 `${activity}` 而阻止页面被回收。
+
+### Action / 模板中的 Context 根对象
+
+现有 path / template / condition / `call_method.target` 现在都可直接使用：
+
+| 根路径 | 含义 |
+|---|---|
+| `application` / `${application}` | 当前进程 Application 对象 |
+| `context` / `${context}` | 优先当前 Activity；没有 Activity 时退回 applicationContext / Application |
+| `activity` / `${activity}` | 当前 Activity 弱引用；页面不存在时解析为 missing |
+| `lifecycle.activity_class` | 当前 Activity 完整类名 |
+| `lifecycle.activity_state` | created/started/resumed/paused/stopped/destroyed 等当前状态 |
+| `lifecycle.has_activity` | 当前 Activity 是否仍可取到 |
+| `lifecycle.last_event` | 最近一次 lifecycle 事件 |
+| `lifecycle.last_event_at` | 最近事件时间戳 |
+| `lifecycle.package / process` | 当前包名 / 进程名 |
+
+例如：
+
+```jsonc
+{
+  "condition": {
+    "path": "lifecycle.activity_state",
+    "op": "eq",
+    "value": "resumed"
+  },
+  "before_actions": [
+    {
+      "action": "call_method",
+      "target": "activity",
+      "method": "getIntent",
+      "save_to": "$intent"
+    },
+    {
+      "action": "set_state",
+      "scope": "process",
+      "key": "screen",
+      "value": "${lifecycle.activity_class}"
+    }
+  ]
+}
+```
+
+Rhino JS 同步注入：
+
+```text
+$application
+$context
+$activity
+$lifecycle
+```
+
+因此 JS、模板、condition 和 Action target 使用的是同一套 Runtime 对象。
+
+### 标准 Lifecycle Event
+
+LifecycleManager 会向现有 RuntimeEventBus 发出：
+
+```text
+lifecycle.application_attached
+lifecycle.activity_created
+lifecycle.activity_started
+lifecycle.activity_resumed
+lifecycle.activity_paused
+lifecycle.activity_stopped
+lifecycle.activity_save_instance_state
+lifecycle.activity_destroyed
+```
+
+Activity 事件 payload 至少包含：
+
+```text
+event.activity
+event.activity_class
+event.context
+event.application
+event.state
+event.package
+```
+
+因此也可以直接使用普通 `on_event`：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "screen_listener",
+  "on_event": {
+    "name": "lifecycle.activity_resumed",
+    "condition": {
+      "path": "event.activity_class",
+      "op": "contains",
+      "value": "VipActivity"
+    },
+    "actions": [
+      {
+        "action": "set_state",
+        "scope": "process",
+        "key": "vip_page_visible",
+        "value": true
+      }
+    ]
+  }
+}
+```
+
+### `on_lifecycle` 简写
+
+Phase 4 额外提供 `on_lifecycle`，避免手写完整事件名：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "vip_page_runtime",
+  "on_lifecycle": [
+    {
+      "stage": "resumed",
+      "activity": "VipActivity",
+      "actions": [
+        {
+          "action": "set_state",
+          "scope": "process",
+          "key": "vip_page_visible",
+          "value": true
+        }
+      ]
+    },
+    {
+      "stage": "paused",
+      "activity_match": ".*VipActivity$",
+      "actions": [
+        {
+          "action": "set_state",
+          "scope": "process",
+          "key": "vip_page_visible",
+          "value": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+`stage:"resumed"` 会标准化为 `lifecycle.activity_resumed`。也接受 `activity_resumed`、完整的 `lifecycle.activity_resumed` 或 `application_attached`。
+
+Activity 过滤：
+- `activity:"com.foo.VipActivity"`：完整类名；
+- `activity:"VipActivity"`：简单类名；
+- `activity_match:".*VipActivity$"`：正则。
+
+`on_lifecycle` 最终仍然注册成 EventBus 的 LiveHookHandle，因此 target live remove / replace 时生命周期 listener 会和普通 `on_event` 一样立即卸载。
+
 ### Runtime Status
 
 `runtime_hook_status(package)` 的每个进程状态现在除 HookRegistry / ClassLoader 信息外，还包含：
@@ -472,6 +644,34 @@ listener actions / state mutation
   }
 }
 ```
+
+另外还会包含：
+
+```jsonc
+{
+  "context_runtime": {
+    "enabled": true,
+    "application_available": true,
+    "context_available": true,
+    "activity_available": true,
+    "activity_class": "com.foo.VipActivity",
+    "activity_state": "resumed",
+    "last_event": "activity_resumed",
+    "activity_weak_reference": true
+  },
+  "lifecycle_runtime": {
+    "enabled": true,
+    "attach_hook_count": 1,
+    "callbacks_registered": true,
+    "registered_application_alive": true,
+    "application_attach_events": 1,
+    "lifecycle_events": 12,
+    "event_prefix": "lifecycle."
+  }
+}
+```
+
+Lifecycle 变化后 Tracer 会主动重新发送 runtime status，因此 `runtime_hook_status(package)` 不需要等下一次 Hook 配置同步才能看到当前 Activity 状态。
 
 runtime status 对任意非标量 Java 对象只返回有限摘要，不应把它当成对象 dump 接口；需要对象细节仍使用 `capture.fields / capture.paths / render:"deep"`。
 
@@ -740,7 +940,7 @@ ClassLoaderRegistry 对 loader 实例使用**弱引用**。运行时状态保存
 - 进程已连接后，`restart:false` 会走实时 reconcile：daemon 用 `'R'` 下发**完整期望配置**，
   HookRegistry 自动 add/remove/replace。PC 侧 `trace_java(hot=True)` 继续可免重启追加；
   同 ID target 发生变化时会 live replace，`unhook` 会 live remove。
-- tracer 通过 `'S'` 帧持续回报 HookRegistry + ClassLoaderRegistry 真实状态；`runtime_hook_status` 可核对“配置已下发”“当前 installed”“仍在 pending”“被哪个 loader 安装”。
+- tracer 通过 `'S'` 帧持续回报完整 M5 Runtime 状态；`runtime_hook_status` 可核对 installed/pending/ClassLoader、Runtime State/Event Bus，以及当前 Application/Context/Activity/Lifecycle。
 - native M3 目标不发送 `'H'/'S'`，因此这些 live reconcile 能力目前只保证 M5 Java Hook。
 - 复杂对象默认只 `toString()` + 类名；要看内部状态用 `fields`（点名反射某字段）、`paths`（按路径取深埋值）
   或 `render:"deep"`（整棵对象图序列化，有深度/环/节点预算防爆）。
