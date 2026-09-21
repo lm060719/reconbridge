@@ -129,6 +129,71 @@ def test_method_context_records_call_graph_and_source():
     assert any(node.get("type") == "field" for node in graph["nodes"].values())
 
 
+def test_call_graph_runtime_annotation_marks_paths():
+    graph = evidence.new_graph()
+    evidence.record_trace(
+        graph,
+        "com.example.PayManager",
+        "checkVip",
+        [{"class": "com.example.PayManager", "method": "checkVip"}],
+    )
+    evidence.record_trace(
+        graph,
+        "com.example.UserRepository",
+        "getMemberInfo",
+        [{"class": "com.example.UserRepository", "method": "getMemberInfo"}],
+    )
+
+    call_graph = {
+        "ok": True,
+        "nodes": [
+            {
+                "id": 1,
+                "class": "Lcom/example/PayManager;",
+                "method": "checkVip",
+                "descriptor": "()Z",
+                "access": "public",
+            },
+            {
+                "id": 2,
+                "class": "Lcom/example/UserRepository;",
+                "method": "getMemberInfo",
+                "descriptor": "()V",
+                "access": "public",
+            },
+        ],
+        "edges": [{"source": 1, "target": 2, "call_count": 1}],
+        "upstream_paths": [],
+        "downstream_paths": [
+            {
+                "length": 1,
+                "nodes": [
+                    {"id": 1, "class": "Lcom/example/PayManager;", "method": "checkVip"},
+                    {"id": 2, "class": "Lcom/example/UserRepository;", "method": "getMemberInfo"},
+                ],
+                "text": "checkVip -> getMemberInfo",
+            }
+        ],
+        "representative_paths": [
+            {
+                "length": 1,
+                "nodes": [
+                    {"id": 1, "class": "Lcom/example/PayManager;", "method": "checkVip"},
+                    {"id": 2, "class": "Lcom/example/UserRepository;", "method": "getMemberInfo"},
+                ],
+                "text": "checkVip -> getMemberInfo",
+            }
+        ],
+    }
+
+    evidence.annotate_call_graph_runtime(graph, call_graph)
+
+    assert call_graph["runtime_confirmed_nodes"] == 2
+    assert call_graph["representative_paths"][0]["runtime_confirmed_nodes"] == 2
+    assert call_graph["representative_paths"][0]["runtime_coverage"] == 1.0
+    assert call_graph["edges"][0]["runtime_observed"] is True
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
