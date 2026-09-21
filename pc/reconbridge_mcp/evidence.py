@@ -719,6 +719,86 @@ def record_value_lineage(
         )
 
 
+def record_runtime_lineage(
+    graph: dict[str, Any],
+    path: dict[str, Any],
+    analysis: dict[str, Any],
+) -> None:
+    """把 Runtime Value Lineage 的真实返回顺序和值摘要写入证据图。"""
+    nodes = path.get("nodes") or []
+    method_ids: dict[int, str] = {}
+
+    for observation in analysis.get("observations") or []:
+        path_index = int(observation.get("path_index", -1))
+        if not (0 <= path_index < len(nodes)):
+            continue
+        node = nodes[path_index]
+        returns = observation.get("returns") or {}
+        stable_value = returns.get("stable_value") or {}
+        preview = str(stable_value.get("canonical", ""))[:500]
+
+        mid = method_node(
+            graph,
+            str(node.get("class_name", observation.get("class", ""))),
+            str(node.get("method_name", observation.get("method", ""))),
+            str(node.get("descriptor", observation.get("descriptor", ""))),
+            runtime_confirmed=bool(observation.get("hit_count")),
+            runtime_hits=int(observation.get("hit_count", 0) or 0),
+            runtime_return_stable=bool(returns.get("stable")),
+            runtime_return_type=stable_value.get("type", ""),
+            runtime_return_preview=preview,
+        )
+        method_ids[path_index] = mid
+
+    timeline = analysis.get("timeline") or []
+    for source, target in zip(timeline, timeline[1:]):
+        source_id = method_ids.get(int(source.get("path_index", -1)))
+        target_id = method_ids.get(int(target.get("path_index", -1)))
+        if not source_id or not target_id:
+            continue
+        add_edge(
+            graph,
+            source_id,
+            target_id,
+            "runtime_value_sequence",
+            delta_ms=target.get("delta_ms"),
+            tid=target.get("tid"),
+        )
+
+    field = analysis.get("terminal_field") or {}
+    writer_change = analysis.get("writer_change") or {}
+    if field and writer_change:
+        field_id = field_node(
+            graph,
+            str(field.get("class", "")),
+            str(field.get("field", "")),
+            str(field.get("type", "")),
+        )
+        method_indexes = sorted(method_ids)
+        if method_indexes:
+            writer_id = method_ids[method_indexes[-1]]
+            distinct = writer_change.get("distinct_changes") or []
+            first_change = distinct[0] if distinct else {}
+            add_edge(
+                graph,
+                writer_id,
+                field_id,
+                "runtime_writes_field",
+                changed=bool(writer_change.get("changed")),
+                changed_calls=int(writer_change.get("changed_calls", 0) or 0),
+                before=(
+                    (first_change.get("before") or {}).get("canonical")
+                    if first_change
+                    else None
+                ),
+                after=(
+                    (first_change.get("after") or {}).get("canonical")
+                    if first_change
+                    else None
+                ),
+            )
+
+
 def summary(graph: dict[str, Any]) -> dict[str, Any]:
     _ensure(graph)
     type_counts: dict[str, int] = {}
