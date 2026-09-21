@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .dex_index import index_status, method_relations
+from .dex_index import index_status, method_call_graph, method_relations
 from . import evidence
 from .settings import settings
 
@@ -423,6 +423,46 @@ def record_method_context_evidence(
         context,
     )
     save(state)
+
+
+def call_graph_context(
+    session_id: str,
+    class_name: str,
+    method_name: str,
+    descriptor: str = "",
+    upstream_depth: int = 2,
+    downstream_depth: int = 2,
+    max_nodes: int = 120,
+    max_edges: int = 300,
+    max_paths: int = 20,
+    expand_external: bool = False,
+) -> dict[str, Any]:
+    """递归展开目标方法调用图，并叠加当前会话已有 runtime 证据。"""
+    state = load(session_id, refresh=True)
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {"ok": False, "error": "当前会话没有 APK"}
+
+    graph = method_call_graph(
+        apk,
+        class_name,
+        method_name,
+        descriptor=descriptor,
+        upstream_depth=upstream_depth,
+        downstream_depth=downstream_depth,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+        max_paths=max_paths,
+        expand_external=expand_external,
+    )
+    if not graph.get("ok"):
+        return graph
+
+    evidence_graph = state.setdefault("evidence_graph", evidence.new_graph())
+    evidence.annotate_call_graph_runtime(evidence_graph, graph)
+    evidence.record_call_graph(evidence_graph, graph)
+    save(state)
+    return graph
 
 
 def source_search(session_id: str, query: str, limit: int = 20) -> dict[str, Any]:
