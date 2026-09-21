@@ -25,6 +25,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "third_party/json.hpp"
@@ -240,6 +241,13 @@ static std::string read_whole_file(const std::string& path) {
 // tracer 的 HookRegistry 据此执行 add/remove/replace，并通过 'S' 帧回报真实运行时状态。
 // native 层不发 'H'/'S'，仍保持原有下次启动/重启生效语义。
 // ---------------------------------------------------------------------------
+struct RuntimeCommandWaiter {
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+    json response = nullptr;
+};
+
 struct InjectConn {
     int fd;
     std::string base_pkg;
@@ -247,8 +255,11 @@ struct InjectConn {
     std::mutex write_mutex;
     bool alive = true;
     bool reload_capable = false;
+    bool command_capable = false;
     json runtime_status = nullptr;
     int64_t status_updated_at = 0;
+    std::mutex command_mutex;
+    std::unordered_map<std::string, std::shared_ptr<RuntimeCommandWaiter>> command_waiters;
 };
 static std::mutex g_conn_mutex;
 static std::vector<std::shared_ptr<InjectConn>> g_conns;
@@ -265,6 +276,65 @@ static void reg_remove(const std::shared_ptr<InjectConn>& c) {
 static void reg_mark_reloadable(const std::shared_ptr<InjectConn>& c) {
     std::lock_guard<std::mutex> lk(g_conn_mutex);
     c->reload_capable = true;
+}
+
+static void reg_mark_command_capable(const std::shared_ptr<InjectConn>& c) {
+    std::lock_guard<std::mutex> lk(g_conn_mutex);
+    c->command_capable = true;
+}
+
+static void reg_handle_command_ack(
+    const std::shared_ptr<InjectConn>& c,
+    const std::string& payload) {
+    json ack;
+    try {
+        ack = json::parse(payload);
+    } catch (...) {
+        log_line("Tracer Runtime Command Ack 解析失败：" + c->process_name);
+        return;
+    }
+
+    const std::string request_id = ack.value("request_id", "");
+    if (request_id.empty()) return;
+
+    std::shared_ptr<RuntimeCommandWaiter> waiter;
+    {
+        std::lock_guard<std::mutex> lk(c->command_mutex);
+        auto it = c->command_waiters.find(request_id);
+        if (it == c->command_waiters.end()) return;
+        waiter = it->second;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(waiter->m);
+        waiter->response = std::move(ack);
+        waiter->done = true;
+    }
+    waiter->cv.notify_all();
+}
+
+static void reg_fail_pending_commands(
+    const std::shared_ptr<InjectConn>& c,
+    const std::string& reason) {
+    std::vector<std::shared_ptr<RuntimeCommandWaiter>> waiters;
+    {
+        std::lock_guard<std::mutex> lk(c->command_mutex);
+        for (const auto& item : c->command_waiters)
+            waiters.push_back(item.second);
+    }
+
+    for (const auto& waiter : waiters) {
+        {
+            std::lock_guard<std::mutex> lk(waiter->m);
+            if (waiter->done) continue;
+            waiter->response = {
+                {"ok", false},
+                {"error", reason}
+            };
+            waiter->done = true;
+        }
+        waiter->cv.notify_all();
+    }
 }
 static int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -298,6 +368,7 @@ static json runtime_status_snapshot(const std::string& package_filter) {
             {"process", c->process_name},
             {"connected", true},
             {"live_reconcile", c->reload_capable},
+            {"runtime_command", c->command_capable},
             {"status_updated_at", c->status_updated_at}
         };
         if (!c->runtime_status.is_null())
