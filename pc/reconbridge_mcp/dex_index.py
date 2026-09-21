@@ -373,6 +373,297 @@ def method_relations(
     }
 
 
+def _is_external_class(class_name: str) -> bool:
+    value = class_name.replace("/", ".")
+    if value.startswith("L"):
+        value = value[1:]
+    return value.startswith((
+        "java.",
+        "javax.",
+        "android.",
+        "androidx.",
+        "kotlin.",
+        "kotlinx.",
+        "dalvik.",
+        "sun.",
+        "org.jetbrains.",
+    ))
+
+
+def method_call_graph(
+    apk_path: str | Path,
+    class_name: str,
+    method_name: str,
+    descriptor: str = "",
+    upstream_depth: int = 2,
+    downstream_depth: int = 2,
+    max_nodes: int = 120,
+    max_edges: int = 300,
+    max_paths: int = 20,
+    expand_external: bool = False,
+) -> dict[str, Any]:
+    """围绕目标方法递归展开调用图，并给出代表性的上下游路径。"""
+    apk = Path(apk_path)
+    if not index_is_ready(apk):
+        return {"ok": False, "error": "DEX 持久索引尚未建立"}
+
+    upstream_depth = max(0, min(int(upstream_depth), 5))
+    downstream_depth = max(0, min(int(downstream_depth), 5))
+    max_nodes = max(10, min(int(max_nodes), 500))
+    max_edges = max(20, min(int(max_edges), 1500))
+    max_paths = max(1, min(int(max_paths), 100))
+    path = index_path_for_apk(apk)
+
+    variants = _class_variants(class_name)
+    placeholders = ",".join("?" for _ in variants)
+    params: list[Any] = [*variants, method_name]
+    descriptor_sql = ""
+    if descriptor:
+        descriptor_sql = " AND descriptor = ?"
+        params.append(descriptor)
+
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        targets = list(
+            conn.execute(
+                f"""
+                SELECT id, class_name, method_name, descriptor, access
+                FROM methods
+                WHERE class_name IN ({placeholders})
+                  AND method_name = ?
+                  {descriptor_sql}
+                ORDER BY descriptor
+                LIMIT 20
+                """,
+                params,
+            )
+        )
+        if not targets:
+            return {
+                "ok": False,
+                "error": "索引中找不到目标方法",
+                "class": class_name,
+                "method": method_name,
+                "descriptor": descriptor,
+            }
+
+        nodes: dict[int, dict[str, Any]] = {}
+        edges: dict[tuple[int, int], dict[str, Any]] = {}
+        target_ids = [int(row["id"]) for row in targets]
+
+        def add_node(row: sqlite3.Row, *, up: int | None = None, down: int | None = None) -> int:
+            node_id = int(row["id"])
+            node = nodes.get(node_id)
+            if node is None:
+                if len(nodes) >= max_nodes:
+                    return node_id
+                node = {
+                    "id": node_id,
+                    "class": row["class_name"],
+                    "method": row["method_name"],
+                    "descriptor": row["descriptor"],
+                    "access": row["access"],
+                    "external": _is_external_class(str(row["class_name"])),
+                    "upstream_distance": None,
+                    "downstream_distance": None,
+                    "is_target": node_id in target_ids,
+                }
+                nodes[node_id] = node
+            if up is not None:
+                old = node.get("upstream_distance")
+                if old is None or up < old:
+                    node["upstream_distance"] = up
+            if down is not None:
+                old = node.get("downstream_distance")
+                if old is None or down < old:
+                    node["downstream_distance"] = down
+            return node_id
+
+        for row in targets:
+            add_node(row, up=0, down=0)
+
+        up_paths: dict[int, list[int]] = {target_id: [target_id] for target_id in target_ids}
+        down_paths: dict[int, list[int]] = {target_id: [target_id] for target_id in target_ids}
+
+        def expand(direction: str, depth: int) -> None:
+            frontier = list(target_ids)
+            for level in range(1, depth + 1):
+                if not frontier or len(nodes) >= max_nodes or len(edges) >= max_edges:
+                    break
+                ph = ",".join("?" for _ in frontier)
+
+                if direction == "up":
+                    rows = list(
+                        conn.execute(
+                            f"""
+                            SELECT c.caller_method_id AS src_id,
+                                   c.callee_method_id AS dst_id,
+                                   c.call_count,
+                                   m.id, m.class_name, m.method_name, m.descriptor, m.access
+                            FROM method_calls c
+                            JOIN methods m ON m.id = c.caller_method_id
+                            WHERE c.callee_method_id IN ({ph})
+                            ORDER BY c.call_count DESC, m.class_name, m.method_name
+                            """,
+                            frontier,
+                        )
+                    )
+                else:
+                    rows = list(
+                        conn.execute(
+                            f"""
+                            SELECT c.caller_method_id AS src_id,
+                                   c.callee_method_id AS dst_id,
+                                   c.call_count,
+                                   m.id, m.class_name, m.method_name, m.descriptor, m.access
+                            FROM method_calls c
+                            JOIN methods m ON m.id = c.callee_method_id
+                            WHERE c.caller_method_id IN ({ph})
+                            ORDER BY c.call_count DESC, m.class_name, m.method_name
+                            """,
+                            frontier,
+                        )
+                    )
+
+                next_frontier: list[int] = []
+                for row in rows:
+                    if len(edges) >= max_edges:
+                        break
+                    src_id = int(row["src_id"])
+                    dst_id = int(row["dst_id"])
+                    discovered_id = int(row["id"])
+
+                    if discovered_id not in nodes and len(nodes) >= max_nodes:
+                        continue
+                    add_node(
+                        row,
+                        up=level if direction == "up" else None,
+                        down=level if direction == "down" else None,
+                    )
+                    edges[(src_id, dst_id)] = {
+                        "source": src_id,
+                        "target": dst_id,
+                        "call_count": int(row["call_count"] or 0),
+                    }
+
+                    discovered = nodes.get(discovered_id)
+                    if discovered is None:
+                        continue
+
+                    if direction == "up":
+                        base = up_paths.get(dst_id)
+                        if base and discovered_id not in up_paths:
+                            up_paths[discovered_id] = [discovered_id, *base]
+                    else:
+                        base = down_paths.get(src_id)
+                        if base and discovered_id not in down_paths:
+                            down_paths[discovered_id] = [*base, discovered_id]
+
+                    if discovered["external"] and not expand_external:
+                        continue
+                    if discovered_id not in next_frontier:
+                        next_frontier.append(discovered_id)
+
+                frontier = next_frontier
+
+        expand("up", upstream_depth)
+        expand("down", downstream_depth)
+
+    def public_node(node_id: int) -> dict[str, Any]:
+        node = nodes[node_id]
+        return {
+            "id": node_id,
+            "class": node["class"],
+            "method": node["method"],
+            "descriptor": node["descriptor"],
+            "access": node["access"],
+            "external": node["external"],
+            "is_target": node["is_target"],
+            "upstream_distance": node["upstream_distance"],
+            "downstream_distance": node["downstream_distance"],
+        }
+
+    def path_payload(ids: list[int]) -> dict[str, Any]:
+        path_nodes = [public_node(node_id) for node_id in ids if node_id in nodes]
+        return {
+            "length": max(0, len(path_nodes) - 1),
+            "nodes": path_nodes,
+            "text": " -> ".join(
+                f"{item['class']}.{item['method']}"
+                for item in path_nodes
+            ),
+        }
+
+    upstream_paths = [
+        path_payload(ids)
+        for node_id, ids in up_paths.items()
+        if node_id not in target_ids and len(ids) > 1
+    ]
+    downstream_paths = [
+        path_payload(ids)
+        for node_id, ids in down_paths.items()
+        if node_id not in target_ids and len(ids) > 1
+    ]
+    upstream_paths.sort(key=lambda item: (-item["length"], item["text"]))
+    downstream_paths.sort(key=lambda item: (-item["length"], item["text"]))
+
+    # 把一条上游路径与一条下游路径通过 target 拼起来，形成“入口 → 目标 → 下游”的代表链。
+    combined_paths: list[dict[str, Any]] = []
+    for up in upstream_paths[: max_paths]:
+        up_nodes = up["nodes"]
+        target_id = next((item["id"] for item in reversed(up_nodes) if item["is_target"]), None)
+        if target_id is None:
+            continue
+        matching_down = [
+            item
+            for item in downstream_paths
+            if item["nodes"] and item["nodes"][0]["id"] == target_id
+        ]
+        if matching_down:
+            for down in matching_down[:3]:
+                ids = [item["id"] for item in up_nodes]
+                ids.extend(item["id"] for item in down["nodes"][1:])
+                combined_paths.append(path_payload(ids))
+        else:
+            combined_paths.append(up)
+        if len(combined_paths) >= max_paths:
+            break
+
+    if not upstream_paths:
+        combined_paths.extend(downstream_paths[:max_paths])
+
+    unique_combined: list[dict[str, Any]] = []
+    seen_text: set[str] = set()
+    for item in combined_paths:
+        if item["text"] in seen_text:
+            continue
+        seen_text.add(item["text"])
+        unique_combined.append(item)
+        if len(unique_combined) >= max_paths:
+            break
+
+    return {
+        "ok": True,
+        "backend": "sqlite-index",
+        "targets": [public_node(target_id) for target_id in target_ids if target_id in nodes],
+        "node_count": len(nodes),
+        "edge_count": len(edges),
+        "nodes": [public_node(node_id) for node_id in nodes],
+        "edges": list(edges.values()),
+        "upstream_paths": upstream_paths[:max_paths],
+        "downstream_paths": downstream_paths[:max_paths],
+        "representative_paths": unique_combined,
+        "limits": {
+            "upstream_depth": upstream_depth,
+            "downstream_depth": downstream_depth,
+            "max_nodes": max_nodes,
+            "max_edges": max_edges,
+            "expand_external": expand_external,
+        },
+        "index_path": str(path),
+    }
+
+
 def write_meta(conn: sqlite3.Connection, apk: Path, counts: dict[str, int]) -> None:
     stat = apk.stat()
     meta = {
