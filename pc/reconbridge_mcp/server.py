@@ -4382,9 +4382,9 @@ def hermes_decompile(bundle_path: str, output_dir: str = "") -> dict:
 
 @mcp.tool()
 def post_hook(config: dict | str) -> dict:
-    """下发 hook 配置（M3）。config 见 m3/HOOK_PROTOCOL.md：
-    {package, restart?, targets:[{id,lib,symbol|offset,capture:{args,ret,backtrace,dump},action}]}。
-    注入在目标下次启动时生效（restart:true 会 force-stop 目标触发重注入）。
+    """下发原始 hook 配置（M3 native / M5 Java）。
+    M5 Java Tracer 已支持运行中完整配置 reconcile；restart:false 时可 live add/remove/replace。
+    M3 native 仍按原有进程启动/restart 语义。
     """
     if isinstance(config, str):
         try:
@@ -4731,7 +4731,7 @@ def patch_java(package: str, class_name: str, method: str,
     - replace_args: 进入原方法前覆盖参数，[{"index":1,"value":"新内容","type":"string"}]。
     - replace_return: 覆盖返回值，{"value":0,"type":"int"}。
     - skip_original: True 则不执行原方法，直接返回 replace_return。
-    - hot=True: **免重启热加**——若目标进程在跑，增量合并配置并下发到运行中的进程（restart 强制置 False）。
+    - hot=True: **免重启 live reconcile**——按 id 合并期望配置并下发到运行中的 M5；新 id 安装、同 id 改配置实时 replace（restart 强制置 False）。
     - 模板变量：value / args 字段支持 `${args[0]}`、`${ret.type}`、`${$v1}` 语法引用运行时数据。
     """
     _validate_package_name(package)
