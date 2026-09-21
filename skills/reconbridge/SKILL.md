@@ -48,6 +48,7 @@ description: >-
 - `compare_divergence_probes`：比较同一探针在 A/B 下的稳定值；布尔条件会检查是否与 `a_false_b_true / a_true_b_false` 源码方向一致。
 - `inspect_condition_origin`：从已验证的字段/条件方法继续追值来源。DEX v3 会直接给出字段所有 reader/writer 与 bytecode offset；JADX 再解释 writer 赋值右值来自 Preferences、Intent/Bundle、数据库/缓存、Repository/API、用户模型、参数或常量。
 - `verify_condition_writer`：对同类实例字段的高排名 writer 同时抓 before/after 字段值，判断该方法是否真的在一次行为里改变目标条件字段。
+- `inspect_value_lineage`：跨方法递归追条件值来源。字段从指定 writer 的赋值右值出发，条件方法从 return 出发；把源码调用与 DEX callees 对齐后继续进入下层方法 return，输出“上游来源 → … → 条件字段/方法”的 origin_paths。遇到同名 callee 歧义只报告 candidates，不自动猜类型。
 - `rank_candidates`：需要手工控制时，综合字符串 xref、方法名/类名和 Evidence Graph 对候选方法做可解释排序。
 - `verify_candidates`：一次性给前 N 个候选装观测 Hook，共享一个采集窗口；触发一次行为即可知道谁真实命中。
 - `trace_target`：已知具体方法时的单方法精细 trace，自动包名/游标/唯一 hook id，默认命中即返回并清理临时 Hook；命中会自动写入证据图。
@@ -66,7 +67,7 @@ description: >-
 ## 三条主线（选一条走）
 
 **A. 静态定位** —— 「这个功能的代码在哪」
-默认：`open_target` → `investigate(goal=...)` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin`。若条件是字段，再用 `verify_condition_writer` 动态确认哪个 writer 真正改变状态。DEX 索引 v3 会持久化字段 read/write xref；旧索引首次使用自动重建。对象接收者先解析实际类型；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
+默认：`open_target` → `investigate(goal=...)` → `verify_call_path`。如果问题是“A 与 B 为什么不同”，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage`。字段条件可先用 `verify_condition_writer` 确认真实 writer，再跨方法追 Repository/API/Preferences/模型 getter 的 return 来源。DEX 索引 v3 会持久化字段 read/write xref；Lineage 对同名 callee 保守处理，歧义时不自动猜类型。对象接收者先解析实际类型；native 逻辑仍用 `pull_libs` → `ghidra_analyze`。
 
 **B. 动态 trace** —— 「运行时到底传了什么 / 返回了什么」
 默认：静态定位出候选方法后直接 `trace_target(session_id, class_name, method)`，临时 Hook 默认自动清理。只有需要复杂字段抓取/持续 Hook/原始配置时才退回 `trace_java` / `post_hook` / `collect_events`。
