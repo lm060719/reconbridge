@@ -7,6 +7,7 @@ from reconbridge_mcp.dex_index import (
     index_is_ready,
     index_path_for_apk,
     index_status,
+    field_relations,
     method_call_graph,
     method_relations,
     query_index,
@@ -24,6 +25,8 @@ def _build_fake_index(apk, db_path):
         "strings": 1,
         "string_method_xrefs": 1,
         "method_calls": 1,
+        "field_reads": 1,
+        "field_writes": 1,
     }
     with sqlite3.connect(db_path) as conn:
         _create_schema(conn)
@@ -56,6 +59,10 @@ def _build_fake_index(apk, db_path):
             """,
             ("Lcom/example/PayManager;", "premiumStatus", "Z"),
         )
+        field_id = conn.execute(
+            "SELECT id FROM fields WHERE field_name = ?",
+            ("premiumStatus",),
+        ).fetchone()[0]
         conn.execute("INSERT INTO strings(value) VALUES (?)", ("会员已过期",))
         string_id = conn.execute("SELECT id FROM strings").fetchone()[0]
         method_id = conn.execute(
@@ -81,6 +88,18 @@ def _build_fake_index(apk, db_path):
             """,
             (caller_id, callee_id, 2),
         )
+        reader_id = conn.execute(
+            "SELECT id FROM methods WHERE method_name = ?",
+            ("openPaywall",),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO field_reads(field_id, method_id, offset) VALUES (?, ?, ?)",
+            (field_id, reader_id, 24),
+        )
+        conn.execute(
+            "INSERT INTO field_writes(field_id, method_id, offset) VALUES (?, ?, ?)",
+            (field_id, callee_id, 12),
+        )
         write_meta(conn, apk, counts)
         conn.commit()
 
@@ -98,6 +117,8 @@ def test_dex_index_supports_all_search_modes(tmp_path, monkeypatch):
     assert status["methods"] == 3
     assert status["string_method_xrefs"] == 1
     assert status["method_calls"] == 1
+    assert status["field_reads"] == 1
+    assert status["field_writes"] == 1
 
     string_result = query_index(apk, {"find": "string", "string": "会员"})
     assert string_result["results"][0]["string"] == "会员已过期"
@@ -139,6 +160,29 @@ def test_method_relations_returns_callers_and_class_fields(tmp_path, monkeypatch
     assert result["callers"][0]["call_count"] == 2
     assert result["callees"] == []
     assert result["class_fields"][0]["field"] == "premiumStatus"
+
+
+def test_field_relations_returns_static_readers_and_writers(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    apk = tmp_path / "base.apk"
+    apk.write_bytes(b"fake-apk-content")
+    db_path = index_path_for_apk(apk)
+    _build_fake_index(apk, db_path)
+
+    result = field_relations(
+        apk,
+        "com.example.PayManager",
+        "premiumStatus",
+        field_type="Z",
+    )
+
+    assert result["ok"]
+    assert result["writer_count"] == 1
+    assert result["reader_count"] == 1
+    assert result["writers"][0]["method"] == "checkVip"
+    assert result["writers"][0]["offset"] == 12
+    assert result["readers"][0]["method"] == "openPaywall"
+    assert result["readers"][0]["offset"] == 24
 
 
 def test_method_call_graph_expands_two_layers_each_direction(tmp_path, monkeypatch):
