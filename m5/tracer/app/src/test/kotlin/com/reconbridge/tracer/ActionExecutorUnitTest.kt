@@ -145,7 +145,7 @@ class ActionExecutorUnitTest {
                   "action": "set_state",
                   "scope": "process",
                   "key": "last_text",
-                  "value": "${args[0]}"
+                  "value": "${'
                 },
                 {
                   "action": "increment_state",
@@ -158,6 +158,180 @@ class ActionExecutorUnitTest {
                   "scope": "package",
                   "key": "history",
                   "value": "${args[0]}"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            ctx,
+            actionJson,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get("process", "last_text", "test_hook"),
+        )
+        assertEquals(
+            2L,
+            state.get("hook", "hits", "test_hook"),
+        )
+        assertEquals(
+            listOf("hello"),
+            state.get("package", "history", "test_hook"),
+        )
+        assertEquals(
+            "hello",
+            ActionExecutor.resolvePath(
+                ctx,
+                "state.process.last_text",
+            ),
+        )
+
+        val condition = JSONObject(
+            """
+            {
+              "path": "state.hook.hits",
+              "op": "eq",
+              "value": 2
+            }
+            """.trimIndent()
+        )
+        assertTrue(
+            ActionExecutor.evaluateCondition(
+                ctx,
+                condition,
+            )
+        )
+    }
+
+    @Test
+    fun testEmitEventCanDriveAnotherHandlerThroughSharedState() {
+        val state = RuntimeStateStore(
+            packageName = "com.test.pkg",
+        )
+        val bus = RuntimeEventBus()
+        val listener = JSONObject(
+            """
+            {
+              "name": "vip_changed",
+              "actions": [
+                {
+                  "action": "set_state",
+                  "scope": "process",
+                  "key": "vip_value",
+                  "value": "${'
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "hook",
+                  "key": "hits",
+                  "delta": 2
+                },
+                {
+                  "action": "append_state",
+                  "scope": "package",
+                  "key": "history",
+                  "value": "${'
                 }
               ]
             }
@@ -267,6 +441,1169 @@ class ActionExecutorUnitTest {
                   "name": "vip_changed",
                   "payload": {
                     "vip": "${args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            ctx,
+            actionJson,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get("process", "last_text", "test_hook"),
+        )
+        assertEquals(
+            2L,
+            state.get("hook", "hits", "test_hook"),
+        )
+        assertEquals(
+            listOf("hello"),
+            state.get("package", "history", "test_hook"),
+        )
+        assertEquals(
+            "hello",
+            ActionExecutor.resolvePath(
+                ctx,
+                "state.process.last_text",
+            ),
+        )
+
+        val condition = JSONObject(
+            """
+            {
+              "path": "state.hook.hits",
+              "op": "eq",
+              "value": 2
+            }
+            """.trimIndent()
+        )
+        assertTrue(
+            ActionExecutor.evaluateCondition(
+                ctx,
+                condition,
+            )
+        )
+    }
+
+    @Test
+    fun testEmitEventCanDriveAnotherHandlerThroughSharedState() {
+        val state = RuntimeStateStore(
+            packageName = "com.test.pkg",
+        )
+        val bus = RuntimeEventBus()
+        val listener = JSONObject(
+            """
+            {
+              "name": "vip_changed",
+              "actions": [
+                {
+                  "action": "set_state",
+                  "scope": "process",
+                  "key": "vip_value",
+                  "value": "${event.vip}"
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${'
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{event.vip}"
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "hook",
+                  "key": "hits",
+                  "delta": 2
+                },
+                {
+                  "action": "append_state",
+                  "scope": "package",
+                  "key": "history",
+                  "value": "${'
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            ctx,
+            actionJson,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get("process", "last_text", "test_hook"),
+        )
+        assertEquals(
+            2L,
+            state.get("hook", "hits", "test_hook"),
+        )
+        assertEquals(
+            listOf("hello"),
+            state.get("package", "history", "test_hook"),
+        )
+        assertEquals(
+            "hello",
+            ActionExecutor.resolvePath(
+                ctx,
+                "state.process.last_text",
+            ),
+        )
+
+        val condition = JSONObject(
+            """
+            {
+              "path": "state.hook.hits",
+              "op": "eq",
+              "value": 2
+            }
+            """.trimIndent()
+        )
+        assertTrue(
+            ActionExecutor.evaluateCondition(
+                ctx,
+                condition,
+            )
+        )
+    }
+
+    @Test
+    fun testEmitEventCanDriveAnotherHandlerThroughSharedState() {
+        val state = RuntimeStateStore(
+            packageName = "com.test.pkg",
+        )
+        val bus = RuntimeEventBus()
+        val listener = JSONObject(
+            """
+            {
+              "name": "vip_changed",
+              "actions": [
+                {
+                  "action": "set_state",
+                  "scope": "process",
+                  "key": "vip_value",
+                  "value": "${'
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            ctx,
+            actionJson,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get("process", "last_text", "test_hook"),
+        )
+        assertEquals(
+            2L,
+            state.get("hook", "hits", "test_hook"),
+        )
+        assertEquals(
+            listOf("hello"),
+            state.get("package", "history", "test_hook"),
+        )
+        assertEquals(
+            "hello",
+            ActionExecutor.resolvePath(
+                ctx,
+                "state.process.last_text",
+            ),
+        )
+
+        val condition = JSONObject(
+            """
+            {
+              "path": "state.hook.hits",
+              "op": "eq",
+              "value": 2
+            }
+            """.trimIndent()
+        )
+        assertTrue(
+            ActionExecutor.evaluateCondition(
+                ctx,
+                condition,
+            )
+        )
+    }
+
+    @Test
+    fun testEmitEventCanDriveAnotherHandlerThroughSharedState() {
+        val state = RuntimeStateStore(
+            packageName = "com.test.pkg",
+        )
+        val bus = RuntimeEventBus()
+        val listener = JSONObject(
+            """
+            {
+              "name": "vip_changed",
+              "actions": [
+                {
+                  "action": "set_state",
+                  "scope": "process",
+                  "key": "vip_value",
+                  "value": "${event.vip}"
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${'
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{event.vip}"
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            ctx,
+            actionJson,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get("process", "last_text", "test_hook"),
+        )
+        assertEquals(
+            2L,
+            state.get("hook", "hits", "test_hook"),
+        )
+        assertEquals(
+            listOf("hello"),
+            state.get("package", "history", "test_hook"),
+        )
+        assertEquals(
+            "hello",
+            ActionExecutor.resolvePath(
+                ctx,
+                "state.process.last_text",
+            ),
+        )
+
+        val condition = JSONObject(
+            """
+            {
+              "path": "state.hook.hits",
+              "op": "eq",
+              "value": 2
+            }
+            """.trimIndent()
+        )
+        assertTrue(
+            ActionExecutor.evaluateCondition(
+                ctx,
+                condition,
+            )
+        )
+    }
+
+    @Test
+    fun testEmitEventCanDriveAnotherHandlerThroughSharedState() {
+        val state = RuntimeStateStore(
+            packageName = "com.test.pkg",
+        )
+        val bus = RuntimeEventBus()
+        val listener = JSONObject(
+            """
+            {
+              "name": "vip_changed",
+              "actions": [
+                {
+                  "action": "set_state",
+                  "scope": "process",
+                  "key": "vip_value",
+                  "value": "${'
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${'
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{event.vip}"
+                },
+                {
+                  "action": "increment_state",
+                  "scope": "process",
+                  "key": "event_hits"
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        bus.subscribe(
+            ownerHookId = "listener_hook",
+            eventName = "vip_changed",
+        ) { event ->
+            val listenerCtx = ActionContext(
+                param = null,
+                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                pkg = "com.test.pkg",
+                hookId = "listener_hook",
+                runtimeState = state,
+                eventBus = bus,
+                runtimeEvent = event,
+            )
+            ActionExecutor.executeEventHandler(
+                listenerCtx,
+                listener,
+            )
+        }
+
+        val emitterCtx = createContext(
+            runtimeState = state,
+            eventBus = bus,
+            hookId = "emitter_hook",
+        )
+        val emitAction = JSONObject(
+            """
+            {
+              "before_actions": [
+                {
+                  "action": "emit_event",
+                  "name": "vip_changed",
+                  "payload": {
+                    "vip": "${'
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        )
+
+        ActionExecutor.executeActions(
+            emitterCtx,
+            emitAction,
+            "before",
+        )
+
+        assertEquals(
+            "hello",
+            state.get(
+                "process",
+                "vip_value",
+                "listener_hook",
+            ),
+        )
+        assertEquals(
+            1L,
+            state.get(
+                "process",
+                "event_hits",
+                "listener_hook",
+            ),
+        )
+    }
+
+    @Test
+    fun testReplaceArgsAndReturnActions() {
+        val ctx = createContext()
+        val actionJson = JSONObject("""
+            {
+                "replace_args": [
+                    {"index": 0, "value": "replaced_arg0"},
+                    {"index": 1, "value": 999}
+                ],
+                "skip_original": true,
+                "replace_return": {"value": "mocked_return"}
+            }
+        """.trimIndent())
+
+        ActionExecutor.executeActions(ctx, actionJson, "before")
+
+        assertEquals("replaced_arg0", ctx.args!![0])
+        assertEquals(999, ctx.args!![1])
+        assertEquals("mocked_return", ctx.result)
+    }
+}
+}{args[0]}"
                   }
                 }
               ]
