@@ -75,6 +75,55 @@ internal class RuntimeStateStore(
         }
 
         @Synchronized
+        fun increment(
+            key: String,
+            delta: Double,
+        ): Number
+        {
+            val old = values[key]
+            val oldNumber = when (old) {
+                is Number -> old.toDouble()
+                null -> 0.0
+                else -> old.toString().toDoubleOrNull() ?: 0.0
+            }
+            val next = oldNumber + delta
+            val value: Number = if (
+                next % 1.0 == 0.0 &&
+                next >= Long.MIN_VALUE.toDouble() &&
+                next <= Long.MAX_VALUE.toDouble()
+            ) {
+                next.toLong()
+            } else {
+                next
+            }
+            values[key] = value
+            return value
+        }
+
+        @Synchronized
+        fun append(
+            key: String,
+            value: Any?,
+            maxItems: Int,
+        ): List<Any?>
+        {
+            val current = values[key]
+            val list = mutableListOf<Any?>()
+            when (current) {
+                is List<*> -> list.addAll(current)
+                null -> {
+                }
+                else -> list.add(current)
+            }
+            list.add(value)
+            while (list.size > maxItems) {
+                list.removeAt(0)
+            }
+            values[key] = list
+            return list.toList()
+        }
+
+        @Synchronized
         fun snapshot(): LinkedHashMap<String, Any?>
         {
             return LinkedHashMap(values)
@@ -198,23 +247,18 @@ internal class RuntimeStateStore(
         hookId: String = "",
     ): Number
     {
-        val old = get(scope, key, hookId)
-        val oldNumber = when (old) {
-            is Number -> old.toDouble()
-            null -> 0.0
-            else -> old.toString().toDoubleOrNull() ?: 0.0
+        require(key.isNotEmpty()) {
+            "state key 不能为空"
         }
-        val next = oldNumber + delta
-        val value: Number = if (
-            next % 1.0 == 0.0 &&
-            next >= Long.MIN_VALUE.toDouble() &&
-            next <= Long.MAX_VALUE.toDouble()
-        ) {
-            next.toLong()
-        } else {
-            next
-        }
-        set(scope, key, value, hookId)
+        val map = mapFor(
+            scope,
+            hookId,
+            create = true,
+        ) ?: throw IllegalArgumentException(
+            "无效 state scope: " + scope
+        )
+        val value = map.increment(key, delta)
+        writes.incrementAndGet()
         return value
     }
 
@@ -225,19 +269,22 @@ internal class RuntimeStateStore(
         hookId: String = "",
     ): List<Any?>
     {
-        val current = get(scope, key, hookId)
-        val list = mutableListOf<Any?>()
-        when (current) {
-            is List<*> -> list.addAll(current)
-            null -> {
-            }
-            else -> list.add(current)
+        require(key.isNotEmpty()) {
+            "state key 不能为空"
         }
-        list.add(value)
-        while (list.size > maxAppendItems) {
-            list.removeAt(0)
-        }
-        set(scope, key, list, hookId)
+        val map = mapFor(
+            scope,
+            hookId,
+            create = true,
+        ) ?: throw IllegalArgumentException(
+            "无效 state scope: " + scope
+        )
+        val list = map.append(
+            key,
+            value,
+            maxAppendItems,
+        )
+        writes.incrementAndGet()
         return list
     }
 
