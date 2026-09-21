@@ -35,8 +35,9 @@ private fun logI(msg: String) {
  *   server -> [has:1]                （0 = 本包无配置）
  *   server -> [clen:4 LE][cfg]        （has=1 时）
  *   client -> [type:1='E'][len:4 LE][json]  （每次命中，反复）
- *   client -> [type:1='H'][len:4 LE=0]      （声明可热加，P0-2；native 层不发）
- *   server -> [type:1='R'][len:4 LE][cfg]   （免重启热加：下发新配置，tracer 增量装新 target）
+ *   client -> [type:1='H'][len:4 LE=0]      （声明支持实时配置同步；native 层不发）
+ *   server -> [type:1='R'][len:4 LE][cfg]   （下发完整期望配置，tracer reconcile add/remove/replace）
+ *   client -> [type:1='S'][len:4 LE][json]  （当前进程 HookRegistry 真实运行时状态）
  *
  * 所有整数为小端（守护进程按原生内存布局收发，arm64 = LE）。
  */
@@ -49,8 +50,8 @@ class InjectSocket private constructor(
     @Volatile private var alive = true
 
     /**
-     * 免重启热加（P0-2）：向守护进程声明"可热加"（发 'H' 帧），并起读线程监听 daemon 下发的
-     * 'R'(reload) 控制帧——收到时把新配置文本交给 onReload（HookEntry 增量装新 target）。
+     * 实时配置同步：向守护进程声明支持 live reconcile（发 'H' 帧），并起读线程监听
+     * daemon 下发的 'R' 完整配置。HookEntry 收到后由 HookRegistry 计算 add/remove/replace。
      * 只有 tracer 调用本方法，故 native 层不会被 daemon 下发 'R'。
      */
     fun enableHotReload(onReload: (String) -> Unit) {
@@ -95,22 +96,39 @@ class InjectSocket private constructor(
 
     /** 回传一条事件 JSON，分帧 ['E'][len:4 LE][payload]。线程安全；断开后静默丢弃。 */
     fun sendEvent(json: String) {
+        sendFrame('E', json, noisy = true)
+    }
+
+    /** 回传 HookRegistry 的真实运行时状态，供 daemon /runtime_status 查询。 */
+    fun sendRuntimeStatus(json: String) {
+        sendFrame('S', json, noisy = false)
+    }
+
+    private fun sendFrame(
+        type: Char,
+        text: String,
+        noisy: Boolean,
+    ) {
         if (!alive) return
-        val payload = json.toByteArray(Charsets.UTF_8)
+        val payload = text.toByteArray(Charsets.UTF_8)
         synchronized(writeLock) {
             if (!alive) return
             try {
-                output.write('E'.code)
+                output.write(type.code)
                 output.write(le32(payload.size))
                 output.write(payload)
                 output.flush()
-                if (traceVerbose) logI("sendEvent ok ${payload.size}B")
+                if (noisy && traceVerbose) {
+                    logI("sendFrame $type ok ${payload.size}B")
+                }
             } catch (t: Throwable) {
                 alive = false
-                logW("sendEvent 失败，通道断开: $t")
-                try { socket.close() } catch (_: Throwable) {}
+                logW("sendFrame $type 失败，通道断开: $t")
+                try {
+                    socket.close()
+                } catch (_: Throwable) {
+                }
             }
-
         }
     }
 
