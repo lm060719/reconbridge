@@ -353,6 +353,142 @@ def record_method_context(
         )
 
 
+def _normalize_method_class(class_name: str) -> str:
+    value = (class_name or "").strip()
+    if value.startswith("L") and value.endswith(";"):
+        value = value[1:-1]
+    return value.replace("/", ".")
+
+
+def runtime_method_stats(graph: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    """汇总 Evidence Graph 中已有的运行时方法证据，忽略 descriptor 差异。"""
+    _ensure(graph)
+    stats: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for node in graph["nodes"].values():
+        if node.get("type") != "method":
+            continue
+        class_name = _normalize_method_class(str(node.get("class_name", "")))
+        method_name = str(node.get("method_name", ""))
+        if not class_name or not method_name:
+            continue
+
+        key = (class_name, method_name)
+        slot = stats.setdefault(
+            key,
+            {
+                "runtime_confirmed": False,
+                "runtime_hits": 0,
+                "labels": [],
+            },
+        )
+        slot["runtime_confirmed"] = bool(
+            slot["runtime_confirmed"] or node.get("runtime_confirmed")
+        )
+        slot["runtime_hits"] = max(
+            int(slot["runtime_hits"]),
+            int(node.get("runtime_hits", 0) or 0),
+        )
+        label = str(node.get("label", ""))
+        if label and label not in slot["labels"]:
+            slot["labels"].append(label)
+
+    return stats
+
+
+def annotate_call_graph_runtime(
+    graph: dict[str, Any],
+    call_graph: dict[str, Any],
+) -> dict[str, Any]:
+    """把 Evidence Graph 的 runtime 命中信息叠加到静态调用图和代表路径。"""
+    if not call_graph.get("ok"):
+        return call_graph
+
+    stats = runtime_method_stats(graph)
+    node_runtime: dict[int, dict[str, Any]] = {}
+
+    for node in call_graph.get("nodes") or []:
+        key = (
+            _normalize_method_class(str(node.get("class", ""))),
+            str(node.get("method", "")),
+        )
+        runtime = stats.get(
+            key,
+            {"runtime_confirmed": False, "runtime_hits": 0, "labels": []},
+        )
+        node["runtime_confirmed"] = bool(runtime["runtime_confirmed"])
+        node["runtime_hits"] = int(runtime["runtime_hits"])
+        node_runtime[int(node["id"])] = runtime
+
+    for edge in call_graph.get("edges") or []:
+        source = node_runtime.get(int(edge.get("source", -1)), {})
+        target = node_runtime.get(int(edge.get("target", -1)), {})
+        edge["runtime_observed"] = bool(
+            source.get("runtime_confirmed") and target.get("runtime_confirmed")
+        )
+
+    for field in ("upstream_paths", "downstream_paths", "representative_paths"):
+        for path in call_graph.get(field) or []:
+            confirmed = 0
+            hits = 0
+            for node in path.get("nodes") or []:
+                runtime = node_runtime.get(int(node.get("id", -1)), {})
+                node["runtime_confirmed"] = bool(runtime.get("runtime_confirmed"))
+                node["runtime_hits"] = int(runtime.get("runtime_hits", 0) or 0)
+                if node["runtime_confirmed"]:
+                    confirmed += 1
+                    hits += node["runtime_hits"]
+            path["runtime_confirmed_nodes"] = confirmed
+            path["runtime_hits"] = hits
+            path["runtime_coverage"] = (
+                round(confirmed / len(path.get("nodes") or []), 3)
+                if path.get("nodes")
+                else 0.0
+            )
+
+    call_graph["runtime_confirmed_nodes"] = sum(
+        1 for node in call_graph.get("nodes") or []
+        if node.get("runtime_confirmed")
+    )
+    return call_graph
+
+
+def record_call_graph(
+    graph: dict[str, Any],
+    call_graph: dict[str, Any],
+) -> None:
+    """把递归调用图写回 Evidence Graph，供后续调查继续复用。"""
+    if not call_graph.get("ok"):
+        return
+
+    id_to_evidence: dict[int, str] = {}
+    for node in (call_graph.get("nodes") or [])[:400]:
+        node_id = method_node(
+            graph,
+            str(node.get("class", "")),
+            str(node.get("method", "")),
+            str(node.get("descriptor", "")),
+            access=node.get("access", ""),
+            runtime_confirmed=bool(node.get("runtime_confirmed")),
+            runtime_hits=int(node.get("runtime_hits", 0) or 0),
+        )
+        id_to_evidence[int(node["id"])] = node_id
+
+    for edge in (call_graph.get("edges") or [])[:1200]:
+        source = id_to_evidence.get(int(edge.get("source", -1)))
+        target = id_to_evidence.get(int(edge.get("target", -1)))
+        if not source or not target:
+            continue
+        add_edge(
+            graph,
+            source,
+            target,
+            "calls",
+            call_count=int(edge.get("call_count", 0) or 0),
+            runtime_observed=bool(edge.get("runtime_observed")),
+        )
+
+
 def summary(graph: dict[str, Any]) -> dict[str, Any]:
     _ensure(graph)
     type_counts: dict[str, int] = {}
