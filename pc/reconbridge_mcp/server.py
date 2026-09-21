@@ -464,6 +464,237 @@ def search_target(session_id: str, query: str, kind: str = "auto", limit: int = 
 
 
 @mcp.tool()
+def investigate(
+    session_id: str,
+    goal: str,
+    verify_runtime: bool = True,
+    top_n: int = 5,
+    seconds: float = 15.0,
+    max_queries: int = 4,
+    hot: bool = False,
+    restart: bool = True,
+    stack: bool = False,
+    include_events: bool = False,
+) -> dict:
+    """执行一轮自动调查：目标解析 → DEX 索引 → 多词候选排序 → 可选批量运行时验证 → 证据汇总。
+
+    goal 可以是自然语言，例如“找到会员状态判断方法”或“定位点击「立即开通」后走的方法”。
+    默认会做运行时验证；如果设备/Tracer 不可用，仍保留静态候选并明确标记为未验证。
+    """
+    goal = goal.strip()
+    if not goal:
+        return {"ok": False, "error": "goal 不能为空", "session_id": session_id}
+
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "goal": goal,
+            "status": "missing_apk",
+            "error": "当前会话没有 APK，无法执行自动调查",
+            "next_action": "确保设备可连接后重新 open_target，或先 pull_apk",
+        }
+
+    planned_queries = pipeline.plan_queries(goal, max_queries=max_queries)
+    if not planned_queries:
+        planned_queries = [goal]
+
+    stages: list[dict[str, Any]] = []
+
+    index_result = external.ensure_dex_index(apk)
+    stages.append(
+        {
+            "stage": "index",
+            "ok": bool(index_result.get("ok")),
+            "reused": bool(index_result.get("reused")),
+            "built": bool(index_result.get("built")),
+            "error": index_result.get("error"),
+        }
+    )
+
+    rankings: list[tuple[str, list[dict[str, Any]]]] = []
+    ranking_errors: list[str] = []
+    per_query: list[dict[str, Any]] = []
+    static_limit = max(10, min(30, int(top_n) * 3))
+
+    for query in planned_queries:
+        result = _rank_target_candidates(
+            state,
+            query,
+            limit=static_limit,
+            pool_limit=max(80, static_limit * 6),
+        )
+        candidates = result.get("candidates", [])
+        if candidates:
+            rankings.append((query, candidates))
+            investigation.record_search_evidence(
+                session_id,
+                query,
+                "investigate-static",
+                candidates,
+            )
+        ranking_errors.extend(result.get("errors", []))
+        per_query.append(
+            {
+                "query": query,
+                "candidate_count": len(candidates),
+                "pool_size": result.get("pool_size", 0),
+            }
+        )
+
+    merged = pipeline.merge_rankings(
+        rankings,
+        limit=max(10, min(30, int(top_n) * 3)),
+    )
+    stages.append(
+        {
+            "stage": "static_ranking",
+            "ok": bool(merged),
+            "queries": per_query,
+            "candidate_count": len(merged),
+            "errors": ranking_errors[:8],
+        }
+    )
+
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "investigation_pipeline",
+            "goal": goal,
+            "queries": planned_queries,
+            "static_candidates": len(merged),
+            "verify_runtime": bool(verify_runtime),
+        },
+    )
+
+    if not merged:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "goal": goal,
+            "planned_queries": planned_queries,
+            "status": "no_candidates",
+            "stages": stages,
+            "top_candidates": [],
+            "next_action": "尝试更具体的 UI 文案/类名/字段名，或 prepare_target 后做源码搜索",
+        }
+
+    top_n = max(1, min(int(top_n), 8))
+    static_top = merged[:top_n]
+    verification: dict[str, Any] | None = None
+
+    if verify_runtime:
+        # 刷新 state，让刚写入的证据图可以参与后续记录。
+        state = investigation.load(session_id, refresh=True)
+        verification = _verify_ranked_candidates(
+            session_id,
+            state,
+            planned_queries[0],
+            static_top,
+            seconds=seconds,
+            max_events=max(100, top_n * 30),
+            restart=restart,
+            hot=hot,
+            stack=stack,
+            cleanup=True,
+        )
+        stages.append(
+            {
+                "stage": "runtime_verification",
+                "ok": bool(verification.get("ok")),
+                "tested": verification.get("tested", 0),
+                "confirmed": verification.get("confirmed_count", 0),
+                "event_count": verification.get("event_count", 0),
+                "error": verification.get("error"),
+            }
+        )
+
+    confirmed = (verification or {}).get("confirmed", [])
+    if confirmed:
+        status = "runtime_confirmed"
+        primary = confirmed[0]
+        next_action = "对 primary_candidate 使用 trace_target 抓更深参数/字段，或直接 explain_evidence 查看完整证据链"
+    elif verify_runtime and verification and verification.get("ok"):
+        status = "runtime_no_hit"
+        primary = static_top[0]
+        next_action = "确认已在采集窗口内触发目标行为；可扩大 top_n、改用 hot=true，或换更具体的 goal"
+    elif verify_runtime:
+        status = "static_ranked_runtime_unavailable"
+        primary = static_top[0]
+        next_action = "静态候选已保留；检查设备连接与 LSPosed Tracer 作用域后再 verify_candidates"
+    else:
+        status = "static_ranked"
+        primary = static_top[0]
+        next_action = "需要确认真实执行路径时，调用 verify_candidates 或再次 investigate(verify_runtime=true)"
+
+    focus = (
+        (primary.get("matched_queries") or [None])[0]
+        or planned_queries[0]
+        or goal
+    )
+    try:
+        explanation = investigation.explain_evidence_graph(
+            session_id,
+            focus=str(focus),
+            depth=3,
+            limit=80,
+        )
+    except Exception as exc:
+        explanation = {
+            "focus": focus,
+            "summary": f"证据汇总失败: {exc}",
+            "runtime_confirmed": [],
+        }
+
+    compact_confirmed = [
+        pipeline.compact_candidate(item)
+        for item in confirmed[:top_n]
+    ]
+    compact_static = [
+        pipeline.compact_candidate(item)
+        for item in merged[: max(top_n, 8)]
+    ]
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "session_id": session_id,
+        "package": state["package"],
+        "goal": goal,
+        "planned_queries": planned_queries,
+        "status": status,
+        "runtime_verified": bool(confirmed),
+        "primary_candidate": pipeline.compact_candidate(primary),
+        "confirmed": compact_confirmed,
+        "top_candidates": compact_static,
+        "evidence_summary": explanation.get("summary", ""),
+        "evidence_focus": explanation.get("focus", focus),
+        "stages": stages,
+        "next_action": next_action,
+    }
+
+    if verification:
+        result["runtime"] = {
+            "ok": verification.get("ok"),
+            "tested": verification.get("tested", 0),
+            "confirmed_count": verification.get("confirmed_count", 0),
+            "event_count": verification.get("event_count", 0),
+            "error": verification.get("error"),
+        }
+        if include_events:
+            result["events"] = verification.get("events", [])[:100]
+
+    return result
+
+
+@mcp.tool()
 def rank_candidates(
     session_id: str,
     query: str,
