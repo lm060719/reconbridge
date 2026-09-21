@@ -36,7 +36,7 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
    - 实时篡改与回调：`patch_java(...)`（支持改参数、改返回值、返回值深层字段/Map key篡改 `mutate_return`、条件检查 `condition`、模板变量 `${...}` 及 Action Pipeline，支持 `hot=True` 免重启热加）。
    - 跨 Hook 状态/事件：在 action 中使用 `set_state/get_state/increment_state/append_state/emit_event`；另一个 Java Hook 或 `kind:"runtime"` target 可通过 `state.* / event.*` 条件与模板响应。
    - Lifecycle/Context：模板、condition、Action target 和 Rhino JS 可直接引用 `${application}` / `${context}` / `${activity}` / `lifecycle.*`（JS 对应 `$application/$context/$activity/$lifecycle`）；`kind:"runtime"` target 可用 `on_lifecycle` 监听 created/resumed/paused/destroyed 等事件并按 Activity 类过滤。
-   - Runtime Command：Tracer 在线后可直接用 `runtime_state_get/set/clear`、`runtime_event_emit`、`runtime_context_status`、`runtime_activity_action`，无需为了远程交互创建临时 Hook。
+   - Runtime Command：Tracer 在线后可直接用 `runtime_state_get/set/remove/increment/append/clear`、`runtime_event_emit`、`runtime_context_status`、`runtime_activity_action`，无需为了远程交互创建临时 Hook。
    - 或手工：`post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`。
 
 ## 构建
