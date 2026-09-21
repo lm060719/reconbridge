@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from bisect import bisect_left
 from typing import Any
 
 from . import runtime_path
@@ -164,26 +165,42 @@ def analyze_graph_scenario(
         for edge in call_graph.get("edges") or []
     }
 
-    observed_edges: dict[tuple[int, int], dict[str, Any]] = {}
+    # 按 node/tid 建时间索引，然后逐条静态边判断同线程是否按序出现。
+    # 这样一个 source 同时调用多个下游时不会因为“只取第一个”而漏边。
+    times_by_node_tid: dict[tuple[int, Any], list[float]] = {}
     for tid, items in threads.items():
-        for source_pos, source in enumerate(items):
-            source_id = int(source["node_id"])
-            source_ts = float(source["ts"])
-            for target in items[source_pos + 1 :]:
-                target_id = int(target["node_id"])
-                edge_key = (source_id, target_id)
-                if edge_key not in static_edges:
+        for item in items:
+            times_by_node_tid.setdefault(
+                (int(item["node_id"]), tid),
+                [],
+            ).append(float(item["ts"]))
+
+    observed_edges: dict[tuple[int, int], dict[str, Any]] = {}
+    tids = list(threads)
+    for edge_key in static_edges:
+        source_id, target_id = edge_key
+        best: dict[str, Any] | None = None
+        for tid in tids:
+            source_times = times_by_node_tid.get((source_id, tid), [])
+            target_times = times_by_node_tid.get((target_id, tid), [])
+            if not source_times or not target_times:
+                continue
+
+            for source_ts in source_times:
+                pos = bisect_left(target_times, source_ts)
+                if pos >= len(target_times):
                     continue
-                delta = float(target["ts"]) - source_ts
-                current = observed_edges.get(edge_key)
-                if current is None or delta < current["delta_ms"]:
-                    observed_edges[edge_key] = {
+                target_ts = target_times[pos]
+                delta = target_ts - source_ts
+                if best is None or delta < best["delta_ms"]:
+                    best = {
                         "source": source_id,
                         "target": target_id,
                         "tid": tid,
                         "delta_ms": round(delta, 3),
                     }
-                break
+        if best is not None:
+            observed_edges[edge_key] = best
 
     # 选择“覆盖静态图节点最多”的线程作为主业务线程；同覆盖率时选事件更多的。
     primary_tid = None
