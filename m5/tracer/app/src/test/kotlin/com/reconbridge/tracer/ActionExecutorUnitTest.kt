@@ -66,6 +66,7 @@ class ActionExecutorUnitTest
         initialReturn: Any? = "original_return",
         runtimeState: RuntimeStateStore? = null,
         eventBus: RuntimeEventBus? = null,
+        contextRuntime: RuntimeContextProvider? = null,
         hookId: String = "test_hook",
     ): ActionContext
     {
@@ -81,6 +82,7 @@ class ActionExecutorUnitTest
             hookId = hookId,
             runtimeState = runtimeState,
             eventBus = eventBus,
+            contextRuntime = contextRuntime,
         )
         ctx.result = initialReturn
         return ctx
@@ -417,6 +419,139 @@ class ActionExecutorUnitTest
                 "meta_value",
                 "listener_hook",
             ),
+        )
+    }
+
+    @Test
+    fun testLifecycleContextRootsWorkInPathsTemplatesAndConditions()
+    {
+        val provider = object : RuntimeContextProvider
+        {
+            private val app = mapOf(
+                "name" to "demo-app",
+            )
+            private val context = mapOf(
+                "kind" to "activity-context",
+            )
+            private val activity = mapOf(
+                "title" to "VIP Center",
+                "screen" to "VipActivity",
+            )
+
+            override fun applicationObject(): Any?
+            {
+                return app
+            }
+
+            override fun contextObject(): Any?
+            {
+                return context
+            }
+
+            override fun activityObject(): Any?
+            {
+                return activity
+            }
+
+            override fun lifecycleView(): Map<String, Any?>
+            {
+                return linkedMapOf(
+                    "activity" to activity,
+                    "activity_class" to "com.test.VipActivity",
+                    "activity_state" to "resumed",
+                    "has_activity" to true,
+                    "last_event" to "activity_resumed",
+                )
+            }
+
+            override fun snapshotJson(): JSONObject
+            {
+                return JSONObject()
+            }
+        }
+
+        val state = RuntimeStateStore(
+            packageName = "com.test.pkg",
+        )
+        val ctx = createContext(
+            runtimeState = state,
+            contextRuntime = provider,
+        )
+
+        assertEquals(
+            "demo-app",
+            ActionExecutor.resolvePath(
+                ctx,
+                "application.name",
+            ),
+        )
+        assertEquals(
+            "activity-context",
+            ActionExecutor.resolvePath(
+                ctx,
+                "context.kind",
+            ),
+        )
+        assertEquals(
+            "VIP Center",
+            ActionExecutor.resolvePath(
+                ctx,
+                "activity.title",
+            ),
+        )
+        assertEquals(
+            "resumed",
+            ActionExecutor.resolvePath(
+                ctx,
+                "lifecycle.activity_state",
+            ),
+        )
+
+        val actions = JSONObject().put(
+            "before_actions",
+            JSONArray().put(
+                JSONObject().apply {
+                    put("action", "set_state")
+                    put("scope", "process")
+                    put("key", "screen")
+                    put(
+                        "value",
+                        "${activity.screen}:${lifecycle.activity_state}",
+                    )
+                }
+            ),
+        )
+        ActionExecutor.executeActions(
+            ctx,
+            actions,
+            "before",
+        )
+
+        assertEquals(
+            "VipActivity:resumed",
+            state.get(
+                "process",
+                "screen",
+                "test_hook",
+            ),
+        )
+
+        val condition = JSONObject()
+            .put(
+                "path",
+                "lifecycle.activity_class",
+            )
+            .put("op", "eq")
+            .put(
+                "value",
+                "com.test.VipActivity",
+            )
+
+        assertTrue(
+            ActionExecutor.evaluateCondition(
+                ctx,
+                condition,
+            )
         )
     }
 
