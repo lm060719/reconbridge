@@ -52,7 +52,8 @@ class HookRegistryTest
             packageName = "com.example",
             processName = "com.example",
             pid = 123,
-        ) { spec ->
+            initialClassLoader = javaClass.classLoader!!,
+        ) { spec, _ ->
             val handle = FakeHandle()
             calls.add(InstallCall(spec.getString("id"), handle))
             HookInstallResult(
@@ -108,7 +109,8 @@ class HookRegistryTest
             packageName = "com.example",
             processName = "com.example:remote",
             pid = 456,
-        ) { spec ->
+            initialClassLoader = javaClass.classLoader!!,
+        ) { spec, _ ->
             installs++
             if (spec.optBoolean("fail", false)) {
                 throw IllegalStateException("boom")
@@ -133,6 +135,153 @@ class HookRegistryTest
         assertFalse(firstHandle.unhooked)
         assertEquals(1, registry.snapshotJson().getInt("installed_count"))
         assertEquals(2, installs)
+    }
+
+    @Test
+    fun missingClassBecomesPendingAndInstallsWhenDynamicLoaderAppears()
+    {
+        val mainLoader = object : ClassLoader(null) {}
+        val pluginLoader = object : ClassLoader(null) {}
+        val handle = FakeHandle()
+        var pluginInstalls = 0
+
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 321,
+            initialClassLoader = mainLoader,
+        ) { spec, loader ->
+            if (loader !== pluginLoader) {
+                throw ClassNotFoundException(spec.getString("class"))
+            }
+            pluginInstalls++
+            HookInstallResult(
+                handles = listOf(handle),
+                members = listOf("plugin.Target.check()"),
+            )
+        }
+
+        val target = target("late").apply {
+            put("class", "plugin.Target")
+        }
+        val first = registry.reconcile(
+            JSONArray().put(target)
+        )
+
+        assertEquals(0, first.failed)
+        assertEquals(1, first.pending)
+        assertTrue(registry.hasPending())
+        assertEquals(
+            setOf("plugin.Target"),
+            registry.pendingClassNames(),
+        )
+
+        val before = registry.snapshotJson()
+        assertEquals(0, before.getInt("installed_count"))
+        assertEquals(1, before.getInt("pending_count"))
+        assertEquals(1, before.getInt("class_loader_count"))
+
+        val resolved = registry.onLoaderAvailable(
+            pluginLoader,
+            "DexClassLoader.<init>",
+        )
+
+        assertEquals(1, resolved.added)
+        assertEquals(0, resolved.pending)
+        assertEquals(1, pluginInstalls)
+        assertFalse(registry.hasPending())
+
+        val after = registry.snapshotJson()
+        assertEquals(1, after.getInt("installed_count"))
+        assertEquals(0, after.getInt("pending_count"))
+        assertEquals(2, after.getInt("class_loader_count"))
+        val installed = after.getJSONArray("hooks").getJSONObject(0)
+        assertEquals("late", installed.getString("id"))
+        assertEquals("cl2", installed.getString("class_loader_id"))
+    }
+
+    @Test
+    fun pendingHookCanBeRemovedBeforeClassAppears()
+    {
+        val mainLoader = object : ClassLoader(null) {}
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 654,
+            initialClassLoader = mainLoader,
+        ) { spec, _ ->
+            throw ClassNotFoundException(spec.getString("class"))
+        }
+
+        val target = target("late").apply {
+            put("class", "plugin.Target")
+        }
+        registry.reconcile(JSONArray().put(target))
+        assertTrue(registry.hasPending())
+
+        val removed = registry.reconcile(JSONArray())
+
+        assertFalse(registry.hasPending())
+        assertEquals(0, removed.pending)
+        assertEquals(
+            0,
+            registry.snapshotJson().getInt("pending_count"),
+        )
+    }
+
+    @Test
+    fun classLoadedOnlyRetriesMatchingPendingClass()
+    {
+        val mainLoader = object : ClassLoader(null) {}
+        val pluginLoader = object : ClassLoader(null) {}
+        val attempts = mutableListOf<String>()
+
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 987,
+            initialClassLoader = mainLoader,
+        ) { spec, loader ->
+            val className = spec.getString("class")
+            attempts.add(className)
+            if (
+                loader === pluginLoader &&
+                className == "plugin.Second"
+            ) {
+                HookInstallResult(
+                    handles = listOf(FakeHandle()),
+                    members = listOf("plugin.Second.check()"),
+                )
+            } else {
+                throw ClassNotFoundException(className)
+            }
+        }
+
+        val first = target("first").apply {
+            put("class", "plugin.First")
+        }
+        val second = target("second").apply {
+            put("class", "plugin.Second")
+        }
+        registry.reconcile(
+            JSONArray().put(first).put(second)
+        )
+        attempts.clear()
+
+        val result = registry.onClassLoaded(
+            pluginLoader,
+            "plugin.Second",
+        )
+
+        assertEquals(1, result.added)
+        assertEquals(
+            listOf("plugin.Second"),
+            attempts,
+        )
+        assertEquals(
+            setOf("plugin.First"),
+            registry.pendingClassNames(),
+        )
     }
 
     @Test
@@ -168,7 +317,8 @@ class HookRegistryTest
             packageName = "com.example",
             processName = "com.example:core",
             pid = 789,
-        ) {
+            initialClassLoader = javaClass.classLoader!!,
+        ) { _, _ ->
             HookInstallResult(
                 handles = listOf(FakeHandle(), FakeHandle()),
                 members = listOf(
