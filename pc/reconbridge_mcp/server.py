@@ -1502,7 +1502,7 @@ def _run_divergence_probe(
                 ],
                 this="class",
                 ret=False,
-                when="before",
+                when="both",
                 stack=False,
                 hook_id=hook_id,
                 restart=restart,
@@ -1619,8 +1619,8 @@ def capture_divergence_probe(
 ) -> dict:
     """采集 A/B 首次分叉条件的一个运行时值探针。
 
-    capture_for 必须等于 a 或 b。字段探针会在分支点方法 before 读取 this.field；
-    条件方法探针会在 after 捕获返回值。第二侧采完后若另一侧已有同一探针，会自动附带比较结果。
+    capture_for 必须等于 a 或 b。字段探针会在分支点方法 before+after 读取 this.field，
+    用于检查方法边界值是否稳定；条件方法探针会在 after 捕获返回值。第二侧采完后自动尝试比较。
     """
     if capture_for not in {a, b}:
         return {
