@@ -14,7 +14,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
-from . import candidate, external, investigation
+from . import candidate, external, investigation, pipeline
 
 mcp = FastMCP("reconbridge")
 
@@ -104,6 +104,175 @@ def _rank_target_candidates(
         "pool_size": len(combined),
         "backends": sorted(x for x in backends if x),
         "errors": errors,
+    }
+
+
+def _verify_ranked_candidates(
+    session_id: str,
+    state: dict[str, Any],
+    query: str,
+    ranked: list[dict[str, Any]],
+    seconds: float = 15.0,
+    max_events: int = 200,
+    restart: bool = True,
+    hot: bool = False,
+    stack: bool = False,
+    cleanup: bool = True,
+) -> dict:
+    """一次装载多候选观测 Hook，并在共享窗口里按 hook_id 归因。"""
+    if not ranked:
+        return {
+            "ok": False,
+            "query": query,
+            "error": "没有可验证的候选方法",
+            "tested": 0,
+            "confirmed": [],
+            "missed": [],
+        }
+
+    try:
+        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
+    except Exception:
+        cursor = int(state.get("event_cursor", 0) or 0)
+
+    targets: list[dict[str, Any]] = []
+    hook_ids: list[str] = []
+    by_hook: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(ranked, 1):
+        class_name = candidate.normalize_class_name(str(item.get("class", "")))
+        method_name = str(item.get("method", ""))
+        safe_class = re.sub(r"[^A-Za-z0-9_]", "_", class_name.rsplit(".", 1)[-1])[:20] or "class"
+        safe_method = re.sub(r"[^A-Za-z0-9_]", "_", method_name)[:24] or "method"
+        hook_id = f"rbv_{session_id}_{index}_{safe_class}_{safe_method}"
+        hook_ids.append(hook_id)
+        by_hook[hook_id] = item
+        investigation.add_temporary_hook(session_id, hook_id)
+        targets.append(
+            {
+                "kind": "java",
+                "id": hook_id,
+                "class": class_name,
+                "method": method_name,
+                "capture": {
+                    "this": "class",
+                    "when": "after",
+                    "all_args": False,
+                    "stack": stack,
+                },
+            }
+        )
+
+    config: dict[str, Any] = {
+        "package": state["package"],
+        "restart": bool(restart and not hot),
+        "debug": False,
+        "targets": targets,
+    }
+    if hot:
+        config["restart"] = False
+        config["mode"] = "append"
+
+    posted: dict[str, Any] = {}
+    events: list[dict[str, Any]] = []
+    collect_error = ""
+    try:
+        posted = client.post_json("/hook", config)
+        events = client.collect_sse(
+            seconds=max(0.5, float(seconds)),
+            max_events=max(1, min(int(max_events), 1000)),
+            fold_stack=True,
+            include_recent=True,
+            since_seq=cursor,
+        )
+    except Exception as exc:
+        collect_error = str(exc)
+    finally:
+        if cleanup:
+            for hook_id in hook_ids:
+                try:
+                    unhook(state["package"], hook_id)
+                except Exception:
+                    pass
+                finally:
+                    investigation.remove_temporary_hook(session_id, hook_id)
+
+    try:
+        latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
+        investigation.set_event_cursor(session_id, latest)
+    except Exception:
+        latest = cursor
+
+    events_by_hook: dict[str, list[dict[str, Any]]] = {
+        hook_id: [] for hook_id in hook_ids
+    }
+    for event in events:
+        hook_id = str(event.get("hook_id", ""))
+        if hook_id in events_by_hook:
+            events_by_hook[hook_id].append(event)
+            continue
+
+        event_class = candidate.normalize_class_name(str(event.get("class", "")))
+        event_method = str(event.get("method", ""))
+        for candidate_hook, item in by_hook.items():
+            if (
+                candidate.normalize_class_name(str(item.get("class", ""))) == event_class
+                and str(item.get("method", "")) == event_method
+            ):
+                events_by_hook[candidate_hook].append(event)
+                break
+
+    verified: list[dict[str, Any]] = []
+    for hook_id in hook_ids:
+        item = dict(by_hook[hook_id])
+        matched_events = events_by_hook.get(hook_id, [])
+        hits = len(matched_events)
+        item["hook_id"] = hook_id
+        item["verification_hits"] = hits
+        item["verified"] = hits > 0
+        verified.append(item)
+
+        if hits:
+            investigation.record_trace_evidence(
+                session_id,
+                candidate.normalize_class_name(str(item.get("class", ""))),
+                str(item.get("method", "")),
+                matched_events,
+            )
+
+    verified.sort(
+        key=lambda item: (
+            -int(item.get("verification_hits", 0)),
+            -int(item.get("score", 0)),
+            int(item.get("rank", 999)),
+        )
+    )
+    confirmed = [item for item in verified if item["verified"]]
+    missed = [item for item in verified if not item["verified"]]
+
+    investigation.add_discovery(
+        session_id,
+        {
+            "type": "candidate_verification",
+            "query": query,
+            "tested": len(verified),
+            "confirmed": len(confirmed),
+            "events": len(events),
+        },
+    )
+
+    return {
+        "ok": not bool(collect_error),
+        "query": query,
+        "posted": posted,
+        "tested": len(verified),
+        "confirmed_count": len(confirmed),
+        "confirmed": confirmed,
+        "missed": missed,
+        "event_count": len(events),
+        "events": events[:100],
+        "event_cursor": latest,
+        "cleanup": cleanup,
+        "error": collect_error or None,
     }
 
 
@@ -386,149 +555,22 @@ def verify_candidates(
             "error": ranked_result.get("error") or "没有可验证的候选方法",
         }
 
-    try:
-        cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
-    except Exception:
-        cursor = int(state.get("event_cursor", 0) or 0)
-
-    targets: list[dict[str, Any]] = []
-    hook_ids: list[str] = []
-    by_hook: dict[str, dict[str, Any]] = {}
-    for index, item in enumerate(ranked, 1):
-        class_name = candidate.normalize_class_name(str(item.get("class", "")))
-        method_name = str(item.get("method", ""))
-        safe_class = re.sub(r"[^A-Za-z0-9_]", "_", class_name.rsplit(".", 1)[-1])[:20] or "class"
-        safe_method = re.sub(r"[^A-Za-z0-9_]", "_", method_name)[:24] or "method"
-        hook_id = f"rbv_{session_id}_{index}_{safe_class}_{safe_method}"
-        hook_ids.append(hook_id)
-        by_hook[hook_id] = item
-        investigation.add_temporary_hook(session_id, hook_id)
-        targets.append(
-            {
-                "kind": "java",
-                "id": hook_id,
-                "class": class_name,
-                "method": method_name,
-                "capture": {
-                    "this": "class",
-                    "when": "after",
-                    "all_args": False,
-                    "stack": stack,
-                },
-            }
-        )
-
-    config: dict[str, Any] = {
-        "package": state["package"],
-        "restart": bool(restart and not hot),
-        "debug": False,
-        "targets": targets,
-    }
-    if hot:
-        config["restart"] = False
-        config["mode"] = "append"
-
-    posted: dict[str, Any] = {}
-    events: list[dict[str, Any]] = []
-    collect_error = ""
-    try:
-        posted = client.post_json("/hook", config)
-        events = client.collect_sse(
-            seconds=max(0.5, float(seconds)),
-            max_events=max(1, min(int(max_events), 1000)),
-            fold_stack=True,
-            include_recent=True,
-            since_seq=cursor,
-        )
-    except Exception as exc:
-        collect_error = str(exc)
-    finally:
-        if cleanup:
-            for hook_id in hook_ids:
-                try:
-                    unhook(state["package"], hook_id)
-                except Exception:
-                    pass
-                finally:
-                    investigation.remove_temporary_hook(session_id, hook_id)
-
-    try:
-        latest = int(client.get_recent(limit=0).get("latest_seq", cursor) or cursor)
-        investigation.set_event_cursor(session_id, latest)
-    except Exception:
-        latest = cursor
-
-    events_by_hook: dict[str, list[dict[str, Any]]] = {hook_id: [] for hook_id in hook_ids}
-    for event in events:
-        hook_id = str(event.get("hook_id", ""))
-        if hook_id in events_by_hook:
-            events_by_hook[hook_id].append(event)
-            continue
-
-        event_class = candidate.normalize_class_name(str(event.get("class", "")))
-        event_method = str(event.get("method", ""))
-        for candidate_hook, item in by_hook.items():
-            if (
-                candidate.normalize_class_name(str(item.get("class", ""))) == event_class
-                and str(item.get("method", "")) == event_method
-            ):
-                events_by_hook[candidate_hook].append(event)
-                break
-
-    verified: list[dict[str, Any]] = []
-    for hook_id in hook_ids:
-        item = dict(by_hook[hook_id])
-        matched_events = events_by_hook.get(hook_id, [])
-        hits = len(matched_events)
-        item["hook_id"] = hook_id
-        item["verification_hits"] = hits
-        item["verified"] = hits > 0
-        verified.append(item)
-
-        if hits:
-            investigation.record_trace_evidence(
-                session_id,
-                candidate.normalize_class_name(str(item.get("class", ""))),
-                str(item.get("method", "")),
-                matched_events,
-            )
-
-    verified.sort(
-        key=lambda item: (
-            -int(item.get("verification_hits", 0)),
-            -int(item.get("score", 0)),
-            int(item.get("rank", 999)),
-        )
-    )
-    confirmed = [item for item in verified if item["verified"]]
-    missed = [item for item in verified if not item["verified"]]
-
-    investigation.add_discovery(
+    result = _verify_ranked_candidates(
         session_id,
-        {
-            "type": "candidate_verification",
-            "query": query,
-            "tested": len(verified),
-            "confirmed": len(confirmed),
-            "events": len(events),
-        },
+        state,
+        query,
+        ranked,
+        seconds=seconds,
+        max_events=max_events,
+        restart=restart,
+        hot=hot,
+        stack=stack,
+        cleanup=cleanup,
     )
-
     return {
-        "ok": not bool(collect_error),
+        **result,
         "session_id": session_id,
         "package": state["package"],
-        "query": query,
-        "posted": posted,
-        "tested": len(verified),
-        "confirmed_count": len(confirmed),
-        "confirmed": confirmed,
-        "missed": missed,
-        "event_count": len(events),
-        "events": events[:100],
-        "event_cursor": latest,
-        "cleanup": cleanup,
-        "error": collect_error or None,
     }
 
 
