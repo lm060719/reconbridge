@@ -784,7 +784,7 @@ runtime_activity_action(
 )
 ```
 
-也可以在 actions 中使用 `set_state / emit_event / call_method / set_field / eval_js` 等现有动作。没有当前 Activity 时会返回明确错误，不会静默退回 Application。
+也可以在 actions 中使用 `set_state / emit_event / call_method / set_field / eval_js` 等现有动作。没有当前 Activity 时会返回明确错误，不会静默退回 Application。真实 Android Activity 的 Action Pipeline 会自动切到主线程同步执行；主线程调度使用同一条 Runtime Command 的 `timeout_ms` 预算，避免 socket 线程直接操作 View/Activity。
 
 ### 多进程语义
 
