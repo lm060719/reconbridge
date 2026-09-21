@@ -130,38 +130,43 @@ class ActionExecutorUnitTest {
     }
 
     @Test
-    fun testRuntimeStateActionsAndPathConditions() {
+    fun testRuntimeStateActionsAndPathConditions()
+    {
         val state = RuntimeStateStore(
             packageName = "com.test.pkg",
         )
         val ctx = createContext(
             runtimeState = state,
         )
-        val actionJson = JSONObject(
-            """
-            {
-              "before_actions": [
-                {
-                  "action": "set_state",
-                  "scope": "process",
-                  "key": "last_text",
-                  "value": "${'
-                },
-                {
-                  "action": "increment_state",
-                  "scope": "hook",
-                  "key": "hits",
-                  "delta": 2
-                },
-                {
-                  "action": "append_state",
-                  "scope": "package",
-                  "key": "history",
-                  "value": "${args[0]}"
+
+        val beforeActions = org.json.JSONArray()
+            .put(
+                JSONObject().apply {
+                    put("action", "set_state")
+                    put("scope", "process")
+                    put("key", "last_text")
+                    put("value", "${args[0]}")
                 }
-              ]
-            }
-            """.trimIndent()
+            )
+            .put(
+                JSONObject().apply {
+                    put("action", "increment_state")
+                    put("scope", "hook")
+                    put("key", "hits")
+                    put("delta", 2)
+                }
+            )
+            .put(
+                JSONObject().apply {
+                    put("action", "append_state")
+                    put("scope", "package")
+                    put("key", "history")
+                    put("value", "${args[0]}")
+                }
+            )
+        val actionJson = JSONObject().put(
+            "before_actions",
+            beforeActions,
         )
 
         ActionExecutor.executeActions(
@@ -172,15 +177,27 @@ class ActionExecutorUnitTest {
 
         assertEquals(
             "hello",
-            state.get("process", "last_text", "test_hook"),
+            state.get(
+                "process",
+                "last_text",
+                "test_hook",
+            ),
         )
         assertEquals(
             2L,
-            state.get("hook", "hits", "test_hook"),
+            state.get(
+                "hook",
+                "hits",
+                "test_hook",
+            ),
         )
         assertEquals(
             listOf("hello"),
-            state.get("package", "history", "test_hook"),
+            state.get(
+                "package",
+                "history",
+                "test_hook",
+            ),
         )
         assertEquals(
             "hello",
@@ -190,15 +207,11 @@ class ActionExecutorUnitTest {
             ),
         )
 
-        val condition = JSONObject(
-            """
-            {
-              "path": "state.hook.hits",
-              "op": "eq",
-              "value": 2
-            }
-            """.trimIndent()
-        )
+        val condition = JSONObject()
+            .put("path", "state.hook.hits")
+            .put("op", "eq")
+            .put("value", 2)
+
         assertTrue(
             ActionExecutor.evaluateCondition(
                 ctx,
@@ -208,31 +221,32 @@ class ActionExecutorUnitTest {
     }
 
     @Test
-    fun testEmitEventCanDriveAnotherHandlerThroughSharedState() {
+    fun testEmitEventCanDriveAnotherHandlerThroughSharedState()
+    {
         val state = RuntimeStateStore(
             packageName = "com.test.pkg",
         )
         val bus = RuntimeEventBus()
-        val listener = JSONObject(
-            """
-            {
-              "name": "vip_changed",
-              "actions": [
-                {
-                  "action": "set_state",
-                  "scope": "process",
-                  "key": "vip_value",
-                  "value": "${'
-                },
-                {
-                  "action": "increment_state",
-                  "scope": "process",
-                  "key": "event_hits"
+
+        val listenerActions = org.json.JSONArray()
+            .put(
+                JSONObject().apply {
+                    put("action", "set_state")
+                    put("scope", "process")
+                    put("key", "vip_value")
+                    put("value", "${event.vip}")
                 }
-              ]
-            }
-            """.trimIndent()
-        )
+            )
+            .put(
+                JSONObject().apply {
+                    put("action", "increment_state")
+                    put("scope", "process")
+                    put("key", "event_hits")
+                }
+            )
+        val listener = JSONObject()
+            .put("name", "vip_changed")
+            .put("actions", listenerActions)
 
         bus.subscribe(
             ownerHookId = "listener_hook",
@@ -240,7 +254,10 @@ class ActionExecutorUnitTest {
         ) { event ->
             val listenerCtx = ActionContext(
                 param = null,
-                classLoader = ActionExecutorUnitTest::class.java.classLoader!!,
+                classLoader = (
+                    ActionExecutorUnitTest::class.java
+                        .classLoader!!
+                ),
                 pkg = "com.test.pkg",
                 hookId = "listener_hook",
                 runtimeState = state,
@@ -258,20 +275,19 @@ class ActionExecutorUnitTest {
             eventBus = bus,
             hookId = "emitter_hook",
         )
-        val emitAction = JSONObject(
-            """
-            {
-              "before_actions": [
-                {
-                  "action": "emit_event",
-                  "name": "vip_changed",
-                  "payload": {
-                    "vip": "${args[0]}"
-                  }
+        val payload = JSONObject().put(
+            "vip",
+            "${args[0]}",
+        )
+        val emitAction = JSONObject().put(
+            "before_actions",
+            org.json.JSONArray().put(
+                JSONObject().apply {
+                    put("action", "emit_event")
+                    put("name", "vip_changed")
+                    put("payload", payload)
                 }
-              ]
-            }
-            """.trimIndent()
+            ),
         )
 
         ActionExecutor.executeActions(
