@@ -66,6 +66,7 @@
 | `compare_divergence_probes(session_id, a, b, ...)` | 比较 A/B 同一条件探针的稳定值，并检查布尔值是否与源码 true/false 分支方向一致 |
 | `inspect_condition_origin(session_id, a, b, ...)` | 继续追条件值来源：字段返回 DEX v3 reader/writer + offset，并用 JADX 解释 writer 赋值右值来源；条件方法则分析 return 表达式与 callees |
 | `verify_condition_writer(session_id, a, b, writer_rank=1, ...)` | 对同类实例字段 writer 抓 before/after 字段值，验证该方法是否真实改变目标条件字段 |
+| `inspect_value_lineage(session_id, a, b, writer_rank=1, max_depth=4, ...)` | 跨方法追值来源：writer 赋值 / 条件方法 return → DEX callee → 下层 JADX return，输出 origin_paths、ambiguities、unresolved_calls，并复用 runtime 命中证据 |
 | `search_target(session_id, query, kind="auto", limit=20)` | 手工模式：统一搜源码/字符串/类/方法/字段；优先复用 JADX，否则直接查 DEX SQLite 持久索引；首次索引自动构建 |
 | `prepare_index(session_id, force=False)` | 主动预热/重建 DEX SQLite 索引；连续大量搜索前可先做一次 |
 | `prepare_target(session_id, force=False)` | 仅在需要完整源码时运行 JADX；已有产物直接复用 |
@@ -157,7 +158,7 @@
 device_status
 → open_target("com.target.app")                 # 返回 session_id
 → investigate(session_id, goal="找到会员状态判断方法", top_n=5)
-# ↑ 自动：关键词规划 → SQLite v2 索引 → 多词候选合并 → 批量 Hook → callers/callees → JADX 方法体
+# ↑ 自动：关键词规划 → SQLite v3 索引 → 多词候选合并 → 批量 Hook → callers/callees → JADX 方法体
 #    → 上下游递归调用图 → 入口/目标/下游代表路径 → runtime 覆盖 → 证据汇总
 → verify_call_path(session_id, "com.target.PayManager", "checkVip", path_index=0)
 # ↑ 在采集窗口里触发一次目标行为；结果按 before 入口时间还原真实 A→B→C→D 和每段 delta_ms
@@ -165,7 +166,7 @@ device_status
 → prepare_target(session_id)                    # 只有需要完整源码上下文时再做
 → trace_target(session_id, "com.target.PayManager", "checkVip")  # 已明确方法后精细抓参数/字段
 ```
-同一个 APK 的索引只需构建一次；DEX 索引 v2 持久化方法调用边，所以多层调用图也只查 SQLite。investigate 只回传少量代表路径；需要完整 nodes/edges 再调用 inspect_call_graph。verify_call_path 使用 before 事件而非 after，避免嵌套调用逆序；相邻静态边要求同一 tid 按序出现，减少多线程误判。返回 node_coverage、edge_coverage、full_path_observed、primary_tid、timeline 和每条相邻边的 delta_ms，结果会写回 Evidence Graph 的 runtime_sequence 关系。
+同一个 APK 的索引只需构建一次；DEX 索引 v3 持久化方法调用边和字段 read/write xref，所以多层调用图与字段来源查询都只查 SQLite。investigate 只回传少量代表路径；需要完整 nodes/edges 再调用 inspect_call_graph。verify_call_path 使用 before 事件而非 after，避免嵌套调用逆序；相邻静态边要求同一 tid 按序出现，减少多线程误判。
 
 **B. 定位并观测一个 Java 方法（推荐）**
 ```
@@ -256,6 +257,20 @@ verify_condition_writer(
 # → before premiumStatus=false
 # → after  premiumStatus=true
 # → changed=true，动态确认该 writer 改变了条件字段
+
+inspect_value_lineage(
+    session_id, "非会员", "会员",
+    writer_rank=1,
+    max_depth=4
+)
+# → origin_paths:
+# Preferences.getBoolean(...)
+# → UserRepository.isVipEnabled() return
+# → PayManager.loadMemberState() assignment
+# → premiumStatus
+#
+# 若 helper.get() 在 DEX 中匹配多个同名 callee：
+# ambiguities=[候选类...]，不会擅自选一个继续追
 ```
 两次采集会同时保存 `graph_fingerprint` 与 `hook_fingerprint`；任一不一致就拒绝给出“业务分叉”结论，避免第二次 Hook 少挂了方法导致假差异。场景事件经过压缩后独立保存在当前 Investigation 会话目录，不会持续膨胀主 session JSON。
 
@@ -300,6 +315,6 @@ M5 模块单独编：`cd m5/tracer && ./gradlew.bat :app:assembleDebug`（若仓
 
 1. `device_status` → 确认 `/health` ok（否则：查 `adb devices`、端口是否开、多设备）。
 2. 明确目标 App 包名（必要时 `list_packages`），然后立即 `open_target(package)`。
-3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 确认真实链路。若比较两个行为，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin`；字段条件再用 `verify_condition_writer` 逐个确认 writer。DEX v3 会持久化字段读写 xref，旧 v2 索引自动重建。
+3. 默认直接 `investigate(session_id, goal=...)`；先读 `call_graph.representative_paths`，再用 `verify_call_path` 确认真实链路。若比较两个行为，走 `capture_call_graph_scenario A/B → diff_call_graph_scenarios → analyze_scenario_divergence → capture_divergence_probe A/B → compare_divergence_probes → inspect_condition_origin → inspect_value_lineage`；字段条件可先用 `verify_condition_writer` 确认真正 writer。DEX v3 会持久化字段读写 xref，旧索引自动重建。
 4. 只有需要人工控制候选排序/验证，或 native、复杂 patch、高层入口覆盖不了时，才退回拆分工具/原子工具。
 5. 结束时 `close_investigation`，默认清理目标 Hook。
