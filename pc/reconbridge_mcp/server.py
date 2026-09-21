@@ -4414,7 +4414,7 @@ def runtime_hook_status(package: str = "") -> dict:
     """查看运行中 M5 Runtime 的真实状态。
 
     与 list_hooks 不同，这里返回目标进程当前实际 installed / pending Java/Runtime target、
-    HookRegistry live reconcile 能力、进程/pid、动态 ClassLoader/watcher，以及
+    HookRegistry live reconcile / Runtime Command 能力、进程/pid、动态 ClassLoader/watcher，以及
     Runtime State、Event Bus、Context/Lifecycle Runtime 的真实状态。
     context_runtime 会报告 Application/Context/当前 Activity 可用性与 Activity 状态；
     lifecycle_runtime 会报告 attach watcher、ActivityLifecycleCallbacks 和生命周期事件计数。
