@@ -180,6 +180,301 @@ daemon 下发的配置被视为“完整期望状态”，运行中收到新配�
 - `GET /hooks` / MCP `list_hooks`：磁盘上的**期望配置**；
 - `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**真实 HookRegistry / ClassLoader 状态**，包含进程、pid、installed/pending Hook、member、fingerprint、ClassLoader 注册表，以及 live unhook / replace / pending 能力。
 
+## Runtime State + Event Bus（Runtime Phase 3）
+
+Phase 3 让不同 Hook 不再彼此独立。每个目标 App **进程**拥有一份 `RuntimeStateStore` 和 `RuntimeEventBus`，Java Hook、动态 ClassLoader 后补装 Hook、以及纯事件 target 都共享它们。
+
+### Runtime State
+
+State 支持四种作用域：
+
+| scope | 生命周期 / 语义 |
+|---|---|
+| `process` | 当前 Android 进程长期共享；所有 Hook 可读写 |
+| `package` | 当前实现同样是**进程内**包级状态；多进程 App 不会自动跨进程同步 |
+| `hook` | 按 target `id` 隔离；真正 remove/unhook 时自动清理；同 ID live replace 会保留 |
+| `thread` | `ThreadLocal`；只在当前线程可见，不在 runtime status 中枚举具体线程值 |
+
+Action Pipeline 新增：
+
+```jsonc
+{
+  "before_actions": [
+    {
+      "action": "set_state",
+      "scope": "process",
+      "key": "current_user",
+      "value": "${args[0]}"
+    },
+    {
+      "action": "get_state",
+      "scope": "process",
+      "key": "current_user",
+      "save_to": "$user"
+    },
+    {
+      "action": "increment_state",
+      "scope": "hook",
+      "key": "hits",
+      "delta": 1,
+      "save_to": "$count"
+    },
+    {
+      "action": "append_state",
+      "scope": "package",
+      "key": "recent_users",
+      "value": "${args[0]}"
+    },
+    {
+      "action": "remove_state",
+      "scope": "process",
+      "key": "old_key"
+    },
+    {
+      "action": "clear_state",
+      "scope": "thread"
+    }
+  ]
+}
+```
+
+`increment_state` 和 `append_state` 在单个 scope map 内原子执行；多个 Hook 线程同时命中不会因为简单的 get→set 竞争而丢计数。
+
+默认容量保护：
+
+- 每个长期 scope 最多 **256 keys**，按 LRU 淘汰；
+- 最多 **128 个 hook scope**；
+- `append_state` 每个列表最多 **128 项**，超出从最旧元素开始移除；
+- State 可以保存真实 Java 对象引用，因此对象会一直存活到被覆盖、删除、LRU 淘汰或进程结束。需要长期保存大对象时应主动控制数量。
+
+现有统一表达式系统直接支持：
+
+```text
+state.process.current_user
+state.package.vip_enabled
+state.hook.hits
+state.thread.request_id
+```
+
+所以可以用于：
+
+```jsonc
+{
+  "condition": {
+    "path": "state.process.vip_enabled",
+    "op": "eq",
+    "value": true
+  }
+}
+```
+
+以及模板：
+
+```jsonc
+{
+  "action": "call_method",
+  "target": "class:com.foo.Logger",
+  "method": "log",
+  "args": [
+    {"value": "user=${state.process.current_user}, hits=${state.hook.hits}"}
+  ]
+}
+```
+
+`mutate/set_path` 也可直接写 `state.*` 路径。
+
+Rhino JS 中额外注入：
+
+```javascript
+$state.process
+$state.package
+$state.hook
+$state.thread
+$stateStore
+$event
+```
+
+其中 `$state` 是当前 Hook 的状态视图；`$stateStore` 是底层 Store 对象。
+
+### Event Bus：Hook → Event → Action
+
+Java Hook 可以在 before/after Action Pipeline 中发事件：
+
+```jsonc
+{
+  "action": "emit_event",
+  "name": "vip_changed",
+  "payload": {
+    "vip": "${ret}",
+    "user": "${state.process.current_user}"
+  },
+  "save_to": "$listener_count"
+}
+```
+
+payload 会递归解析模板、path/value 对象和数组，不是只做字符串替换。
+
+事件监听有两种配置方式。
+
+**1. 纯 Runtime target** —— 不依赖某个 Java 方法，只负责监听事件：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "vip_state_listener",
+  "on_event": [
+    {
+      "name": "vip_changed",
+      "condition": {
+        "path": "event.vip",
+        "op": "eq",
+        "value": true
+      },
+      "actions": [
+        {
+          "action": "set_state",
+          "scope": "process",
+          "key": "vip_enabled",
+          "value": "${event.vip}"
+        },
+        {
+          "action": "increment_state",
+          "scope": "process",
+          "key": "vip_change_count"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**2. Java target 自带监听器**：
+
+```jsonc
+{
+  "kind": "java",
+  "id": "user_runtime",
+  "class": "com.foo.UserManager",
+  "method": "refresh",
+  "action": {
+    "after_actions": [
+      {
+        "action": "emit_event",
+        "name": "user_refreshed",
+        "payload": {"user": "${args[0]}"}
+      }
+    ]
+  },
+  "on_event": {
+    "name": "vip_changed",
+    "actions": [
+      {
+        "action": "call_method",
+        "target": "class:com.foo.Logger",
+        "method": "log",
+        "args": [{"value": "vip=${event.vip}"}]
+      }
+    ]
+  }
+}
+```
+
+`on_event` / `event_handlers` 可为单个对象或数组。
+
+事件上下文支持：
+
+```text
+event.name
+event.source_hook
+event.ts
+event.tid
+event.payload.vip
+event.vip
+```
+
+payload 字段同时平铺到 `event` 根节点，因此 `event.vip` 是 `event.payload.vip` 的快捷形式；内置元数据键不会被 payload 覆盖。
+
+Event Bus 当前为**同步分发**：
+
+```text
+Hook A emit_event
+    ↓ 同一线程
+listener condition
+    ↓
+listener actions / state mutation
+    ↓
+返回 Hook A
+```
+
+因此 listener 对 Runtime State 的修改可以立刻影响当前线程后续逻辑。为了防止 `emit_event → listener → emit_event` 无限递归：
+
+- 最大事件递归深度默认 **16**；
+- 最大订阅 handler 数默认 **256**；
+- 超过递归深度的事件会被丢弃并计入 `dropped_depth`；
+- 单个 listener 异常只计入 `handler_errors`，不会阻断其它 listener。
+
+事件订阅本身也是 `LiveHookHandle`，和 Java Hook 一样由 HookRegistry 管理。因此：
+
+- 同 ID replace：新 listener 安装成功后再卸载旧 listener；
+- `unhook(package, id)`：立即卸载 listener；
+- 删除 target 后不会留下“幽灵监听器”；
+- hook-scope State 在真正 remove 时同步清理；replace 同 ID 时保留。
+
+纯事件 handler 的 ActionContext 没有方法调用上下文，因此 `this / args / ret` 不可用；应主要使用 `event.*`、`state.*`、静态 `class:...` 调用或自行 construct/eval_js/eval_dex。
+
+### Runtime Status
+
+`runtime_hook_status(package)` 的每个进程状态现在除 HookRegistry / ClassLoader 信息外，还包含：
+
+```jsonc
+{
+  "runtime_state": {
+    "enabled": true,
+    "max_keys_per_scope": 256,
+    "max_hook_scopes": 128,
+    "max_append_items": 128,
+    "process": {"count": 2, "values": {"vip_enabled": true}},
+    "package_scope": {"count": 0, "values": {}},
+    "hooks": {
+      "vip_hook": {
+        "count": 1,
+        "values": {"hits": 14}
+      }
+    },
+    "thread_scope": {
+      "thread_local": true,
+      "enumerable": false
+    },
+    "operations": {
+      "reads": 20,
+      "writes": 18,
+      "removes": 0,
+      "clears": 0
+    }
+  },
+  "event_bus": {
+    "enabled": true,
+    "synchronous": true,
+    "handler_count": 1,
+    "max_handlers": 256,
+    "max_depth": 16,
+    "emitted": 8,
+    "delivered": 8,
+    "dropped_depth": 0,
+    "handler_errors": 0,
+    "handlers": [
+      {
+        "owner_hook_id": "vip_state_listener",
+        "event": "vip_changed"
+      }
+    ],
+    "recent_events": ["vip_changed"]
+  }
+}
+```
+
+runtime status 对任意非标量 Java 对象只返回有限摘要，不应把它当成对象 dump 接口；需要对象细节仍使用 `capture.fields / capture.paths / render:"deep"`。
+
 ## 动态 ClassLoader / Pending Hook（Runtime Phase 2）
 
 显式指定 `"class":"com.foo.PluginEntry"` 的 Java target 在同步时会依次尝试当前已知 ClassLoader。若所有已知 loader 都抛出 `ClassNotFoundException / NoClassDefFoundError`，它不会计为安装失败，而是进入：
