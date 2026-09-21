@@ -19,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -783,6 +784,117 @@ static void handle_unhook(const Request& req, Response& res) {
     reply(res, 200, result);
 }
 
+static void handle_runtime_command(const Request& req, Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (...) {
+        reply(res, 400, {{"error", "body 非合法 JSON"}});
+        return;
+    }
+    if (!body.is_object()) {
+        reply(res, 400, {{"error", "body 必须是 JSON object"}});
+        return;
+    }
+
+    const std::string pkg = body.value("package", "");
+    if (!valid_pkg(pkg)) {
+        reply(res, 400, {{"error", "invalid or missing package"}});
+        return;
+    }
+
+    const std::string process = body.value("process", "");
+    int timeout_ms = body.value("timeout_ms", 3000);
+    if (timeout_ms < 200) timeout_ms = 200;
+    if (timeout_ms > 10000) timeout_ms = 10000;
+
+    json command;
+    if (body.contains("command") && body["command"].is_object()) {
+        command = body["command"];
+    } else {
+        command = body;
+        command.erase("package");
+        command.erase("process");
+        command.erase("timeout_ms");
+    }
+
+    if (!command.is_object() ||
+        !command.contains("op") ||
+        !command["op"].is_string() ||
+        command["op"].get<std::string>().empty()) {
+        reply(res, 400, {{"error", "Runtime command 缺少 op"}});
+        return;
+    }
+
+    std::vector<std::shared_ptr<InjectConn>> targets;
+    {
+        std::lock_guard<std::mutex> lk(g_conn_mutex);
+        for (const auto& conn : g_conns) {
+            if (conn->base_pkg != pkg || !conn->command_capable)
+                continue;
+            if (!process.empty() && conn->process_name != process)
+                continue;
+            targets.push_back(conn);
+        }
+    }
+
+    if (targets.empty()) {
+        reply(res, 404, {
+            {"ok", false},
+            {"package", pkg},
+            {"process", process.empty() ? json(nullptr) : json(process)},
+            {"error", "没有在线且支持 Runtime Command 的 Tracer 进程"},
+            {"runtime_status", runtime_status_snapshot(pkg)}
+        });
+        return;
+    }
+
+    std::vector<std::future<json>> futures;
+    futures.reserve(targets.size());
+    for (const auto& conn : targets) {
+        futures.push_back(std::async(
+            std::launch::async,
+            [conn, command, timeout_ms]() mutable {
+                return send_runtime_command_to_conn(
+                    conn,
+                    command,
+                    timeout_ms);
+            }));
+    }
+
+    json results = json::array();
+    size_t succeeded = 0;
+    for (auto& future : futures) {
+        json result;
+        try {
+            result = future.get();
+        } catch (const std::exception& e) {
+            result = {
+                {"ok", false},
+                {"error", e.what()}
+            };
+        } catch (...) {
+            result = {
+                {"ok", false},
+                {"error", "Runtime Command 未知异常"}
+            };
+        }
+        if (result.value("ok", false))
+            ++succeeded;
+        results.push_back(std::move(result));
+    }
+
+    reply(res, 200, {
+        {"ok", succeeded > 0},
+        {"package", pkg},
+        {"process", process.empty() ? json(nullptr) : json(process)},
+        {"targeted", targets.size()},
+        {"succeeded", succeeded},
+        {"op", command.value("op", "")},
+        {"results", results}
+    });
+}
+
 static void handle_runtime_status(const Request& req, Response& res) {
     std::string pkg;
     if (req.has_param("package"))
@@ -932,6 +1044,7 @@ void register_routes(httplib::Server& svr) {
     svr.Post("/unhook", handle_unhook);
     svr.Get("/hooks", handle_hooks);
     svr.Get("/runtime_status", handle_runtime_status);
+    svr.Post("/runtime_command", handle_runtime_command);
     svr.Post("/dump_dex", handle_dump_dex);
     svr.Get("/dumps", handle_dumps);
     svr.Get("/events", handle_events_sse);  // SSE
