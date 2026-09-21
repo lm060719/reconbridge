@@ -130,6 +130,21 @@ def _verify_ranked_candidates(
             "missed": [],
         }
 
+    # 当前批量验证不传 params，同一 class+method 的多个 descriptor 会实际挂到同一组重载。
+    # 因此验证阶段只保留排名最高的一项，避免重复 Hook 与重复事件。
+    unique_ranked: list[dict[str, Any]] = []
+    seen_methods: set[tuple[str, str]] = set()
+    for item in ranked:
+        key = (
+            candidate.normalize_class_name(str(item.get("class", ""))),
+            str(item.get("method", "")),
+        )
+        if key in seen_methods:
+            continue
+        seen_methods.add(key)
+        unique_ranked.append(item)
+    ranked = unique_ranked
+
     try:
         cursor = int(client.get_recent(limit=0).get("latest_seq", 0) or 0)
     except Exception:
