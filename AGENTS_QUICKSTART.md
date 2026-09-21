@@ -114,7 +114,13 @@
 |---|---|---|
 | `post_hook` | `(config)` | 下发原始 hook 配置（native 或 java，见协议）。**通用入口** |
 | `list_hooks` | `()` | 列磁盘上的**期望 Hook 配置** |
-| `runtime_hook_status` | `(package="")` | 查运行中 M5 Runtime 真实状态：installed/pending、ClassLoader/watcher、Runtime State、Event Bus、ContextRegistry、Lifecycle Runtime、live unhook/replace 能力 |
+| `runtime_hook_status` | `(package="")` | 查运行中 M5 Runtime 真实状态：installed/pending、ClassLoader/watcher、Runtime State、Event Bus、ContextRegistry、Lifecycle Runtime、Runtime Command 能力 |
+| `runtime_state_get` | `(package, key, scope="process", hook_id="", process="")` | 不创建 Hook，直接读在线 Runtime State |
+| `runtime_state_set` | `(package, key, value, scope="process", hook_id="", process="")` | 不创建 Hook，直接写在线 Runtime State |
+| `runtime_state_clear` | `(package, scope="process", hook_id="", process="")` | 清空在线 Runtime 的指定 State scope |
+| `runtime_event_emit` | `(package, name, payload={}, process="")` | 从 PC 直接向目标进程 EventBus 发结构化事件 |
+| `runtime_context_status` | `(package, process="")` | 实时读取 Application/Context/Activity/Lifecycle |
+| `runtime_activity_action` | `(package, actions, process="")` | 在当前 Activity 上直接执行现有 Action Pipeline |
 | `unhook` | `(package, hook_id="")` | 删该包全部 / 某个 Hook；运行中的 M5 Java Hook 会立即 **live unhook**，无需 force-stop |
 | `collect_events` | `(seconds=10, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0)` | 连 SSE 收命中事件。**`until_first_hit=True` 命中即返回**；**`include_recent=True` 事后补捞**环形缓冲历史命中（命中发生在采集开始前也能拿到）；`fold_stack` 折叠栈顶 hook 框架帧 |
 | `recent_events` | `(limit=50, since_seq=0)` | **事后采集**：直接取守护进程环形缓冲里最近的命中，无需正连着 SSE。返回 `latest_seq` 可作游标只取增量 |
@@ -203,6 +209,30 @@ runtime_hook_status(package="com.target.app")  # 确认 installed_count 已回�
 > 先用 `patch_java` **现场验证想法**——"skip 掉这个方法真能拦住跳转吗？""把返回值改成 true 有效吗？"
 > ——`skip_original` / `replace_return` / `replace_args` 秒级见效。验证通过后再把逻辑固化进 APK 模块，
 > 能省掉早期若干轮"改代码→编译→装→测"。
+
+**Runtime Command（Phase 5）—— 不造临时 Hook 直接控制在线 Runtime**
+
+```text
+runtime_state_set("com.target.app", key="debug_enabled", value=true)
+runtime_state_get("com.target.app", key="debug_enabled")
+
+runtime_event_emit(
+    "com.target.app",
+    name="debug.toggle",
+    payload={"enabled": true}
+)
+
+runtime_context_status("com.target.app")
+
+runtime_activity_action(
+    "com.target.app",
+    actions=[
+        {"action":"call_method","target":"activity","method":"finish"}
+    ]
+)
+```
+
+多进程 App 不传 `process` 会对每个在线 Runtime 分别执行并返回 `results[]`；只操作主进程或 `:service` 时显式传 process。远程 Runtime State 不支持 thread scope，因为 ThreadLocal 只能代表实际业务线程，不能由 socket 命令线程可靠访问。
 
 **D. 跨 Hook 状态机 / Event → Action（M5 Runtime Phase 3）**
 ```jsonc
