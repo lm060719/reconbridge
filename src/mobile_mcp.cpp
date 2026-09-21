@@ -949,7 +949,7 @@ static json invoke_tool(const std::string& name, const json& a) {
         const std::string program_id =
             a.value("program_id", "");
         if (!program_id.empty())
-            params["id"] = program_id;
+            params.emplace("id", program_id);
         return http_get("/runtime_programs", params);
     }
     if (name == "unhook") {
