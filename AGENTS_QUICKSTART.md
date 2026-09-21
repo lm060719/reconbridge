@@ -125,8 +125,8 @@
 ### 3.4 Java trace / 实时篡改（M5，2 个）★ 面向 LSPosed 开发
 | 工具 | 签名 | 用途 |
 |---|---|---|
-| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0, hot=False)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`paths` 取嵌套值、`render:"deep"` 深序列化、`until_first_hit=True` 命中即返回、**`hot=True` 免重启热加**（往运行中进程增量追加，不 force-stop） |
-| `patch_java` | `(package, class_name, method, params=None, replace_args=None, replace_return=None, skip_original=False, trace=True, capture_args=None, this="class", when="after", hook_id="", debug=False, restart=True, seconds=0, max_events=100)` | **实时篡改**：改参数 / 改返回值 / 跳过原方法。篡改持久生效直到 `unhook` |
+| `trace_java` | `(package, class_name, method, params=None, args_render="tostring", capture_args=None, fields=None, paths=None, this="class", ret=True, when="after", stack=False, hook_id="", debug=False, restart=True, seconds=12, max_events=200, until_first_hit=False, until_n_events=0, fold_stack=True, include_recent=False, since_seq=0, hot=False)` | **一步 hook 一个 Java 方法并采集**：看 this/参数/返回值/私有字段/调用顺序。`hot=True` 走 M5 live reconcile，不 force-stop；同 ID 配置改变可实时 replace |
+| `patch_java` | `(package, class_name, method, params=None, replace_args=None, replace_return=None, skip_original=False, trace=True, capture_args=None, this="class", when="after", hook_id="", debug=False, restart=True, seconds=0, max_events=100, hot=False)` | **实时篡改**：改参数 / 改返回值 / 跳过原方法。篡改持久生效直到 `unhook` |
 
 ### 3.5 场景捕获 + 差分（P2，3 个）★ 回答"A 与 B 行为为何不同"
 | 工具 | 签名 | 用途 |
