@@ -154,6 +154,23 @@ def test_scenario_analysis_ignores_cross_thread_static_edge():
     assert (2, 3) in edge_pairs
 
 
+def test_scenario_analysis_records_multiple_direct_downstream_edges():
+    graph = _graph()
+    analysis = scenario_path.analyze_graph_scenario(
+        graph,
+        [
+            {"hook_id": "h2", "ts": 100, "seq": 1, "tid": 7},
+            {"hook_id": "h3", "ts": 110, "seq": 2, "tid": 7},
+            {"hook_id": "h4", "ts": 120, "seq": 3, "tid": 7},
+        ],
+        _hook_map(),
+    )
+
+    edge_pairs = {(item["source"], item["target"]) for item in analysis["edges"]}
+    assert (2, 3) in edge_pairs
+    assert (2, 4) in edge_pairs
+
+
 def test_scenario_diff_rejects_different_hook_scope():
     scenario_a = _scenario("A", [])
     scenario_b = _scenario("B", [])
