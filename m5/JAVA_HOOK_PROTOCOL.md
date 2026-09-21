@@ -374,6 +374,94 @@ rollback 会消费最近一层历史，但 revision 继续递增，不会倒退�
 
 Program disable 只移除该 Program 的物化 targets，并保留 manifest/history，所以之后可以无重装再次 enable。
 
+## Runtime Program Package / 签名与权限（Runtime Phase 7）
+
+Phase 7 在 Phase 6 Program 之上增加可移植的 `.rbprog.json` 签名包。签名与信任管理由 **PC MCP** 完成，使用 Ed25519；Android daemon 不依赖 OpenSSL/libsodium，但会独立重新扫描 manifest 权限，防止绕过 PC 后少声明危险能力。
+
+PC MCP：
+
+```text
+runtime_program_export(package, program_id, signer="default", allowed_packages=[...])
+runtime_program_verify_package(bundle_or_path, target_package="", require_trusted=False)
+runtime_program_import(package, bundle_or_path, mode="install", allow_untrusted=False)
+runtime_program_trust_signer(public_key_b64, label="")
+runtime_program_signer_status()
+```
+
+首次 export 某个 signer 名称时，PC 会在本地工作目录下生成 Ed25519 keypair：
+
+```text
+<workdir>/.runtime_program_security/signers/<name>.json
+```
+
+私钥只保存在 PC 本地；导出包仅携带 public key、key_id 和 detached signature。本机自己生成的 signer 会自动加入本机 trusted signer 列表。分享给另一台 PC 后，接收端应先检查公钥指纹，再显式调用 `runtime_program_trust_signer`。
+
+签名包核心结构：
+
+```jsonc
+{
+  "format": "reconbridge.runtime-program-package",
+  "schema": 1,
+  "exported_at": 0,
+  "program": {
+    "id": "vip_debug",
+    "source_package": "com.example.app",
+    "source_revision": 3,
+    "enabled": true,
+    "manifest": { ... }
+  },
+  "allowed_packages": ["com.example.app"],
+  "permissions": ["hook.java", "state.write"],
+  "payload_sha256": "...",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "...",
+    "public_key_b64": "...",
+    "signature_b64": "..."
+  }
+}
+```
+
+验签顺序：
+
+1. 校验 format/schema；
+2. 重新扫描 manifest 所需权限；
+3. 校验 package.permissions 与 manifest.permissions 一致；
+4. 校验目标 package 在签名覆盖的 `allowed_packages` 内（`"*"` 表示任意包）；
+5. 重新计算 canonical payload SHA-256；
+6. 校验 key_id 与 public key；
+7. Ed25519 验签；
+8. 默认要求 signer 已在本机 trusted signer 列表。
+
+`allow_untrusted=true` **只跳过“公钥是否已信任”这一步**，不会跳过 SHA-256、Ed25519、allowed_packages 或权限校验。
+
+当前权限名：
+
+| permission | 含义 |
+|---|---|
+| `hook.java` | 安装 Java/Xposed Hook |
+| `hook.tamper` | 修改参数/返回值、skip original |
+| `runtime.event` | 发送/订阅 Runtime Event |
+| `runtime.lifecycle` | Lifecycle trigger |
+| `state.write` | 修改 Runtime State |
+| `java.call` | 主动调用 Java 方法 |
+| `java.field_write` | 修改字段/对象路径 |
+| `java.construct` | 构造 Java 对象 |
+| `code.eval_js` | 执行 Rhino JS |
+| `code.eval_dex` | 动态加载/执行 DEX |
+| `shell.exec` | 执行 shell |
+| `shell.root` | 请求 root shell |
+| `activity.access` | 直接操作当前 Activity |
+
+**两层权限检查**：
+
+- PC 签名包要求 `manifest.permissions` 显式覆盖扫描到的全部能力；少声明直接拒绝签名包导入。
+- daemon 的 `runtime_program_install/replace` 也会再次扫描。显式 permissions 少声明会返回错误；Phase 6 旧 manifest 没有 permissions 时，为兼容会自动推导并保存 `permissions_inferred=true`。
+
+因此直接绕过 PC 调 daemon 也不能用“低权限声明”隐藏 `eval_dex / root shell / 字段修改` 等能力。
+
+> 签名包操作目前刻意只放在 PC MCP：私钥和 signer trust store 不进入 Android 设备。手机 MCP 仍可管理已安装的 Phase 6 Program，但不会持有或导出签名私钥。
+
 ## Runtime State + Event Bus（Runtime Phase 3）
 
 Phase 3 让不同 Hook 不再彼此独立。每个目标 App **进程**拥有一份 `RuntimeStateStore` 和 `RuntimeEventBus`，Java Hook、动态 ClassLoader 后补装 Hook、以及纯事件 target 都共享它们。
