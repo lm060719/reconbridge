@@ -677,6 +677,134 @@ runtime status 对任意非标量 Java 对象只返回有限摘要，不应把�
 
 Lifecycle 变化后的 runtime status 采用后台合并刷新（约 120ms 去抖），不会在 Activity 主线程同步写整份状态快照。Lifecycle Runtime 是**进程内**的；多进程 App 每个已连接进程各有自己的 Application/Activity 状态。Compose/Fragment/自绘视图不是独立 Activity 生命周期，若要判断其内部状态仍应 Hook 对应业务方法或自行 emit 自定义事件。
 
+## Runtime Command Dispatcher（Runtime Phase 5）
+
+Phase 5 在现有 `@reconbridge_inject` 双向 socket 上增加交互式 Runtime Command，不再需要为了“读一个 state / 发一个 event / 调当前 Activity”临时创建 Hook。
+
+新增帧：
+
+```text
+Tracer → daemon  K  声明支持 Runtime Command
+daemon → Tracer  C  Runtime Command JSON
+Tracer → daemon  A  Command Ack JSON
+```
+
+`C/A` 使用 request_id 对应请求和响应；期间 `R` 热重载、`S` runtime status、`E` Hook 事件仍可正常穿插。daemon 对每个目标进程维护独立 waiter，超时或进程断线都会唤醒请求，不会永久挂起。
+
+PC / 手机 MCP 提供：
+
+```text
+runtime_state_get
+runtime_state_set
+runtime_state_clear
+runtime_event_emit
+runtime_context_status
+runtime_activity_action
+```
+
+### 直接操作 Runtime State
+
+```text
+runtime_state_set(
+    package="com.foo",
+    scope="process",
+    key="debug_enabled",
+    value=true
+)
+
+runtime_state_get(
+    package="com.foo",
+    scope="process",
+    key="debug_enabled"
+)
+
+runtime_state_clear(
+    package="com.foo",
+    scope="hook",
+    hook_id="vip_hook"
+)
+```
+
+远程命令支持 `process / package / hook` scope。**不支持远程 thread scope**：ThreadLocal 属于命令 socket 的处理线程，读取它不能代表任意 Hook 实际运行的业务线程，因此 Runtime 会明确拒绝，而不是返回误导值。
+
+`runtime_state_set.value` 支持 JSON 标量、对象、数组和 null；对象/数组进入 Runtime 后会变成普通 Map/List，可继续被现有模板和 path 系统读取。
+
+### 从 PC 主动发 Event
+
+```text
+runtime_event_emit(
+    package="com.foo",
+    name="debug.toggle",
+    payload={"enabled": true}
+)
+```
+
+这个事件进入的就是 Phase 3 同一个 `RuntimeEventBus`，现有：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "debug_listener",
+  "on_event": {
+    "name": "debug.toggle",
+    "actions": [
+      {
+        "action": "set_state",
+        "scope": "process",
+        "key": "debug_enabled",
+        "value": "${event.enabled}"
+      }
+    ]
+  }
+}
+```
+
+会在目标进程中同步响应。
+
+### 直接读取 Context / Activity
+
+```text
+runtime_context_status(package="com.foo")
+```
+
+返回当前进程 ContextRegistry / Lifecycle 视图。它不会 dump Activity 对象本身，只返回有限状态摘要。
+
+`runtime_activity_action` 可直接把现有 Action Pipeline 运行在当前 Activity：
+
+```text
+runtime_activity_action(
+    package="com.foo",
+    actions=[
+      {
+        "action": "call_method",
+        "target": "activity",
+        "method": "finish"
+      }
+    ]
+)
+```
+
+也可以在 actions 中使用 `set_state / emit_event / call_method / set_field / eval_js` 等现有动作。没有当前 Activity 时会返回明确错误，不会静默退回 Application。
+
+### 多进程语义
+
+所有 Runtime Command 都接受可选 `process`。不传时，daemon 会并行下发到该包所有**在线且声明 Runtime Command 能力**的 Tracer 进程，并返回：
+
+```jsonc
+{
+  "targeted": 2,
+  "succeeded": 2,
+  "results": [
+    {"process": "com.foo", "...": "..."},
+    {"process": "com.foo:service", "...": "..."}
+  ]
+}
+```
+
+因此多进程 App 不会被偷偷折叠成一个状态。要只操作主进程或某个 `:service`，请明确传 `process`。
+
+`runtime_hook_status` 的进程行也新增 `runtime_command:true/false`；旧版 Tracer 只会声明 live reconcile，不会被 daemon 误判成支持 Runtime Command。
+
 ## 动态 ClassLoader / Pending Hook（Runtime Phase 2）
 
 显式指定 `"class":"com.foo.PluginEntry"` 的 Java target 在同步时会依次尝试当前已知 ClassLoader。若所有已知 loader 都抛出 `ClassNotFoundException / NoClassDefFoundError`，它不会计为安装失败，而是进入：
