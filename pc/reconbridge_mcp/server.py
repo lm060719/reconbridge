@@ -781,6 +781,118 @@ def inspect_call_graph(
 
 
 @mcp.tool()
+def verify_call_path(
+    session_id: str,
+    class_name: str,
+    method: str,
+    descriptor: str = "",
+    path_index: int = 0,
+    upstream_depth: int = 2,
+    downstream_depth: int = 2,
+    seconds: float = 15.0,
+    max_events: int = 400,
+    max_hooks: int = 12,
+    restart: bool = True,
+    hot: bool = False,
+    stack: bool = False,
+    cleanup: bool = True,
+    include_events: bool = False,
+) -> dict:
+    """一次性动态验证一条代表业务路径，并按方法入口时间还原真实执行顺序。
+
+    默认先围绕目标方法生成 2 层上游 + 2 层下游调用图，选择 representative_paths[path_index]，
+    给路径上的唯一 Java 方法统一挂 before Hook。触发一次目标行为后返回节点/边覆盖率、同线程有序链、
+    相邻入口 delta_ms 和完整路径是否真实出现。
+    """
+    try:
+        state = investigation.load(session_id, refresh=True)
+    except (ValueError, FileNotFoundError) as exc:
+        return {"ok": False, "error": str(exc), "session_id": session_id}
+
+    apk = state.get("primary_apk", "")
+    if not apk:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "当前会话没有 APK，无法动态验证调用路径",
+        }
+
+    prepared = external.ensure_dex_index(apk)
+    if not prepared.get("ok"):
+        return {
+            **prepared,
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+        }
+
+    graph = investigation.call_graph_context(
+        session_id,
+        class_name,
+        method,
+        descriptor=descriptor,
+        upstream_depth=max(0, min(int(upstream_depth), 5)),
+        downstream_depth=max(0, min(int(downstream_depth), 5)),
+        max_nodes=160,
+        max_edges=480,
+        max_paths=40,
+        expand_external=False,
+    )
+    if not graph.get("ok"):
+        return {
+            **graph,
+            "session_id": session_id,
+            "package": state["package"],
+        }
+
+    selected_path = runtime_path.choose_path(graph, path_index=path_index)
+    if selected_path is None:
+        return {
+            "ok": False,
+            "session_id": session_id,
+            "package": state["package"],
+            "error": "调用图中没有可验证的代表路径",
+            "call_graph": {
+                "node_count": graph.get("node_count", 0),
+                "edge_count": graph.get("edge_count", 0),
+            },
+        }
+
+    result = _verify_static_call_path(
+        session_id,
+        state,
+        selected_path,
+        seconds=seconds,
+        max_events=max_events,
+        max_hooks=max_hooks,
+        restart=restart,
+        hot=hot,
+        stack=stack,
+        cleanup=cleanup,
+    )
+    payload = {
+        **result,
+        "session_id": session_id,
+        "package": state["package"],
+        "selected_path_index": max(0, int(path_index)),
+        "selected_path": {
+            "text": selected_path.get("text", ""),
+            "length": selected_path.get("length", 0),
+            "nodes": selected_path.get("nodes", []),
+        },
+        "call_graph": {
+            "node_count": graph.get("node_count", 0),
+            "edge_count": graph.get("edge_count", 0),
+            "representative_path_count": len(graph.get("representative_paths", [])),
+        },
+    }
+    if not include_events:
+        payload.pop("events", None)
+    return payload
+
+
+@mcp.tool()
 def investigate(
     session_id: str,
     goal: str,
@@ -946,15 +1058,15 @@ def investigate(
     if confirmed:
         status = "runtime_confirmed"
         primary = confirmed[0]
-        next_action = "对 primary_candidate 使用 trace_target 抓更深参数/字段，或直接 explain_evidence 查看完整证据链"
+        next_action = "先用 verify_call_path 验证代表业务链；需要更深参数/字段时再对 primary_candidate 使用 trace_target"
     elif verify_runtime and verification and verification.get("ok"):
         status = "runtime_no_hit"
         primary = static_top[0]
-        next_action = "确认已在采集窗口内触发目标行为；可扩大 top_n、改用 hot=true，或换更具体的 goal"
+        next_action = "确认已触发目标行为；可先 inspect_call_graph 查看静态链，再用 verify_call_path 单独验证代表路径"
     elif verify_runtime:
         status = "static_ranked_runtime_unavailable"
         primary = static_top[0]
-        next_action = "静态候选已保留；检查设备连接与 LSPosed Tracer 作用域后再 verify_candidates"
+        next_action = "静态候选与调用图已保留；检查设备/Tracer 后可直接 verify_call_path 验证代表路径"
     else:
         status = "static_ranked"
         primary = static_top[0]
