@@ -7,6 +7,7 @@ from reconbridge_mcp.dex_index import (
     index_is_ready,
     index_path_for_apk,
     index_status,
+    method_relations,
     query_index,
     write_meta,
 )
@@ -21,6 +22,7 @@ def _build_fake_index(apk, db_path):
         "fields": 1,
         "strings": 1,
         "string_method_xrefs": 1,
+        "method_calls": 1,
     }
     with sqlite3.connect(db_path) as conn:
         _create_schema(conn)
@@ -41,6 +43,13 @@ def _build_fake_index(apk, db_path):
         )
         conn.execute(
             """
+            INSERT INTO methods(class_name, method_name, descriptor, access)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("Lcom/example/UiController;", "onSubscribeClick", "()V", "public"),
+        )
+        conn.execute(
+            """
             INSERT INTO fields(class_name, field_name, type)
             VALUES (?, ?, ?)
             """,
@@ -56,6 +65,21 @@ def _build_fake_index(apk, db_path):
             "INSERT INTO string_method_xrefs(string_id, method_id) VALUES (?, ?)",
             (string_id, method_id),
         )
+        caller_id = conn.execute(
+            "SELECT id FROM methods WHERE method_name = ?",
+            ("onSubscribeClick",),
+        ).fetchone()[0]
+        callee_id = conn.execute(
+            "SELECT id FROM methods WHERE method_name = ?",
+            ("checkVip",),
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO method_calls(caller_method_id, callee_method_id, call_count)
+            VALUES (?, ?, ?)
+            """,
+            (caller_id, callee_id, 2),
+        )
         write_meta(conn, apk, counts)
         conn.commit()
 
@@ -70,8 +94,9 @@ def test_dex_index_supports_all_search_modes(tmp_path, monkeypatch):
     assert index_is_ready(apk)
     status = index_status(apk)
     assert status["ready"]
-    assert status["methods"] == 2
+    assert status["methods"] == 3
     assert status["string_method_xrefs"] == 1
+    assert status["method_calls"] == 1
 
     string_result = query_index(apk, {"find": "string", "string": "会员"})
     assert string_result["results"][0]["string"] == "会员已过期"
@@ -92,6 +117,27 @@ def test_dex_index_supports_all_search_modes(tmp_path, monkeypatch):
     assert xref_result["results"][0]["method"] == "openPaywall"
     assert xref_result["results"][0]["matched_string"] == "会员已过期"
     assert xref_result["backend"] == "sqlite-index"
+
+
+def test_method_relations_returns_callers_and_class_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "workdir", tmp_path)
+    apk = tmp_path / "base.apk"
+    apk.write_bytes(b"fake-apk-content")
+    db_path = index_path_for_apk(apk)
+    _build_fake_index(apk, db_path)
+
+    result = method_relations(
+        apk,
+        "com.example.PayManager",
+        "checkVip",
+        descriptor="()Z",
+    )
+
+    assert result["ok"]
+    assert result["callers"][0]["method"] == "onSubscribeClick"
+    assert result["callers"][0]["call_count"] == 2
+    assert result["callees"] == []
+    assert result["class_fields"][0]["field"] == "premiumStatus"
 
 
 def test_dex_index_invalidates_when_apk_changes(tmp_path, monkeypatch):
