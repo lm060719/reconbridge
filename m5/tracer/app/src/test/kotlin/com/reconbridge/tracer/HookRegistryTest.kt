@@ -285,6 +285,76 @@ class HookRegistryTest
     }
 
     @Test
+    fun pendingReplacementKeepsOldHookUntilNewClassCanInstall()
+    {
+        val mainLoader = object : ClassLoader(null) {}
+        val pluginLoader = object : ClassLoader(null) {}
+        val oldHandle = FakeHandle()
+        val newHandle = FakeHandle()
+
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 741,
+            initialClassLoader = mainLoader,
+        ) { spec, loader ->
+            when (spec.getString("class")) {
+                "com.example.Target" -> {
+                    HookInstallResult(
+                        handles = listOf(oldHandle),
+                        members = listOf("Target.check()"),
+                    )
+                }
+                "plugin.Target" -> {
+                    if (loader !== pluginLoader) {
+                        throw ClassNotFoundException("plugin.Target")
+                    }
+                    HookInstallResult(
+                        handles = listOf(newHandle),
+                        members = listOf("plugin.Target.check()"),
+                    )
+                }
+                else -> throw ClassNotFoundException()
+            }
+        }
+
+        registry.reconcile(
+            JSONArray().put(target("same"))
+        )
+
+        val replacement = target("same").apply {
+            put("class", "plugin.Target")
+        }
+        val waiting = registry.reconcile(
+            JSONArray().put(replacement)
+        )
+
+        assertEquals(1, waiting.pending)
+        assertFalse(oldHandle.unhooked)
+        assertEquals(
+            1,
+            registry.snapshotJson().getInt("installed_count"),
+        )
+        assertEquals(
+            1,
+            registry.snapshotJson().getInt("pending_count"),
+        )
+
+        val resolved = registry.onLoaderAvailable(
+            pluginLoader,
+            "DexClassLoader.<init>",
+        )
+
+        assertEquals(1, resolved.replaced)
+        assertTrue(oldHandle.unhooked)
+        assertFalse(newHandle.unhooked)
+        assertEquals(
+            0,
+            registry.snapshotJson().getInt("pending_count"),
+        )
+    }
+
+    @Test
     fun fingerprintIsStableAcrossObjectKeyOrder()
     {
         val left = JSONObject().apply {
