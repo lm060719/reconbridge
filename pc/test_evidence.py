@@ -78,6 +78,57 @@ def test_runtime_trace_marks_method_as_confirmed_and_deduplicates():
     assert len(edge_keys) == len(graph["edges"])
 
 
+def test_method_context_records_call_graph_and_source():
+    graph = evidence.new_graph()
+    context = {
+        "relations": {
+            "callers": [
+                {
+                    "class": "Lcom/example/UiController;",
+                    "method": "onSubscribeClick",
+                    "descriptor": "()V",
+                    "call_count": 2,
+                }
+            ],
+            "callees": [
+                {
+                    "class": "Ljava/lang/String;",
+                    "method": "isEmpty",
+                    "descriptor": "()Z",
+                    "call_count": 1,
+                }
+            ],
+            "strings": ["会员已过期"],
+            "class_fields": [
+                {
+                    "class": "Lcom/example/PayManager;",
+                    "field": "premiumStatus",
+                    "type": "Z",
+                }
+            ],
+        },
+        "source": {
+            "available": True,
+            "path": "PayManager.java",
+            "declaration_line": 10,
+            "start_line": 8,
+            "end_line": 20,
+        },
+    }
+
+    evidence.record_method_context(
+        graph,
+        "Lcom/example/PayManager;",
+        "checkVip",
+        "()Z",
+        context,
+    )
+
+    assert any(edge["relation"] == "calls" for edge in graph["edges"])
+    assert any(edge["relation"] == "source_context" for edge in graph["edges"])
+    assert any(node.get("type") == "field" for node in graph["nodes"].values())
+
+
 def test_empty_focus_returns_graph_slice():
     graph = evidence.new_graph()
     evidence.record_search(
