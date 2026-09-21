@@ -8,7 +8,6 @@ from __future__ import annotations
 import glob
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -75,7 +74,6 @@ def toolchain_status() -> dict:
     ghidra = _find_ghidra_headless()
     jdk = _find_jdk21()
     try:
-        import androguard  # noqa: F401
         import importlib.metadata as m
         andro = m.version("androguard")
     except Exception:
