@@ -403,6 +403,115 @@ class HookRegistryTest
     }
 
     @Test
+    fun runtimeTargetParticipatesInLiveRegistryLifecycle()
+    {
+        val handle = FakeHandle()
+        var removedId = ""
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 963,
+            initialClassLoader = javaClass.classLoader!!,
+            onHookRemoved = { id ->
+                removedId = id
+            },
+        ) { spec, _ ->
+            assertEquals(
+                "runtime",
+                spec.getString("kind"),
+            )
+            HookInstallResult(
+                handles = listOf(handle),
+                members = listOf("event:vip_changed"),
+            )
+        }
+
+        val runtimeTarget = JSONObject()
+            .put("kind", "runtime")
+            .put("id", "listener")
+            .put(
+                "on_event",
+                JSONObject()
+                    .put("name", "vip_changed")
+                    .put("actions", JSONArray()),
+            )
+
+        val installed = registry.reconcile(
+            JSONArray().put(runtimeTarget)
+        )
+
+        assertEquals(1, installed.added)
+        assertEquals(
+            1,
+            registry.snapshotJson().getInt("installed_count"),
+        )
+
+        val removed = registry.reconcile(JSONArray())
+
+        assertEquals(1, removed.removed)
+        assertTrue(handle.unhooked)
+        assertEquals("listener", removedId)
+    }
+
+    @Test
+    fun sameIdReplacementPreservesHookScopedRuntimeState()
+    {
+        val state = RuntimeStateStore(
+            packageName = "com.example",
+        )
+        val removedIds = mutableListOf<String>()
+        val registry = HookRegistry(
+            packageName = "com.example",
+            processName = "com.example",
+            pid = 159,
+            initialClassLoader = javaClass.classLoader!!,
+            onHookRemoved = { id ->
+                removedIds.add(id)
+                state.clearHook(id)
+            },
+        ) { spec, _ ->
+            HookInstallResult(
+                handles = listOf(FakeHandle()),
+                members = listOf(
+                    "Target." + spec.getString("method") + "()"
+                ),
+            )
+        }
+
+        registry.reconcile(
+            JSONArray().put(target("sticky", "first"))
+        )
+        state.set(
+            "hook",
+            "counter",
+            7,
+            "sticky",
+        )
+
+        val replacement = registry.reconcile(
+            JSONArray().put(target("sticky", "second"))
+        )
+
+        assertEquals(1, replacement.replaced)
+        assertTrue(removedIds.isEmpty())
+        assertEquals(
+            7,
+            state.get("hook", "counter", "sticky"),
+        )
+
+        registry.reconcile(JSONArray())
+
+        assertEquals(listOf("sticky"), removedIds)
+        assertFalse(
+            state.contains(
+                "hook",
+                "counter",
+                "sticky",
+            )
+        )
+    }
+
+    @Test
     fun fingerprintIsStableAcrossObjectKeyOrder()
     {
         val left = JSONObject().apply {
