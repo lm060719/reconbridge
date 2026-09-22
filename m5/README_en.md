@@ -40,3 +40,14 @@ Supports Trace (observation), live add/remove/replace, true live unhook, **pendi
 ## Runtime Program Package (Phase 7)
 
 Phase 6 Runtime Programs can now be exported on the PC as portable Ed25519-signed `.rbprog.json` bundles with `runtime_program_export`, verified with `runtime_program_verify_package`, and installed with `runtime_program_import`. The signed payload covers the complete manifest, declared permissions, allowed target packages, and source revision. Imports require a trusted signer by default, while the Android daemon independently rescans the manifest and rejects under-declared capabilities. Signing private keys stay on the PC and are never copied to the Android device. See `JAVA_HOOK_PROTOCOL.md` for the package format and permission list.
+
+
+## Runtime Program Permission Policy (Phase 8)
+
+Phase 7 Ed25519 signatures establish provenance and integrity; Phase 8 device policy independently decides whether a signed Runtime Program is actually allowed to execute on this device.
+
+Each declared Program permission can be configured as `allow`, `ask`, or `deny`. The default remains `allow` for backward compatibility. Install, replace, enable, and rollback all pass through the same policy gate. `ask` can be satisfied either by a revision-scoped `approve_once` grant or a persistent per-Program approval; `deny` always wins.
+
+Tightening policy is enforced immediately: affected enabled Programs are live-disabled, revision approvals are cleared when requested, state cleanup is applied, and the HookRegistry is reconciled. Program materialization also reevaluates policy every time, so editing the persisted Program JSON cannot bypass the policy.
+
+PC and mobile MCP expose policy status/set and persistent approval/revocation tools. See `JAVA_HOOK_PROTOCOL.md` for full semantics.
