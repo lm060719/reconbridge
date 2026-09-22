@@ -2170,6 +2170,445 @@ static void handle_runtime_program_rollback(
     });
 }
 
+
+static void handle_runtime_program_policy_get(
+    const Request& req,
+    Response& res) {
+    std::string pkg;
+    if (req.has_param("package"))
+        pkg = req.get_param_value("package");
+    if (!valid_pkg(pkg)) {
+        reply(res, 400, {{
+            "error",
+            "invalid or missing package"
+        }});
+        return;
+    }
+
+    std::lock_guard<std::mutex> lk(
+        g_program_mutex);
+    const json policy =
+        load_runtime_program_policy(pkg);
+    reply(
+        res,
+        200,
+        runtime_program_policy_response(
+            pkg,
+            policy));
+}
+
+static void handle_runtime_program_policy_set(
+    const Request& req,
+    Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (...) {
+        reply(res, 400, {{
+            "error",
+            "body 非合法 JSON"
+        }});
+        return;
+    }
+    if (!body.is_object()) {
+        reply(res, 400, {{
+            "error",
+            "body 必须是 JSON object"
+        }});
+        return;
+    }
+
+    const std::string pkg =
+        body.value("package", "");
+    if (!valid_pkg(pkg)) {
+        reply(res, 400, {{
+            "error",
+            "invalid or missing package"
+        }});
+        return;
+    }
+
+    json policy_input = body;
+    policy_input.erase("package");
+    policy_input.erase("timeout_ms");
+
+    json normalized;
+    std::string error;
+    if (!normalize_runtime_program_policy(
+            pkg,
+            policy_input,
+            normalized,
+            error)) {
+        reply(res, 400, {{"error", error}});
+        return;
+    }
+
+    const int timeout_ms = std::max(
+        200,
+        std::min(
+            body.value("timeout_ms", 3000),
+            10000));
+
+    json disabled = json::array();
+    json materialized = json::object();
+    std::vector<json> cleanup_rows;
+
+    {
+        std::lock_guard<std::mutex> lk(
+            g_program_mutex);
+
+        ::mkdir(
+            g_program_policy_dir.c_str(),
+            0755);
+        if (!write_json_atomic(
+                runtime_program_policy_path(pkg),
+                normalized)) {
+            reply(res, 500, {{
+                "error",
+                "写入 Runtime Program policy 失败"
+            }});
+            return;
+        }
+
+        for (auto record :
+             load_runtime_program_records(pkg)) {
+            if (!record.value(
+                    "enabled",
+                    false))
+                continue;
+
+            const json evaluation =
+                runtime_program_policy_evaluate(
+                    pkg,
+                    record.value("id", ""),
+                    record.value(
+                        "manifest",
+                        json::object()),
+                    record.value(
+                        "revision_approvals",
+                        json::array()));
+            if (evaluation.value(
+                    "decision",
+                    "deny") == "allow")
+                continue;
+
+            cleanup_rows.push_back({
+                {"id", record.value("id", "")},
+                {"rows",
+                 record.value(
+                     "manifest",
+                     json::object())
+                     .value(
+                         "state_cleanup",
+                         json::array())}
+            });
+
+            record["enabled"] = false;
+            record["revision_approvals"] =
+                json::array();
+            record["policy_disabled_at"] =
+                now_ms();
+            record["policy_disabled_reason"] =
+                evaluation.value(
+                    "decision",
+                    "deny");
+            record["updated_at"] = now_ms();
+
+            if (!write_json_atomic(
+                    runtime_program_path(
+                        pkg,
+                        record.value("id", "")),
+                    record)) {
+                reply(res, 500, {{
+                    "error",
+                    "策略执行时写入 Program 状态失败"
+                }});
+                return;
+            }
+
+            disabled.push_back({
+                {"id",
+                 record.value("id", "")},
+                {"policy", evaluation}
+            });
+        }
+
+        materialized =
+            runtime_program_materialize_locked(
+                pkg);
+    }
+
+    json cleanup_results =
+        json::array();
+    for (const auto& row : cleanup_rows) {
+        cleanup_results.push_back({
+            {"id", row.value("id", "")},
+            {"result",
+             runtime_program_state_apply(
+                 pkg,
+                 row.value(
+                     "rows",
+                     json::array()),
+                 true,
+                 timeout_ms)}
+        });
+    }
+
+    json response;
+    {
+        std::lock_guard<std::mutex> lk(
+            g_program_mutex);
+        response =
+            runtime_program_policy_response(
+                pkg,
+                load_runtime_program_policy(
+                    pkg));
+    }
+    response["ok"] =
+        materialized.value("ok", false);
+    response["disabled_programs"] =
+        disabled;
+    response["cleanup"] =
+        cleanup_results;
+    response["materialized"] =
+        materialized;
+    reply(res, 200, response);
+}
+
+static void handle_runtime_program_approval(
+    const Request& req,
+    Response& res) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (...) {
+        reply(res, 400, {{
+            "error",
+            "body 非合法 JSON"
+        }});
+        return;
+    }
+    if (!body.is_object()) {
+        reply(res, 400, {{
+            "error",
+            "body 必须是 JSON object"
+        }});
+        return;
+    }
+
+    const std::string pkg =
+        body.value("package", "");
+    const std::string id =
+        body.value("id", "");
+    if (!valid_pkg(pkg) ||
+        !valid_runtime_program_id(id)) {
+        reply(res, 400, {{
+            "error",
+            "package 或 id 无效"
+        }});
+        return;
+    }
+
+    json requested;
+    std::string error;
+    if (!parse_runtime_program_approvals(
+            body,
+            "permissions",
+            requested,
+            error)) {
+        reply(res, 400, {{"error", error}});
+        return;
+    }
+    if (requested.empty()) {
+        reply(res, 400, {{
+            "error",
+            "permissions 不能为空"
+        }});
+        return;
+    }
+
+    const bool revoke =
+        body.value("revoke", false);
+    const int timeout_ms = std::max(
+        200,
+        std::min(
+            body.value("timeout_ms", 3000),
+            10000));
+
+    json record;
+    json old_evaluation;
+    json new_evaluation;
+    json materialized = json::object();
+    bool old_effective = false;
+    bool new_effective = false;
+
+    {
+        std::lock_guard<std::mutex> lk(
+            g_program_mutex);
+
+        if (!read_json_file(
+                runtime_program_path(pkg, id),
+                record)) {
+            reply(res, 404, {{
+                "error",
+                "Runtime Program 不存在"
+            }});
+            return;
+        }
+
+        std::set<std::string> required;
+        collect_runtime_program_permissions(
+            record.value(
+                "manifest",
+                json::object()),
+            required);
+
+        for (const auto& permission :
+             json_string_set(requested)) {
+            if (!required.count(permission)) {
+                reply(res, 400, {
+                    {"error",
+                     "不能批准 Program 未请求的权限: " +
+                     permission}
+                });
+                return;
+            }
+        }
+
+        old_evaluation =
+            runtime_program_policy_evaluate(
+                pkg,
+                id,
+                record.value(
+                    "manifest",
+                    json::object()),
+                record.value(
+                    "revision_approvals",
+                    json::array()));
+        old_effective =
+            record.value("enabled", false) &&
+            old_evaluation.value(
+                "decision",
+                "deny") == "allow";
+
+        json policy =
+            load_runtime_program_policy(pkg);
+        json approvals =
+            policy.value(
+                "approvals",
+                json::object());
+        if (!approvals.is_object())
+            approvals = json::object();
+
+        std::set<std::string> current;
+        if (approvals.contains(id))
+            current =
+                json_string_set(
+                    approvals[id]);
+
+        for (const auto& permission :
+             json_string_set(requested)) {
+            if (revoke)
+                current.erase(permission);
+            else
+                current.insert(permission);
+        }
+
+        if (current.empty())
+            approvals.erase(id);
+        else
+            approvals[id] =
+                runtime_program_permission_array(
+                    current);
+
+        policy["approvals"] =
+            std::move(approvals);
+        policy["updated_at"] =
+            now_ms();
+
+        ::mkdir(
+            g_program_policy_dir.c_str(),
+            0755);
+        if (!write_json_atomic(
+                runtime_program_policy_path(pkg),
+                policy)) {
+            reply(res, 500, {{
+                "error",
+                "写入 Program approval 失败"
+            }});
+            return;
+        }
+
+        new_evaluation =
+            runtime_program_policy_evaluate(
+                pkg,
+                id,
+                record.value(
+                    "manifest",
+                    json::object()),
+                record.value(
+                    "revision_approvals",
+                    json::array()));
+        new_effective =
+            record.value("enabled", false) &&
+            new_evaluation.value(
+                "decision",
+                "deny") == "allow";
+
+        if (old_effective != new_effective)
+            materialized =
+                runtime_program_materialize_locked(
+                    pkg);
+    }
+
+    json state_transition =
+        json::object();
+    if (old_effective && !new_effective) {
+        state_transition =
+            runtime_program_state_apply(
+                pkg,
+                record.value(
+                    "manifest",
+                    json::object())
+                    .value(
+                        "state_cleanup",
+                        json::array()),
+                true,
+                timeout_ms);
+    } else if (!old_effective &&
+               new_effective) {
+        state_transition =
+            runtime_program_state_apply(
+                pkg,
+                record.value(
+                    "manifest",
+                    json::object())
+                    .value(
+                        "state_init",
+                        json::array()),
+                false,
+                timeout_ms);
+    }
+
+    reply(res, 200, {
+        {"ok", true},
+        {"package", pkg},
+        {"program_id", id},
+        {"revoke", revoke},
+        {"permissions", requested},
+        {"old_policy", old_evaluation},
+        {"policy", new_evaluation},
+        {"effective_transition",
+         old_effective == new_effective
+             ? "none"
+             : (new_effective
+                 ? "enabled"
+                 : "disabled")},
+        {"materialized", materialized},
+        {"state_transition", state_transition}
+    });
+}
+
 static void handle_runtime_program_status(
     const Request& req,
     Response& res) {
@@ -2705,6 +3144,9 @@ void register_routes(httplib::Server& svr) {
     svr.Post("/runtime_program/disable", handle_runtime_program_disable);
     svr.Post("/runtime_program/rollback", handle_runtime_program_rollback);
     svr.Get("/runtime_programs", handle_runtime_program_status);
+    svr.Get("/runtime_program/policy", handle_runtime_program_policy_get);
+    svr.Post("/runtime_program/policy", handle_runtime_program_policy_set);
+    svr.Post("/runtime_program/approval", handle_runtime_program_approval);
     svr.Post("/dump_dex", handle_dump_dex);
     svr.Get("/dumps", handle_dumps);
     svr.Get("/events", handle_events_sse);  // SSE
