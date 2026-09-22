@@ -34,7 +34,9 @@ def test_mcp_import_and_registration():
         "runtime_program_enable", "runtime_program_disable", "runtime_program_rollback",
         "runtime_program_status", "runtime_program_export", "runtime_program_verify_package",
         "runtime_program_import", "runtime_program_trust_signer",
-        "runtime_program_signer_status", "unhook", "collect_events", "capture_scenario",
+        "runtime_program_signer_status", "runtime_program_policy_status",
+        "runtime_program_policy_set", "runtime_program_approve",
+        "runtime_program_revoke_approval", "unhook", "collect_events", "capture_scenario",
         "list_scenarios", "diff_scenarios", "recent_events", "trace_java",
         "patch_java", "dump_dex", "list_dumps", "list_artifacts",
         "toolchain_status", "open_target", "investigation_status", "prepare_index",
@@ -105,7 +107,7 @@ async def test_mcp_stdio_e2e():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) >= 75
+            assert len(tools) >= 79
             names = {t.name for t in tools}
             assert "device_status" in names
             assert "toolchain_status" in names
@@ -130,6 +132,10 @@ async def test_mcp_stdio_e2e():
             assert "runtime_program_import" in names
             assert "runtime_program_trust_signer" in names
             assert "runtime_program_signer_status" in names
+            assert "runtime_program_policy_status" in names
+            assert "runtime_program_policy_set" in names
+            assert "runtime_program_approve" in names
+            assert "runtime_program_revoke_approval" in names
             assert "open_target" in names
             assert "search_target" in names
             assert "prepare_index" in names
