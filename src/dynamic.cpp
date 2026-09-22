@@ -46,6 +46,7 @@ static std::string g_hooks_dir;
 static std::string g_events_log;
 static std::string g_dumps_dir;
 static std::string g_programs_dir;
+static std::string g_program_policy_dir;
 static std::mutex g_program_mutex;
 
 static void log_line(const std::string& s) {
@@ -896,6 +897,266 @@ static json runtime_program_permission_array(
     for (const auto& value : values)
         out.push_back(value);
     return out;
+}
+
+
+static std::string runtime_program_policy_path(
+    const std::string& pkg) {
+    return g_program_policy_dir + "/" + pkg + ".json";
+}
+
+static bool valid_program_policy_action(
+    const std::string& action) {
+    return action == "allow" ||
+           action == "ask" ||
+           action == "deny";
+}
+
+static json default_runtime_program_policy(
+    const std::string& pkg) {
+    return {
+        {"schema", 1},
+        {"package", pkg},
+        {"default", "allow"},
+        {"permissions", json::object()},
+        {"approvals", json::object()},
+        {"updated_at", (int64_t)0}
+    };
+}
+
+static json load_runtime_program_policy(
+    const std::string& pkg) {
+    json policy;
+    if (!read_json_file(
+            runtime_program_policy_path(pkg),
+            policy) ||
+        !policy.is_object()) {
+        return default_runtime_program_policy(pkg);
+    }
+
+    policy["schema"] = 1;
+    policy["package"] = pkg;
+    if (!policy.contains("default") ||
+        !policy["default"].is_string() ||
+        !valid_program_policy_action(
+            policy["default"].get<std::string>()))
+        policy["default"] = "allow";
+    if (!policy.contains("permissions") ||
+        !policy["permissions"].is_object())
+        policy["permissions"] = json::object();
+    if (!policy.contains("approvals") ||
+        !policy["approvals"].is_object())
+        policy["approvals"] = json::object();
+    return policy;
+}
+
+static std::set<std::string> json_string_set(
+    const json& value) {
+    std::set<std::string> out;
+    if (!value.is_array()) return out;
+    for (const auto& item : value) {
+        if (item.is_string())
+            out.insert(item.get<std::string>());
+    }
+    return out;
+}
+
+static json runtime_program_policy_evaluate(
+    const std::string& pkg,
+    const std::string& program_id,
+    const json& manifest,
+    const json& approve_once = json::array()) {
+    const json policy = load_runtime_program_policy(pkg);
+    const std::string default_action =
+        policy.value("default", "allow");
+    const json overrides =
+        policy.value("permissions", json::object());
+
+    std::set<std::string> required;
+    collect_runtime_program_permissions(
+        manifest,
+        required);
+
+    std::set<std::string> persistent;
+    const json approvals =
+        policy.value("approvals", json::object());
+    if (approvals.is_object() &&
+        approvals.contains(program_id))
+        persistent = json_string_set(
+            approvals[program_id]);
+
+    const auto once =
+        json_string_set(approve_once);
+
+    json allowed = json::array();
+    json denied = json::array();
+    json approval_required = json::array();
+    json approved = json::array();
+    json decisions = json::object();
+
+    for (const auto& permission : required) {
+        std::string action = default_action;
+        if (overrides.is_object() &&
+            overrides.contains(permission) &&
+            overrides[permission].is_string()) {
+            const std::string candidate =
+                overrides[permission]
+                    .get<std::string>();
+            if (valid_program_policy_action(
+                    candidate))
+                action = candidate;
+        }
+        decisions[permission] = action;
+
+        if (action == "deny") {
+            denied.push_back(permission);
+            continue;
+        }
+        if (action == "ask") {
+            if (persistent.count(permission) ||
+                once.count(permission)) {
+                approved.push_back(permission);
+                allowed.push_back(permission);
+            } else {
+                approval_required.push_back(
+                    permission);
+            }
+            continue;
+        }
+        allowed.push_back(permission);
+    }
+
+    std::string decision = "allow";
+    if (!denied.empty())
+        decision = "deny";
+    else if (!approval_required.empty())
+        decision = "ask";
+
+    return {
+        {"ok", decision == "allow"},
+        {"decision", decision},
+        {"program_id", program_id},
+        {"default", default_action},
+        {"required", runtime_program_permission_array(
+            required)},
+        {"allowed", allowed},
+        {"denied", denied},
+        {"approval_required", approval_required},
+        {"approved", approved},
+        {"decisions", decisions}
+    };
+}
+
+static bool normalize_runtime_program_policy(
+    const std::string& pkg,
+    const json& input,
+    json& normalized,
+    std::string& error) {
+    if (!input.is_object()) {
+        error = "policy 必须是 JSON object";
+        return false;
+    }
+
+    json current =
+        load_runtime_program_policy(pkg);
+    normalized = current;
+    normalized["schema"] = 1;
+    normalized["package"] = pkg;
+
+    if (input.contains("default")) {
+        if (!input["default"].is_string()) {
+            error =
+                "policy.default 必须是 allow/ask/deny";
+            return false;
+        }
+        const std::string action =
+            input["default"].get<std::string>();
+        if (!valid_program_policy_action(action)) {
+            error =
+                "policy.default 必须是 allow/ask/deny";
+            return false;
+        }
+        normalized["default"] = action;
+    }
+
+    if (input.contains("permissions")) {
+        if (!input["permissions"].is_object()) {
+            error =
+                "policy.permissions 必须是 object";
+            return false;
+        }
+        json overrides = json::object();
+        for (auto it =
+                 input["permissions"].begin();
+             it != input["permissions"].end();
+             ++it) {
+            if (!runtime_program_known_permissions()
+                     .count(it.key())) {
+                error =
+                    "未知 Runtime Program 权限: " +
+                    it.key();
+                return false;
+            }
+            if (!it.value().is_string() ||
+                !valid_program_policy_action(
+                    it.value().get<std::string>())) {
+                error =
+                    "权限策略必须是 allow/ask/deny: " +
+                    it.key();
+                return false;
+            }
+            overrides[it.key()] = it.value();
+        }
+        normalized["permissions"] =
+            std::move(overrides);
+    }
+
+    if (input.value("clear_approvals", false))
+        normalized["approvals"] =
+            json::object();
+    if (!normalized.contains("approvals") ||
+        !normalized["approvals"].is_object())
+        normalized["approvals"] =
+            json::object();
+
+    normalized["updated_at"] = now_ms();
+    return true;
+}
+
+static json runtime_program_policy_response(
+    const std::string& pkg,
+    const json& policy) {
+    json programs = json::array();
+    for (const auto& record :
+         load_runtime_program_records(pkg)) {
+        const json manifest =
+            record.value(
+                "manifest",
+                json::object());
+        json evaluation =
+            runtime_program_policy_evaluate(
+                pkg,
+                record.value("id", ""),
+                manifest);
+        programs.push_back({
+            {"id", record.value("id", "")},
+            {"revision",
+             record.value("revision", 0)},
+            {"enabled",
+             record.value("enabled", false)},
+            {"effective_enabled",
+             record.value("enabled", false) &&
+             evaluation.value(
+                 "decision",
+                 "deny") == "allow"},
+            {"policy", evaluation}
+        });
+    }
+    return {
+        {"package", pkg},
+        {"policy", policy},
+        {"programs", programs}
+    };
 }
 
 static bool normalize_runtime_program_manifest(
@@ -2463,9 +2724,12 @@ void init(const std::string& base_dir) {
     g_events_log = base_dir + "/events.log";
     g_dumps_dir = base_dir + "/dumps";
     g_programs_dir = base_dir + "/runtime_programs";
+    g_program_policy_dir =
+        base_dir + "/runtime_program_policies";
     ::mkdir(g_hooks_dir.c_str(), 0755);
     ::mkdir(g_dumps_dir.c_str(), 0755);
     ::mkdir(g_programs_dir.c_str(), 0755);
+    ::mkdir(g_program_policy_dir.c_str(), 0755);
     // 确保 events.log 存在（保留旧的 file-tail 兜底路径）
     { std::ofstream f(g_events_log, std::ios::app); }
     std::thread(events_watcher).detach();
