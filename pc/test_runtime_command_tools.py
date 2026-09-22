@@ -186,3 +186,104 @@ def test_runtime_command_minimum_timeout_is_clamped(monkeypatch):
     )
 
     assert captured["body"]["timeout_ms"] == 200
+
+
+def test_runtime_program_policy_tools_build_expected_requests(monkeypatch):
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append(("GET", path, params))
+        return {"ok": True}
+
+    def fake_post(path, body):
+        calls.append(("POST", path, body))
+        return {"ok": True}
+
+    monkeypatch.setattr(server.client, "get_json", fake_get)
+    monkeypatch.setattr(server.client, "post_json", fake_post)
+
+    server.runtime_program_policy_status("com.example.app")
+    server.runtime_program_policy_set(
+        "com.example.app",
+        default_action="ask",
+        permissions={
+            "shell.root": "deny",
+            "code.eval_dex": "ask",
+        },
+        clear_approvals=True,
+        timeout_ms=4200,
+    )
+    server.runtime_program_approve(
+        "com.example.app",
+        "vip_debug",
+        ["code.eval_dex"],
+    )
+    server.runtime_program_revoke_approval(
+        "com.example.app",
+        "vip_debug",
+        ["code.eval_dex"],
+    )
+
+    assert calls[0] == (
+        "GET",
+        "/runtime_program/policy",
+        {"package": "com.example.app"},
+    )
+    assert calls[1] == (
+        "POST",
+        "/runtime_program/policy",
+        {
+            "package": "com.example.app",
+            "permissions": {
+                "shell.root": "deny",
+                "code.eval_dex": "ask",
+            },
+            "clear_approvals": True,
+            "timeout_ms": 4200,
+            "default": "ask",
+        },
+    )
+    assert calls[2][1] == "/runtime_program/approval"
+    assert calls[2][2]["revoke"] is False
+    assert calls[2][2]["permissions"] == ["code.eval_dex"]
+    assert calls[3][2]["revoke"] is True
+
+
+def test_runtime_program_lifecycle_forwards_approve_once(monkeypatch):
+    calls = []
+
+    def fake_post(path, body):
+        calls.append((path, body))
+        return {"ok": True}
+
+    monkeypatch.setattr(server.client, "post_json", fake_post)
+
+    manifest = {
+        "id": "vip_debug",
+        "targets": [],
+    }
+    server.runtime_program_install(
+        "com.example.app",
+        manifest,
+        approve_once=["code.eval_dex"],
+    )
+    server.runtime_program_replace(
+        "com.example.app",
+        manifest,
+        approve_once=["code.eval_js"],
+    )
+    server.runtime_program_enable(
+        "com.example.app",
+        "vip_debug",
+        approve_once=["shell.exec"],
+    )
+    server.runtime_program_rollback(
+        "com.example.app",
+        "vip_debug",
+        approve_once=["java.field_write"],
+    )
+
+    assert calls[0][1]["approve_once"] == ["code.eval_dex"]
+    assert calls[1][1]["approve_once"] == ["code.eval_js"]
+    assert calls[2][1]["approve_once"] == ["shell.exec"]
+    assert calls[3][1]["approve_once"] == ["java.field_write"]
