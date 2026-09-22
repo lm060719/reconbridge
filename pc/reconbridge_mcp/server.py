@@ -4935,13 +4935,14 @@ def runtime_program_policy_set(
 
     body: dict[str, Any] = {
         "package": package,
-        "permissions": overrides,
         "clear_approvals": bool(clear_approvals),
         "timeout_ms": max(
             200,
             min(int(timeout_ms), 10000),
         ),
     }
+    if permissions is not None:
+        body["permissions"] = overrides
     if default_action:
         body["default"] = default_action
     return client.post_json(
