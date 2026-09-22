@@ -1562,14 +1562,19 @@ static json runtime_program_record_summary(const json& record) {
                 "revision_approvals",
                 json::array()));
 
+    const bool effective_enabled =
+        record.value("enabled", false) &&
+        policy.value("decision", "deny") == "allow";
+    const json declared_ids = effective_ids;
+    if (!effective_enabled)
+        effective_ids = json::array();
+
     return {
         {"id", record.value("id", "")},
         {"package", pkg},
         {"revision", record.value("revision", 0)},
         {"enabled", record.value("enabled", false)},
-        {"effective_enabled",
-         record.value("enabled", false) &&
-         policy.value("decision", "deny") == "allow"},
+        {"effective_enabled", effective_enabled},
         {"policy", policy},
         {"name", manifest.value("name", record.value("id", ""))},
         {"version", manifest.value("version", "1")},
@@ -1581,6 +1586,7 @@ static json runtime_program_record_summary(const json& record) {
         {"permissions_inferred", manifest.value("permissions_inferred", false)},
         {"revision_approvals", record.value("revision_approvals", json::array())},
         {"history_depth", record.value("history", json::array()).size()},
+        {"declared_target_ids", declared_ids},
         {"effective_target_ids", effective_ids},
         {"installed_at", record.value("installed_at", (int64_t)0)},
         {"updated_at", record.value("updated_at", (int64_t)0)},
@@ -1633,6 +1639,23 @@ static bool runtime_program_policy_gate(
     const json& revision_approvals,
     json& evaluation,
     Response& res) {
+    std::set<std::string> required;
+    collect_runtime_program_permissions(
+        manifest,
+        required);
+    for (const auto& permission :
+         json_string_set(revision_approvals)) {
+        if (!required.count(permission)) {
+            reply(res, 400, {
+                {"ok", false},
+                {"error",
+                 "approve_once 包含 Program 未请求的权限: " +
+                 permission}
+            });
+            return false;
+        }
+    }
+
     evaluation =
         runtime_program_policy_evaluate(
             pkg,
@@ -2272,6 +2295,31 @@ static void handle_runtime_program_policy_set(
 
         for (auto record :
              load_runtime_program_records(pkg)) {
+            const bool clear_all_approvals =
+                body.value(
+                    "clear_approvals",
+                    false);
+            if (clear_all_approvals &&
+                !record.value(
+                    "revision_approvals",
+                    json::array()).empty()) {
+                record["revision_approvals"] =
+                    json::array();
+                record["updated_at"] =
+                    now_ms();
+                if (!write_json_atomic(
+                        runtime_program_path(
+                            pkg,
+                            record.value("id", "")),
+                        record)) {
+                    reply(res, 500, {{
+                        "error",
+                        "清理 revision approval 时写入 Program 失败"
+                    }});
+                    return;
+                }
+            }
+
             if (!record.value(
                     "enabled",
                     false))
