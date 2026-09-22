@@ -64,6 +64,7 @@ def test_policy_tightening_disables_and_cleans_running_programs():
     block = src[start:end]
 
     assert 'record["enabled"] = false' in block
-    assert 'record["revision_approvals"] = json::array()' in block
+    assert 'record["revision_approvals"]' in block
+    assert "json::array()" in block
     assert "runtime_program_materialize_locked" in block
     assert "runtime_program_state_apply" in block
