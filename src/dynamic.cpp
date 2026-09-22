@@ -900,6 +900,9 @@ static json runtime_program_permission_array(
 }
 
 
+static std::vector<json> load_runtime_program_records(
+    const std::string& pkg);
+
 static std::string runtime_program_policy_path(
     const std::string& pkg) {
     return g_program_policy_dir + "/" + pkg + ".json";
@@ -1435,6 +1438,17 @@ static json compose_hook_config_with_runtime_programs(
     for (const auto& record : load_runtime_program_records(pkg)) {
         if (!record.value("enabled", false))
             continue;
+        const json manifest =
+            record.value("manifest", json::object());
+        const json evaluation =
+            runtime_program_policy_evaluate(
+                pkg,
+                record.value("id", ""),
+                manifest);
+        if (evaluation.value(
+                "decision",
+                "deny") != "allow")
+            continue;
         for (const auto& target : runtime_program_targets(record))
             targets.push_back(target);
     }
@@ -1531,11 +1545,23 @@ static json runtime_program_record_summary(const json& record) {
                 "__bootstrap"));
     }
 
+    const std::string pkg =
+        record.value("package", "");
+    const json policy =
+        runtime_program_policy_evaluate(
+            pkg,
+            record.value("id", ""),
+            manifest);
+
     return {
         {"id", record.value("id", "")},
-        {"package", record.value("package", "")},
+        {"package", pkg},
         {"revision", record.value("revision", 0)},
         {"enabled", record.value("enabled", false)},
+        {"effective_enabled",
+         record.value("enabled", false) &&
+         policy.value("decision", "deny") == "allow"},
+        {"policy", policy},
         {"name", manifest.value("name", record.value("id", ""))},
         {"version", manifest.value("version", "1")},
         {"description", manifest.value("description", "")},
