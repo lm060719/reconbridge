@@ -100,3 +100,6 @@ Phase 5 远程 Runtime 控制优先使用 `runtime_state_get/set/remove/incremen
 
 
 - **Runtime Program Package（M5 Phase 7）**：跨设备/跨 PC 分享 Program 时，优先用 `runtime_program_export` 生成 Ed25519 签名 `.rbprog.json`，用 `runtime_program_verify_package` 验证哈希/签名/permissions/allowed_packages，再用 `runtime_program_import` 安装。默认只接受 trusted signer；`runtime_program_trust_signer` 前应先核对公钥指纹。daemon 会再次扫描 manifest 权限，不能靠绕过 PC 隐藏高风险 Action。
+
+
+- **Runtime Program Permission Policy（M5 Phase 8）**：设备端通过 `runtime_program_policy_status/set` 管理 allow/ask/deny；`runtime_program_approve` / `runtime_program_revoke_approval` 管理 Program 持久批准，生命周期工具可用 `approve_once` 做当前 revision 激活批准。deny 永远优先；策略收紧会立即 live disable + cleanup。签名可信与设备权限放行是两件独立的事。
