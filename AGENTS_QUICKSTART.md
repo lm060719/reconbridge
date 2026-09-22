@@ -598,3 +598,58 @@ runtime_program_import(
 ```
 
 默认 import 只接受 trusted signer。签名有效但 signer 未信任时先核对 key_id / public key，再显式 trust；不要用 `allow_untrusted=true` 代替正常信任流程。签名覆盖 allowed_packages、permissions 和完整 manifest。daemon 在安装时还会独立扫描 permissions；少声明 `eval_dex / shell.root / java.field_write / hook.tamper` 等能力会直接拒绝。
+
+
+### Runtime Program 设备权限策略（Phase 8）
+
+签名通过不代表设备一定允许运行。先看设备策略：
+
+```text
+runtime_program_policy_status("com.example.app")
+```
+
+常见安全策略：
+
+```text
+runtime_program_policy_set(
+    "com.example.app",
+    default_action="allow",
+    permissions={
+        "shell.root": "deny",
+        "code.eval_dex": "ask",
+        "code.eval_js": "ask",
+        "java.field_write": "ask",
+        "hook.tamper": "ask"
+    }
+)
+```
+
+如果 install/enable/replace/rollback 返回 `policy.decision="ask"`，可选择：
+
+```text
+# 只批准当前 revision 的这次激活；disable/replace/rollback 后重新审批
+runtime_program_enable(
+    "com.example.app",
+    "vip_debug",
+    approve_once=["code.eval_dex"]
+)
+
+# 或给这个 Program 持久批准，跨 revision 生效
+runtime_program_approve(
+    "com.example.app",
+    "vip_debug",
+    ["code.eval_dex"]
+)
+```
+
+撤销持久批准：
+
+```text
+runtime_program_revoke_approval(
+    "com.example.app",
+    "vip_debug",
+    ["code.eval_dex"]
+)
+```
+
+`deny` 不能被任何 approval 覆盖。策略收紧会立即 live disable 不再允许的 Program，并执行 state_cleanup；`clear_approvals=true` 同时清除持久批准和 revision 批准。
