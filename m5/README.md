@@ -63,3 +63,31 @@ runtime_program_signer_status
 ```
 
 签名覆盖完整 manifest、权限清单、allowed_packages 和来源 revision。导入时默认要求 signer 已加入本机 trust store；同时 daemon 会重新扫描 manifest 所需权限，显式少声明高风险能力会拒绝安装。签名私钥只保留在 PC 本地，不进入 Android 设备。完整格式与权限表见 `JAVA_HOOK_PROTOCOL.md`。
+
+
+## Runtime Program Permission Policy（Phase 8）
+
+Phase 7 的 Ed25519 签名负责确认“包来自谁、内容有没有被改”；Phase 8 的设备策略负责决定“这个模块在本机到底能不能运行”。两者彼此独立。
+
+设备端支持：
+
+```text
+runtime_program_policy_status
+runtime_program_policy_set
+runtime_program_approve
+runtime_program_revoke_approval
+```
+
+每项 Program permission 可设为 `allow / ask / deny`。默认仍是 `allow`，保证升级后现有 Phase 6/7 Program 不会突然失效；管理员可以对高风险能力收紧，例如：
+
+```text
+shell.root      = deny
+code.eval_dex   = ask
+code.eval_js    = ask
+hook.tamper     = ask
+java.field_write= ask
+```
+
+install / replace / enable / rollback 都走同一策略门禁。ask 可用 `approve_once` 批准当前 revision 激活，或用 `runtime_program_approve` 做跨 revision 的 Program 持久批准；deny 永远不能被批准覆盖。策略收紧会立即 live disable 不再允许的 Program、清理 revision approval、执行 state_cleanup，并重新物化 Hook 配置。
+
+完整语义见 `JAVA_HOOK_PROTOCOL.md`。
