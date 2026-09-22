@@ -215,6 +215,7 @@ def test_server_export_verify_and_import_round_trip(tmp_path, monkeypatch):
         restart,
         timeout_ms,
         expected_revision,
+        approve_once=None,
     ):
         captured.update(
             {
