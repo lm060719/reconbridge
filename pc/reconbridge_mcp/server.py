@@ -4666,6 +4666,27 @@ def _normalize_runtime_program_manifest(manifest: dict | str) -> dict:
     return manifest
 
 
+def _normalize_runtime_program_approvals(
+    values: Optional[list[str]],
+) -> list[str]:
+    if values is None:
+        return []
+    if not isinstance(values, list) or not all(
+        isinstance(item, str) and item
+        for item in values
+    ):
+        raise ReconError("approve_once/permissions 必须是非空权限字符串数组")
+    unknown = sorted(
+        set(values) - set(program_package.KNOWN_PERMISSIONS)
+    )
+    if unknown:
+        raise ReconError(
+            "未知 Runtime Program 权限: "
+            + ", ".join(unknown)
+        )
+    return sorted(set(values))
+
+
 def _runtime_program_write(
     package: str,
     manifest: dict | str,
@@ -4675,6 +4696,7 @@ def _runtime_program_write(
     restart: bool,
     timeout_ms: int,
     expected_revision: int,
+    approve_once: Optional[list[str]] = None,
 ) -> dict:
     _validate_package_name(package)
     body: dict[str, Any] = {
@@ -4688,6 +4710,11 @@ def _runtime_program_write(
         body["enable"] = bool(enable)
     if int(expected_revision) > 0:
         body["expected_revision"] = int(expected_revision)
+    approvals = _normalize_runtime_program_approvals(
+        approve_once
+    )
+    if approvals:
+        body["approve_once"] = approvals
     return client.post_json("/runtime_program/install", body)
 
 
@@ -4698,6 +4725,7 @@ def runtime_program_install(
     enable: bool = True,
     restart: bool = False,
     timeout_ms: int = 3000,
+    approve_once: Optional[list[str]] = None,
 ) -> dict:
     """安装一个命名 Runtime Program。
 
@@ -4712,6 +4740,7 @@ def runtime_program_install(
         restart=restart,
         timeout_ms=timeout_ms,
         expected_revision=0,
+        approve_once=approve_once,
     )
 
 
@@ -4723,6 +4752,7 @@ def runtime_program_replace(
     expected_revision: int = 0,
     restart: bool = False,
     timeout_ms: int = 3000,
+    approve_once: Optional[list[str]] = None,
 ) -> dict:
     """替换已安装 Runtime Program，并把旧版本压入最多 5 层 rollback 历史。
 
@@ -4737,6 +4767,7 @@ def runtime_program_replace(
         restart=restart,
         timeout_ms=timeout_ms,
         expected_revision=expected_revision,
+        approve_once=approve_once,
     )
 
 
@@ -4747,6 +4778,7 @@ def _runtime_program_toggle(
     enabled: bool,
     restart: bool,
     timeout_ms: int,
+    approve_once: Optional[list[str]] = None,
 ) -> dict:
     _validate_package_name(package)
     body = {
@@ -4755,6 +4787,11 @@ def _runtime_program_toggle(
         "restart": bool(restart),
         "timeout_ms": max(200, min(int(timeout_ms), 10000)),
     }
+    approvals = _normalize_runtime_program_approvals(
+        approve_once
+    )
+    if approvals:
+        body["approve_once"] = approvals
     endpoint = (
         "/runtime_program/enable"
         if enabled
@@ -4769,6 +4806,7 @@ def runtime_program_enable(
     program_id: str,
     restart: bool = False,
     timeout_ms: int = 3000,
+    approve_once: Optional[list[str]] = None,
 ) -> dict:
     """启用已安装 Runtime Program，并 live reconcile + 应用 state_init。"""
     return _runtime_program_toggle(
@@ -4777,6 +4815,7 @@ def runtime_program_enable(
         enabled=True,
         restart=restart,
         timeout_ms=timeout_ms,
+        approve_once=approve_once,
     )
 
 
@@ -4803,17 +4842,24 @@ def runtime_program_rollback(
     program_id: str,
     restart: bool = False,
     timeout_ms: int = 3000,
+    approve_once: Optional[list[str]] = None,
 ) -> dict:
     """回滚 Runtime Program 到上一份 manifest；revision 继续单调递增。"""
     _validate_package_name(package)
+    body: dict[str, Any] = {
+        "package": package,
+        "id": program_id,
+        "restart": bool(restart),
+        "timeout_ms": max(200, min(int(timeout_ms), 10000)),
+    }
+    approvals = _normalize_runtime_program_approvals(
+        approve_once
+    )
+    if approvals:
+        body["approve_once"] = approvals
     return client.post_json(
         "/runtime_program/rollback",
-        {
-            "package": package,
-            "id": program_id,
-            "restart": bool(restart),
-            "timeout_ms": max(200, min(int(timeout_ms), 10000)),
-        },
+        body,
     )
 
 
@@ -4828,6 +4874,146 @@ def runtime_program_status(
     if program_id:
         params["id"] = program_id
     return client.get_json("/runtime_programs", params=params)
+
+
+@mcp.tool()
+def runtime_program_policy_status(
+    package: str,
+) -> dict:
+    """查看设备端 Runtime Program 权限策略、批准和每个 Program 的有效状态。"""
+    _validate_package_name(package)
+    return client.get_json(
+        "/runtime_program/policy",
+        params={"package": package},
+    )
+
+
+@mcp.tool()
+def runtime_program_policy_set(
+    package: str,
+    default_action: str = "",
+    permissions: Optional[dict[str, str]] = None,
+    clear_approvals: bool = False,
+    timeout_ms: int = 3000,
+) -> dict:
+    """设置设备端 Program 权限策略；策略收紧会立即禁用不再允许的在线 Program。"""
+    _validate_package_name(package)
+    if default_action and default_action not in {
+        "allow", "ask", "deny"
+    }:
+        return {
+            "ok": False,
+            "error": "default_action 仅支持 allow/ask/deny",
+        }
+
+    overrides = permissions or {}
+    if not isinstance(overrides, dict):
+        return {
+            "ok": False,
+            "error": "permissions 必须是 {permission: allow|ask|deny}",
+        }
+    unknown = sorted(
+        set(overrides) - set(program_package.KNOWN_PERMISSIONS)
+    )
+    invalid_actions = sorted(
+        key
+        for key, value in overrides.items()
+        if value not in {"allow", "ask", "deny"}
+    )
+    if unknown:
+        return {
+            "ok": False,
+            "error": "未知 Runtime Program 权限: "
+            + ", ".join(unknown),
+        }
+    if invalid_actions:
+        return {
+            "ok": False,
+            "error": "权限策略必须是 allow/ask/deny: "
+            + ", ".join(invalid_actions),
+        }
+
+    body: dict[str, Any] = {
+        "package": package,
+        "permissions": overrides,
+        "clear_approvals": bool(clear_approvals),
+        "timeout_ms": max(
+            200,
+            min(int(timeout_ms), 10000),
+        ),
+    }
+    if default_action:
+        body["default"] = default_action
+    return client.post_json(
+        "/runtime_program/policy",
+        body,
+    )
+
+
+def _runtime_program_approval_write(
+    package: str,
+    program_id: str,
+    permissions: list[str],
+    *,
+    revoke: bool,
+    timeout_ms: int,
+) -> dict:
+    _validate_package_name(package)
+    normalized = _normalize_runtime_program_approvals(
+        permissions
+    )
+    if not normalized:
+        return {
+            "ok": False,
+            "error": "permissions 不能为空",
+        }
+    return client.post_json(
+        "/runtime_program/approval",
+        {
+            "package": package,
+            "id": program_id,
+            "permissions": normalized,
+            "revoke": bool(revoke),
+            "timeout_ms": max(
+                200,
+                min(int(timeout_ms), 10000),
+            ),
+        },
+    )
+
+
+@mcp.tool()
+def runtime_program_approve(
+    package: str,
+    program_id: str,
+    permissions: list[str],
+    timeout_ms: int = 3000,
+) -> dict:
+    """持久批准一个 Program 的 ask 权限；跨 revision 有效，deny 仍不可覆盖。"""
+    return _runtime_program_approval_write(
+        package,
+        program_id,
+        permissions,
+        revoke=False,
+        timeout_ms=timeout_ms,
+    )
+
+
+@mcp.tool()
+def runtime_program_revoke_approval(
+    package: str,
+    program_id: str,
+    permissions: list[str],
+    timeout_ms: int = 3000,
+) -> dict:
+    """撤销 Program 的持久权限批准；若当前运行依赖该批准，会立即 live disable/cleanup。"""
+    return _runtime_program_approval_write(
+        package,
+        program_id,
+        permissions,
+        revoke=True,
+        timeout_ms=timeout_ms,
+    )
 
 
 @mcp.tool()
@@ -4942,6 +5128,7 @@ def runtime_program_import(
     expected_revision: int = 0,
     restart: bool = False,
     timeout_ms: int = 3000,
+    approve_once: Optional[list[str]] = None,
 ) -> dict:
     """验签后把 .rbprog.json 安装/替换到目标包。
 
@@ -4980,6 +5167,7 @@ def runtime_program_import(
         restart=restart,
         timeout_ms=timeout_ms,
         expected_revision=expected_revision,
+        approve_once=approve_once,
     )
     return {
         **result,
