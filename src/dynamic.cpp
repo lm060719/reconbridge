@@ -1704,9 +1704,20 @@ static void handle_runtime_program_install(
         std::min(body.value("timeout_ms", 3000), 10000));
     const bool restart = body.value("restart", false);
 
+    json approve_once;
+    if (!parse_runtime_program_approvals(
+            body,
+            "approve_once",
+            approve_once,
+            error)) {
+        reply(res, 400, {{"error", error}});
+        return;
+    }
+
     json old_record;
     json record;
     json materialized;
+    json policy_evaluation = json::object();
     bool had_old = false;
     {
         std::lock_guard<std::mutex> lk(g_program_mutex);
@@ -1774,6 +1785,24 @@ static void handle_runtime_program_install(
                 : true);
         const int revision =
             had_old ? old_record.value("revision", 0) + 1 : 1;
+
+        if (enabled) {
+            if (!runtime_program_policy_gate(
+                    pkg,
+                    id,
+                    manifest,
+                    approve_once,
+                    policy_evaluation,
+                    res))
+                return;
+        } else {
+            policy_evaluation =
+                runtime_program_policy_evaluate(
+                    pkg,
+                    id,
+                    manifest);
+        }
+
         const int64_t timestamp = now_ms();
 
         record = {
@@ -1783,6 +1812,8 @@ static void handle_runtime_program_install(
             {"revision", revision},
             {"enabled", enabled},
             {"manifest", manifest},
+            {"revision_approvals",
+             enabled ? approve_once : json::array()},
             {"history", history},
             {"installed_at", had_old
                 ? old_record.value("installed_at", timestamp)
@@ -1832,6 +1863,7 @@ static void handle_runtime_program_install(
         {"ok", materialized.value("ok", false)},
         {"mode", mode},
         {"program", runtime_program_record_summary(record)},
+        {"policy", policy_evaluation},
         {"materialized", materialized},
         {"state_cleanup", cleanup},
         {"state_init", state_init},
@@ -1866,8 +1898,20 @@ static void handle_runtime_program_toggle(
         std::min(body.value("timeout_ms", 3000), 10000));
     const bool restart = body.value("restart", false);
 
+    std::string approval_error;
+    json approve_once;
+    if (!parse_runtime_program_approvals(
+            body,
+            "approve_once",
+            approve_once,
+            approval_error)) {
+        reply(res, 400, {{"error", approval_error}});
+        return;
+    }
+
     json record;
     json materialized;
+    json policy_evaluation = json::object();
     {
         std::lock_guard<std::mutex> lk(g_program_mutex);
         if (!read_json_file(
@@ -1879,6 +1923,45 @@ static void handle_runtime_program_toggle(
             }});
             return;
         }
+        if (enabled) {
+            std::set<std::string> approvals =
+                json_string_set(
+                    record.value(
+                        "revision_approvals",
+                        json::array()));
+            const auto requested =
+                json_string_set(approve_once);
+            approvals.insert(
+                requested.begin(),
+                requested.end());
+            const json merged_approvals =
+                runtime_program_permission_array(
+                    approvals);
+
+            if (!runtime_program_policy_gate(
+                    pkg,
+                    id,
+                    record.value(
+                        "manifest",
+                        json::object()),
+                    merged_approvals,
+                    policy_evaluation,
+                    res))
+                return;
+            record["revision_approvals"] =
+                merged_approvals;
+        } else {
+            policy_evaluation =
+                runtime_program_policy_evaluate(
+                    pkg,
+                    id,
+                    record.value(
+                        "manifest",
+                        json::object()));
+            record["revision_approvals"] =
+                json::array();
+        }
+
         record["enabled"] = enabled;
         record["updated_at"] = now_ms();
         if (!write_json_atomic(
@@ -1912,6 +1995,7 @@ static void handle_runtime_program_toggle(
     reply(res, 200, {
         {"ok", materialized.value("ok", false)},
         {"program", runtime_program_record_summary(record)},
+        {"policy", policy_evaluation},
         {"materialized", materialized},
         {enabled ? "state_init" : "state_cleanup",
          state_result},
@@ -1954,9 +2038,21 @@ static void handle_runtime_program_rollback(
         std::min(body.value("timeout_ms", 3000), 10000));
     const bool restart = body.value("restart", false);
 
+    std::string approval_error;
+    json approve_once;
+    if (!parse_runtime_program_approvals(
+            body,
+            "approve_once",
+            approve_once,
+            approval_error)) {
+        reply(res, 400, {{"error", approval_error}});
+        return;
+    }
+
     json current;
     json restored;
     json materialized;
+    json policy_evaluation = json::object();
     int restored_from_revision = 0;
     {
         std::lock_guard<std::mutex> lk(g_program_mutex);
@@ -1980,6 +2076,30 @@ static void handle_runtime_program_rollback(
         }
 
         const json previous = history.back();
+        const bool restored_enabled =
+            previous.value("enabled", true);
+        const json restored_manifest =
+            previous.value(
+                "manifest",
+                json::object());
+
+        if (restored_enabled) {
+            if (!runtime_program_policy_gate(
+                    pkg,
+                    id,
+                    restored_manifest,
+                    approve_once,
+                    policy_evaluation,
+                    res))
+                return;
+        } else {
+            policy_evaluation =
+                runtime_program_policy_evaluate(
+                    pkg,
+                    id,
+                    restored_manifest);
+        }
+
         history.erase(history.end() - 1);
         restored_from_revision =
             previous.value("revision", 0);
@@ -1991,6 +2111,10 @@ static void handle_runtime_program_rollback(
             previous.value("enabled", true);
         restored["manifest"] =
             previous.value("manifest", json::object());
+        restored["revision_approvals"] =
+            restored_enabled
+                ? approve_once
+                : json::array();
         restored["history"] = history;
         restored["updated_at"] = now_ms();
         restored["rollback_from_revision"] =
@@ -2037,6 +2161,7 @@ static void handle_runtime_program_rollback(
     reply(res, 200, {
         {"ok", materialized.value("ok", false)},
         {"program", runtime_program_record_summary(restored)},
+        {"policy", policy_evaluation},
         {"materialized", materialized},
         {"state_cleanup", cleanup},
         {"state_init", state_init},
