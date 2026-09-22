@@ -1140,7 +1140,10 @@ static json runtime_program_policy_response(
             runtime_program_policy_evaluate(
                 pkg,
                 record.value("id", ""),
-                manifest);
+                manifest,
+                record.value(
+                    "revision_approvals",
+                    json::array()));
         programs.push_back({
             {"id", record.value("id", "")},
             {"revision",
@@ -1444,7 +1447,10 @@ static json compose_hook_config_with_runtime_programs(
             runtime_program_policy_evaluate(
                 pkg,
                 record.value("id", ""),
-                manifest);
+                manifest,
+                record.value(
+                    "revision_approvals",
+                    json::array()));
         if (evaluation.value(
                 "decision",
                 "deny") != "allow")
@@ -1551,7 +1557,10 @@ static json runtime_program_record_summary(const json& record) {
         runtime_program_policy_evaluate(
             pkg,
             record.value("id", ""),
-            manifest);
+            manifest,
+            record.value(
+                "revision_approvals",
+                json::array()));
 
     return {
         {"id", record.value("id", "")},
@@ -1570,12 +1579,83 @@ static json runtime_program_record_summary(const json& record) {
         {"state_cleanup_count", manifest.value("state_cleanup", json::array()).size()},
         {"permissions", manifest.value("permissions", json::array())},
         {"permissions_inferred", manifest.value("permissions_inferred", false)},
+        {"revision_approvals", record.value("revision_approvals", json::array())},
         {"history_depth", record.value("history", json::array()).size()},
         {"effective_target_ids", effective_ids},
         {"installed_at", record.value("installed_at", (int64_t)0)},
         {"updated_at", record.value("updated_at", (int64_t)0)},
         {"manifest", manifest}
     };
+}
+
+
+static bool parse_runtime_program_approvals(
+    const json& body,
+    const char* key,
+    json& approvals,
+    std::string& error) {
+    approvals = json::array();
+    if (!body.contains(key))
+        return true;
+    if (!body[key].is_array()) {
+        error = std::string(key) +
+            " 必须是权限字符串数组";
+        return false;
+    }
+
+    std::set<std::string> unique;
+    for (const auto& item : body[key]) {
+        if (!item.is_string()) {
+            error = std::string(key) +
+                " 必须是权限字符串数组";
+            return false;
+        }
+        const std::string permission =
+            item.get<std::string>();
+        if (!runtime_program_known_permissions()
+                 .count(permission)) {
+            error =
+                "未知 Runtime Program 权限: " +
+                permission;
+            return false;
+        }
+        unique.insert(permission);
+    }
+    approvals =
+        runtime_program_permission_array(unique);
+    return true;
+}
+
+static bool runtime_program_policy_gate(
+    const std::string& pkg,
+    const std::string& program_id,
+    const json& manifest,
+    const json& revision_approvals,
+    json& evaluation,
+    Response& res) {
+    evaluation =
+        runtime_program_policy_evaluate(
+            pkg,
+            program_id,
+            manifest,
+            revision_approvals);
+    const std::string decision =
+        evaluation.value(
+            "decision",
+            "deny");
+    if (decision == "allow")
+        return true;
+
+    const int status =
+        decision == "deny" ? 403 : 409;
+    reply(res, status, {
+        {"ok", false},
+        {"error", decision == "deny"
+            ? "Runtime Program 被设备权限策略拒绝"
+            : "Runtime Program 需要权限审批"},
+        {"policy", evaluation}
+    });
+    return false;
 }
 
 static void handle_runtime_program_install(
