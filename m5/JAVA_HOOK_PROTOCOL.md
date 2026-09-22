@@ -462,6 +462,125 @@ runtime_program_signer_status()
 
 > 签名包操作目前刻意只放在 PC MCP：私钥和 signer trust store 不进入 Android 设备。手机 MCP 仍可管理已安装的 Phase 6 Program，但不会持有或导出签名私钥。
 
+## Runtime Program Permission Policy（Runtime Phase 8）
+
+Phase 8 把 Phase 7 的“权限声明”升级为**设备侧权限策略与运行时强制执行**。签名可信只说明包没有被篡改、signer 被信任；是否允许模块真正启用，由目标设备自己的 policy 决定。
+
+设备按 package 持久化策略，默认值为：
+
+```json
+{
+  "default": "allow",
+  "permissions": {}
+}
+```
+
+默认 `allow` 是为了兼容已经存在的 Phase 6/7 Program；管理员可以逐项覆盖成：
+
+- `allow`：无需额外审批；
+- `ask`：必须有当前 revision 批准或 Program 持久批准；
+- `deny`：无论签名、一次批准、持久批准如何都不能启用。
+
+例如：
+
+```text
+runtime_program_policy_set(
+    "com.example.app",
+    default_action="allow",
+    permissions={
+        "shell.root": "deny",
+        "code.eval_dex": "ask",
+        "java.field_write": "ask"
+    }
+)
+```
+
+策略顺序：
+
+```text
+deny
+  > ask + approval
+  > allow
+```
+
+Program 的 install / replace / enable / rollback 都会在写入或启用之前经过同一个 policy gate。若命中 deny，返回 403；若命中 ask 且未批准，返回 409，并在 `policy.approval_required` 给出需要批准的权限。
+
+### 当前 revision 一次批准
+
+`approve_once=[...]` 表示“批准当前 revision 的这次激活”。批准会写入 Program 记录的 `revision_approvals`，因此目标 App 重启后仍可继续运行当前 revision；但：
+
+- disable 会清空 revision_approvals；
+- replace 进入新 revision 后必须重新批准；
+- rollback 产生新的 revision，也必须重新批准；
+- `clear_approvals=true` 会同时清除持久批准与 revision 批准。
+
+示例：
+
+```text
+runtime_program_enable(
+    "com.example.app",
+    "vip_debug",
+    approve_once=["code.eval_dex"]
+)
+```
+
+`approve_once` 只能批准 manifest 实际请求的权限；传入未请求权限会被拒绝。
+
+### Program 持久批准
+
+```text
+runtime_program_approve(
+    "com.example.app",
+    "vip_debug",
+    ["code.eval_dex"]
+)
+
+runtime_program_revoke_approval(
+    "com.example.app",
+    "vip_debug",
+    ["code.eval_dex"]
+)
+```
+
+持久批准保存在设备 policy store 中，跨 revision 生效，但永远不能覆盖 deny。撤销批准后，如果当前 enabled Program 依赖该批准，daemon 会立即重新物化配置并 live disable/cleanup。
+
+### 策略收紧即时执行
+
+修改策略不是“下次启动才生效”。daemon 会立即扫描全部 enabled Program：
+
+```text
+policy_set
+↓
+重新评估每个 Program
+↓
+ask 未批准 / deny
+↓
+enabled=false
+↓
+live reconcile
+↓
+state_cleanup
+```
+
+同时 `compose_hook_config_with_runtime_programs` 每次物化都会再次执行 policy evaluation，所以即使手工修改持久化 Program JSON，把 `enabled` 改回 true，也不会绕过策略。
+
+`runtime_program_status` 现在区分：
+
+- `enabled`：Program 记录想要启用；
+- `effective_enabled`：当前策略下是否真的允许运行；
+- `declared_target_ids`：manifest 声明的 target；
+- `effective_target_ids`：当前实际可物化的 target；
+- `policy.decision`：allow / ask / deny；
+- `policy.approval_required` / `policy.denied`：具体原因。
+
+设备 policy 文件保存在：
+
+```text
+/data/adb/reconbridge/runtime_program_policies/<package>.json
+```
+
+> Phase 8 策略只约束 **Runtime Program**。手工 `trace_java/patch_java/post_hook` 和直接 Runtime Command 仍属于开发/调试通道，不受 Program policy 管理。
+
 ## Runtime State + Event Bus（Runtime Phase 3）
 
 Phase 3 让不同 Hook 不再彼此独立。每个目标 App **进程**拥有一份 `RuntimeStateStore` 和 `RuntimeEventBus`，Java Hook、动态 ClassLoader 后补装 Hook、以及纯事件 target 都共享它们。
