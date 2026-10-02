@@ -1,0 +1,572 @@
+"""Evidence Graph 自动沉淀与关联查询测试。"""
+from __future__ import annotations
+
+from reconbridge_mcp import evidence
+
+
+def test_search_results_build_relationship_graph():
+    graph = evidence.new_graph()
+
+    evidence.record_search(
+        graph,
+        "会员",
+        "dex-sqlite-index",
+        [
+            {
+                "class": "Lcom/example/PayManager;",
+                "method": "openPaywall",
+                "descriptor": "()V",
+                "access": "private",
+                "matched_string": "会员已过期",
+            },
+            {
+                "class": "Lcom/example/PayManager;",
+                "field": "premiumStatus",
+                "type": "Z",
+            },
+        ],
+    )
+
+    summary = evidence.summary(graph)
+    assert summary["node_count"] >= 4
+    assert summary["relations"]["matched"] >= 2
+    assert summary["relations"]["referenced_by"] == 1
+
+    sub = evidence.subgraph(graph, focus="会员", depth=2)
+    labels = {node["label"] for node in sub["nodes"]}
+    assert "会员" in labels
+    assert "会员已过期" in labels
+    assert any("openPaywall" in label for label in labels)
+
+
+def test_runtime_trace_marks_method_as_confirmed_and_deduplicates():
+    graph = evidence.new_graph()
+    events = [
+        {
+            "class": "com.example.PayManager",
+            "method": "checkVip",
+            "paths": [{"path": "ret.premium", "value": "true"}],
+            "fields": [{"name": "premiumStatus", "value": "true"}],
+            "stack": ["Caller.doWork(Caller.java:10)"],
+        }
+    ]
+
+    evidence.record_trace(
+        graph,
+        "com.example.PayManager",
+        "checkVip",
+        events,
+    )
+    evidence.record_trace(
+        graph,
+        "com.example.PayManager",
+        "checkVip",
+        events,
+    )
+
+    explained = evidence.explain(graph, "checkVip")
+    assert explained["runtime_confirmed"]
+    assert any("checkVip" in item for item in explained["runtime_confirmed"])
+    assert any(node.get("type") == "field" for node in explained["nodes"])
+    assert any(edge.get("relation") == "observed_field" for edge in explained["edges"])
+
+    # 重复记录同一证据不应让关系边无限增长。
+    edge_keys = {
+        (edge["source"], edge["target"], edge["relation"])
+        for edge in graph["edges"]
+    }
+    assert len(edge_keys) == len(graph["edges"])
+
+
+def test_method_context_records_call_graph_and_source():
+    graph = evidence.new_graph()
+    context = {
+        "relations": {
+            "callers": [
+                {
+                    "class": "Lcom/example/UiController;",
+                    "method": "onSubscribeClick",
+                    "descriptor": "()V",
+                    "call_count": 2,
+                }
+            ],
+            "callees": [
+                {
+                    "class": "Ljava/lang/String;",
+                    "method": "isEmpty",
+                    "descriptor": "()Z",
+                    "call_count": 1,
+                }
+            ],
+            "strings": ["会员已过期"],
+            "class_fields": [
+                {
+                    "class": "Lcom/example/PayManager;",
+                    "field": "premiumStatus",
+                    "type": "Z",
+                }
+            ],
+        },
+        "source": {
+            "available": True,
+            "path": "PayManager.java",
+            "declaration_line": 10,
+            "start_line": 8,
+            "end_line": 20,
+        },
+    }
+
+    evidence.record_method_context(
+        graph,
+        "Lcom/example/PayManager;",
+        "checkVip",
+        "()Z",
+        context,
+    )
+
+    assert any(edge["relation"] == "calls" for edge in graph["edges"])
+    assert any(edge["relation"] == "source_context" for edge in graph["edges"])
+    assert any(node.get("type") == "field" for node in graph["nodes"].values())
+
+
+def test_call_graph_runtime_annotation_marks_paths():
+    graph = evidence.new_graph()
+    evidence.record_trace(
+        graph,
+        "com.example.PayManager",
+        "checkVip",
+        [{"class": "com.example.PayManager", "method": "checkVip"}],
+    )
+    evidence.record_trace(
+        graph,
+        "com.example.UserRepository",
+        "getMemberInfo",
+        [{"class": "com.example.UserRepository", "method": "getMemberInfo"}],
+    )
+
+    call_graph = {
+        "ok": True,
+        "nodes": [
+            {
+                "id": 1,
+                "class": "Lcom/example/PayManager;",
+                "method": "checkVip",
+                "descriptor": "()Z",
+                "access": "public",
+            },
+            {
+                "id": 2,
+                "class": "Lcom/example/UserRepository;",
+                "method": "getMemberInfo",
+                "descriptor": "()V",
+                "access": "public",
+            },
+        ],
+        "edges": [{"source": 1, "target": 2, "call_count": 1}],
+        "upstream_paths": [],
+        "downstream_paths": [
+            {
+                "length": 1,
+                "nodes": [
+                    {"id": 1, "class": "Lcom/example/PayManager;", "method": "checkVip"},
+                    {"id": 2, "class": "Lcom/example/UserRepository;", "method": "getMemberInfo"},
+                ],
+                "text": "checkVip -> getMemberInfo",
+            }
+        ],
+        "representative_paths": [
+            {
+                "length": 1,
+                "nodes": [
+                    {"id": 1, "class": "Lcom/example/PayManager;", "method": "checkVip"},
+                    {"id": 2, "class": "Lcom/example/UserRepository;", "method": "getMemberInfo"},
+                ],
+                "text": "checkVip -> getMemberInfo",
+            }
+        ],
+    }
+
+    evidence.annotate_call_graph_runtime(graph, call_graph)
+
+    assert call_graph["runtime_confirmed_nodes"] == 2
+    assert call_graph["representative_paths"][0]["runtime_confirmed_nodes"] == 2
+    assert call_graph["representative_paths"][0]["runtime_coverage"] == 1.0
+    assert call_graph["edges"][0]["runtime_observed"] is True
+
+
+def test_runtime_path_records_observed_sequence_edges():
+    graph = evidence.new_graph()
+    path = {
+        "nodes": [
+            {"class": "com.example.A", "method": "start", "descriptor": "()V"},
+            {"class": "com.example.B", "method": "load", "descriptor": "()V"},
+        ]
+    }
+    analysis = {
+        "node_hits": [
+            {"path_index": 0, "hits": 1},
+            {"path_index": 1, "hits": 1},
+        ],
+        "edges": [
+            {
+                "source_index": 0,
+                "target_index": 1,
+                "observed": True,
+                "delta_ms": 12.0,
+            }
+        ],
+    }
+
+    evidence.record_runtime_path(graph, path, analysis)
+
+    runtime_edges = [
+        edge for edge in graph["edges"]
+        if edge.get("relation") == "runtime_sequence"
+    ]
+    assert len(runtime_edges) == 1
+    assert runtime_edges[0]["delta_ms"] == 12.0
+
+
+def test_field_origin_records_writer_reader_and_source_nodes():
+    graph = evidence.new_graph()
+    context = {
+        "ok": True,
+        "field": {
+            "class": "com.example.PayManager",
+            "name": "premiumStatus",
+            "type": "Z",
+        },
+        "writers": [
+            {
+                "class": "com.example.PayManager",
+                "method": "loadState",
+                "descriptor": "()V",
+                "offset": 12,
+                "rank": 1,
+                "runtime_confirmed": True,
+                "runtime_hits": 2,
+                "assignments": [
+                    {
+                        "expression": 'preferences.getBoolean("vip", false)',
+                        "source_hints": [
+                            {
+                                "kind": "preferences",
+                                "confidence": 0.95,
+                                "reason": "来自偏好存储",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        "readers": [
+            {
+                "class": "com.example.PayManager",
+                "method": "checkVip",
+                "descriptor": "()Z",
+                "offset": 24,
+            }
+        ],
+    }
+
+    evidence.record_field_origin(graph, context)
+
+    relations = {edge["relation"] for edge in graph["edges"]}
+    assert "writes_field" in relations
+    assert "read_by" in relations
+    assert "feeds_writer" in relations
+    assert any(
+        node.get("type") == "state_origin"
+        and node.get("kind") == "preferences"
+        for node in graph["nodes"].values()
+    )
+
+
+def test_value_lineage_is_persisted_into_evidence_graph():
+    graph = evidence.new_graph()
+    lineage = {
+        "ok": True,
+        "nodes": [
+            {
+                "id": "origin:1",
+                "type": "origin",
+                "label": "来自偏好存储",
+                "kind": "preferences",
+                "confidence": 0.95,
+            },
+            {
+                "id": "expr:1",
+                "type": "expression",
+                "label": 'preferences.getBoolean("vip", false)',
+                "owner_class": "com.example.UserRepository",
+                "owner_method": "isVipEnabled",
+            },
+            {
+                "id": "method:1",
+                "type": "method",
+                "label": "com.example.UserRepository.isVipEnabled",
+                "class_name": "com.example.UserRepository",
+                "method_name": "isVipEnabled",
+                "descriptor": "()Z",
+            },
+            {
+                "id": "field:1",
+                "type": "field",
+                "label": "com.example.PayManager.premiumStatus",
+                "class_name": "com.example.PayManager",
+                "field_name": "premiumStatus",
+                "field_type": "Z",
+            },
+        ],
+        "edges": [
+            {
+                "source": "origin:1",
+                "target": "expr:1",
+                "relation": "feeds_expression",
+            },
+            {
+                "source": "expr:1",
+                "target": "method:1",
+                "relation": "returns_from",
+            },
+            {
+                "source": "method:1",
+                "target": "field:1",
+                "relation": "writes_field",
+            },
+        ],
+    }
+
+    evidence.record_value_lineage(graph, lineage)
+
+    relations = {edge["relation"] for edge in graph["edges"]}
+    assert "feeds_expression" in relations
+    assert "returns_from" in relations
+    assert "writes_field" in relations
+    assert any(
+        node.get("type") == "value_expression"
+        for node in graph["nodes"].values()
+    )
+
+
+def test_runtime_value_lineage_records_sequence_and_field_change():
+    graph = evidence.new_graph()
+    path = {
+        "nodes": [
+            {
+                "type": "method",
+                "class_name": "com.example.Repo",
+                "method_name": "isVipEnabled",
+                "descriptor": "()Z",
+            },
+            {
+                "type": "method",
+                "class_name": "com.example.PayManager",
+                "method_name": "loadMemberState",
+                "descriptor": "()V",
+            },
+            {
+                "type": "field",
+                "class_name": "com.example.PayManager",
+                "field_name": "premiumStatus",
+                "field_type": "Z",
+            },
+        ]
+    }
+    analysis = {
+        "observations": [
+            {
+                "path_index": 0,
+                "class": "com.example.Repo",
+                "method": "isVipEnabled",
+                "descriptor": "()Z",
+                "hit_count": 1,
+                "returns": {
+                    "stable": True,
+                    "stable_value": {
+                        "type": "boolean",
+                        "canonical": "true",
+                    },
+                },
+            },
+            {
+                "path_index": 1,
+                "class": "com.example.PayManager",
+                "method": "loadMemberState",
+                "descriptor": "()V",
+                "hit_count": 1,
+                "returns": {
+                    "stable": True,
+                    "stable_value": {
+                        "type": "null",
+                        "canonical": "null",
+                    },
+                },
+            },
+        ],
+        "timeline": [
+            {
+                "path_index": 0,
+                "label": "Repo.isVipEnabled",
+                "tid": 7,
+                "delta_ms": None,
+            },
+            {
+                "path_index": 1,
+                "label": "PayManager.loadMemberState",
+                "tid": 7,
+                "delta_ms": 20.0,
+            },
+        ],
+        "terminal_field": {
+            "class": "com.example.PayManager",
+            "field": "premiumStatus",
+            "type": "Z",
+        },
+        "writer_change": {
+            "changed": True,
+            "changed_calls": 1,
+            "distinct_changes": [
+                {
+                    "before": {"canonical": "false"},
+                    "after": {"canonical": "true"},
+                }
+            ],
+        },
+    }
+
+    evidence.record_runtime_lineage(graph, path, analysis)
+
+    relations = {edge["relation"] for edge in graph["edges"]}
+    assert "runtime_value_sequence" in relations
+    assert "runtime_writes_field" in relations
+
+    methods = [
+        node for node in graph["nodes"].values()
+        if node.get("type") == "method"
+    ]
+    assert any(
+        node.get("runtime_return_preview") == "true"
+        for node in methods
+    )
+
+
+def test_root_cause_ranking_annotations_are_written_to_evidence_nodes():
+    graph = evidence.new_graph()
+    ranking = {
+        "ok": True,
+        "candidates": [
+            {
+                "rank": 1,
+                "candidate_type": "method",
+                "class": "com.example.Repo",
+                "method": "isVipEnabled",
+                "descriptor": "()Z",
+                "label": "com.example.Repo.isVipEnabled()Z",
+                "score": 88,
+                "raw_score": 88,
+                "evidence_level": "runtime_divergence",
+                "score_breakdown": [
+                    {
+                        "key": "first_stable_runtime_difference",
+                        "points": 45,
+                        "reason": "这是最早稳定值差异",
+                    }
+                ],
+                "next_action": "检查参数",
+            },
+            {
+                "rank": 2,
+                "candidate_type": "origin",
+                "kind": "preferences",
+                "label": "来自偏好存储",
+                "confidence": 0.95,
+                "expression": 'preferences.getBoolean("vip", false)',
+                "score": 29,
+                "raw_score": 29,
+                "evidence_level": "static_source",
+                "score_breakdown": [
+                    {
+                        "key": "static_origin_confidence",
+                        "points": 24,
+                        "reason": "静态来源分类置信度 0.95",
+                    }
+                ],
+                "next_action": "搜索 preference key",
+            },
+        ],
+    }
+
+    evidence.record_root_cause_ranking(graph, ranking)
+
+    method = next(
+        node for node in graph["nodes"].values()
+        if node.get("type") == "method"
+    )
+    assert method["root_cause_rank"] == 1
+    assert method["root_cause_score"] == 88
+    assert method["root_cause_evidence_level"] == "runtime_divergence"
+    assert "最早稳定值差异" in method["root_cause_reasons"][0]
+
+    origin = next(
+        node for node in graph["nodes"].values()
+        if node.get("type") == "state_origin"
+    )
+    assert origin["root_cause_rank"] == 2
+    assert origin["root_cause_score"] == 29
+
+
+def test_root_cause_hypothesis_verification_is_written_to_evidence():
+    graph = evidence.new_graph()
+    candidate = {
+        "candidate_type": "method",
+        "class": "com.example.Repo",
+        "method": "isVipEnabled",
+        "descriptor": "()Z",
+    }
+    comparison = {
+        "status": "internal_generation_supported",
+        "score_adjustment": 30,
+        "explanation": "入口可观测输入一致而输出不同",
+        "input_coverage_complete": True,
+        "differing_inputs": [],
+        "differing_outputs": [{"name": "return"}],
+    }
+
+    evidence.record_root_cause_hypothesis(
+        graph,
+        candidate,
+        comparison,
+    )
+
+    method = next(
+        node for node in graph["nodes"].values()
+        if node.get("type") == "method"
+    )
+    assert (
+        method["root_cause_hypothesis_status"]
+        == "internal_generation_supported"
+    )
+    assert method["root_cause_hypothesis_adjustment"] == 30
+    assert method["root_cause_hypothesis_differing_outputs"] == [
+        "return"
+    ]
+    assert any(
+        edge.get("relation") == "root_cause_hypothesis_verified"
+        and edge.get("status") == "internal_generation_supported"
+        for edge in graph["edges"]
+    )
+
+
+def test_empty_focus_returns_graph_slice():
+    graph = evidence.new_graph()
+    evidence.record_search(
+        graph,
+        "SecurityUtil",
+        "dex-sqlite-index",
+        [{"class": "Lcom/example/SecurityUtil;"}],
+    )
+
+    result = evidence.subgraph(graph, focus="", limit=20)
+    assert result["node_count"] == 2
+    assert len(result["nodes"]) == 2

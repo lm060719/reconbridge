@@ -61,61 +61,229 @@ class HookEntry : IXposedHookLoadPackage {
             log("[$pkg] 配置解析失败: $t")
             return
         }
-        // 全局详细日志开关：配置里 debug:true 才逐命中打日志
+
         traceVerbose = cfg.optBoolean("debug", false)
         vlog("[$pkg] 取到配置 ${cfgText.length} 字节 debug=$traceVerbose")
-        val targets = cfg.optJSONArray("targets") ?: return
 
-        // 已装 target id 集合（免重启热加时去重，只加不删）；线程安全供热加读线程用
-        val installedIds = java.util.Collections.synchronizedSet(HashSet<String>())
-        val installed = installTargets(lpparam, io, targets, installedIds)
-        if (installed > 0) log("[$pkg] 装上 $installed 个 java hook") else vlog("[$pkg] 无 java 目标")
+        val runtimeState = RuntimeStateStore(pkg)
+        val eventBus = RuntimeEventBus()
+        val contextRegistry = ContextRegistry(
+            packageName = pkg,
+            processName = lpparam.processName,
+        )
+        val lifecycleManager = LifecycleManager(
+            packageName = pkg,
+            contextRegistry = contextRegistry,
+            eventBus = eventBus,
+        )
+        val commandDispatcher = RuntimeCommandDispatcher(
+            packageName = pkg,
+            classLoader = lpparam.classLoader,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+            contextRuntime = contextRegistry,
+        )
 
-        // 免重启热加（P0-2）：声明可热加并监听 daemon 下发的新配置，收到时增量装新 target。
-        // classLoader/lpparam 随闭包持久化，进程活着就能随时追加 hook，无需 force-stop 重启。
-        io.enableHotReload { cfgText ->
-            try {
-                val newTargets = JSONObject(cfgText).optJSONArray("targets") ?: return@enableHotReload
-                val added = installTargets(lpparam, io, newTargets, installedIds)
-                if (added > 0) log("[$pkg] 热加装上 $added 个新 java hook")
-            } catch (t: Throwable) {
-                log("[$pkg] 热加解析/安装失败: $t")
-            }
+        val registry = HookRegistry(
+            packageName = pkg,
+            processName = lpparam.processName,
+            pid = Process.myPid(),
+            initialClassLoader = lpparam.classLoader,
+            installer = { target, loader ->
+                installRuntimeTarget(
+                    lpparam = lpparam,
+                    io = io,
+                    t = target,
+                    classLoader = loader,
+                    runtimeState = runtimeState,
+                    eventBus = eventBus,
+                    contextRuntime = contextRegistry,
+                )
+            },
+            onHookRemoved = { hookId ->
+                runtimeState.clearHook(hookId)
+                eventBus.clearOwner(hookId)
+            },
+        )
+
+        lateinit var watcher: ClassLoaderWatcher
+
+        fun publishRuntimeStatus()
+        {
+            val status = registry.snapshotJson()
+            status.put(
+                "class_loader_watch",
+                watcher.snapshotJson(),
+            )
+            status.put(
+                "runtime_state",
+                runtimeState.snapshotJson(),
+            )
+            status.put(
+                "event_bus",
+                eventBus.snapshotJson(),
+            )
+            status.put(
+                "context_runtime",
+                contextRegistry.snapshotJson(),
+            )
+            status.put(
+                "lifecycle_runtime",
+                lifecycleManager.snapshotJson(),
+            )
+            status.put("runtime_command_supported", true)
+            io.sendRuntimeStatus(status.toString())
+        }
+
+        fun afterDynamicResolution(
+            stage: String,
+            result: HookSyncResult,
+        )
+        {
+            logSyncResult(pkg, stage, result)
+            watcher.setPendingEnabled(registry.hasPending())
+            publishRuntimeStatus()
+        }
+
+        watcher = ClassLoaderWatcher(
+            shouldResolveClass = { className ->
+                registry.isPendingClass(className)
+            },
+            onLoaderAvailable = { loader, source ->
+                val sync = registry.onLoaderAvailable(
+                    loader,
+                    source,
+                )
+                afterDynamicResolution(
+                    "发现动态 ClassLoader",
+                    sync,
+                )
+            },
+            onClassLoaded = { loader, className ->
+                val sync = registry.onClassLoaded(
+                    loader,
+                    className,
+                )
+                afterDynamicResolution(
+                    "pending 类已加载",
+                    sync,
+                )
+            },
+        )
+        watcher.start()
+
+        val initialTargets = cfg.optJSONArray("targets") ?: JSONArray()
+        val initial = registry.reconcile(initialTargets)
+        logSyncResult(pkg, "初始同步", initial)
+
+        lifecycleManager.setStatusPublisher {
+            publishRuntimeStatus()
+        }
+        lifecycleManager.start()
+
+        watcher.setPendingEnabled(registry.hasPending())
+        publishRuntimeStatus()
+
+        // daemon 下发的是“完整期望配置”。每次 reload 都做 reconcile；
+        // 找不到类的 target 会进入 pending，并由 ClassLoaderWatcher 后续自动补装。
+        io.enableHotReload(
+            onReload = { newCfgText ->
+                try {
+                    val newCfg = JSONObject(newCfgText)
+                    traceVerbose = newCfg.optBoolean(
+                        "debug",
+                        traceVerbose,
+                    )
+                    val newTargets = newCfg.optJSONArray(
+                        "targets"
+                    ) ?: JSONArray()
+                    val sync = registry.reconcile(newTargets)
+                    logSyncResult(pkg, "实时同步", sync)
+                    watcher.setPendingEnabled(registry.hasPending())
+                    publishRuntimeStatus()
+                } catch (t: Throwable) {
+                    log("[$pkg] 实时配置同步失败: $t")
+                }
+            },
+            onCommand = { commandText ->
+                val ack = commandDispatcher.execute(commandText)
+                publishRuntimeStatus()
+                ack
+            },
+        )
+    }
+
+    private fun logSyncResult(
+        pkg: String,
+        stage: String,
+        result: HookSyncResult,
+    ) {
+        if (
+            result.added > 0 ||
+            result.replaced > 0 ||
+            result.removed > 0 ||
+            result.pending > 0 ||
+            result.failed > 0
+        ) {
+            log(
+                "[$pkg] $stage added=${result.added} replaced=${result.replaced} " +
+                    "removed=${result.removed} unchanged=${result.unchanged} " +
+                    "pending=${result.pending} failed=${result.failed}"
+            )
+        } else {
+            vlog("[$pkg] $stage 无变化 unchanged=${result.unchanged}")
+        }
+
+        for (error in result.errors) {
+            log("[$pkg] HookRegistry: $error")
         }
     }
 
-    /** 安装一批 java 目标，按 id 去重（已装的跳过——热加只加不删）。返回本次实际新装的方法数。 */
-    private fun installTargets(
+    /** 安装 Java 方法 Hook 或纯 Runtime 事件订阅 target。 */
+    private fun installRuntimeTarget(
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
-        targets: JSONArray,
-        installedIds: MutableSet<String>,
-    ): Int {
-        var installed = 0
-        for (i in 0 until targets.length()) {
-            val t = targets.optJSONObject(i) ?: continue
-            if (t.optString("kind", "native") != "java") continue  // native 目标由 M3 执行器负责
-            val id = t.optString("id", "j$i")
-            if (installedIds.contains(id)) continue                // 已装，去重
-            try {
-                val c = installJavaHook(lpparam, io, t)
-                if (c > 0) {
-                    installedIds.add(id)
-                    installed += c
-                }
-            } catch (th: Throwable) {
-                log("[${lpparam.packageName}] 目标 ${t.optString("class")}.${t.optString("method")} 安装失败: $th")
-            }
+        t: JSONObject,
+        classLoader: ClassLoader,
+        runtimeState: RuntimeStateStore,
+        eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
+    ): HookInstallResult {
+        return if (t.optString("kind", "java") == "runtime") {
+            installEventHandlers(
+                pkg = lpparam.packageName,
+                t = t,
+                classLoader = classLoader,
+                runtimeState = runtimeState,
+                eventBus = eventBus,
+                contextRuntime = contextRuntime,
+            )
+        } else {
+            installJavaHook(
+                lpparam = lpparam,
+                io = io,
+                t = t,
+                classLoader = classLoader,
+                runtimeState = runtimeState,
+                eventBus = eventBus,
+                contextRuntime = contextRuntime,
+            )
         }
-        return installed
     }
 
-    /** 按一个 java 目标解析类/方法/重载并挂 trace 回调，支持使用 using_strings 按字符串特征搜索定位方法。 */
+    /**
+     * 按一个 java 目标解析类/方法/重载并挂 trace 回调。
+     * 方法 Hook 安装成功后，再把同一 target 的 on_event/event_handlers 订阅附加到同一生命周期。
+     */
     private fun installJavaHook(
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
         t: JSONObject,
-    ): Int {
+        classLoader: ClassLoader,
+        runtimeState: RuntimeStateStore,
+        eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
+    ): HookInstallResult {
         val usingStrings = mutableListOf<String>()
         val usingArr = t.optJSONArray("using_strings")
             ?: t.optJSONObject("search")?.optJSONArray("using_strings")
@@ -123,76 +291,342 @@ class HookEntry : IXposedHookLoadPackage {
         if (usingArr != null) {
             for (k in 0 until usingArr.length()) {
                 val s = usingArr.optString(k)
-                if (s.isNotEmpty()) usingStrings.add(s)
+                if (s.isNotEmpty()) {
+                    usingStrings.add(s)
+                }
             }
         } else {
             val singleStr = t.optString("using_strings", "")
-            if (singleStr.isNotEmpty()) usingStrings.add(singleStr)
+            if (singleStr.isNotEmpty()) {
+                usingStrings.add(singleStr)
+            }
         }
 
-        if (usingStrings.isNotEmpty()) {
-            val classFilter = t.optString("class_name_match").ifEmpty { t.optString("class") }
-            val methodFilter = t.optString("method_name_match").ifEmpty { t.optString("method") }
-            val matches = DexStringSearcher.findMatches(lpparam, usingStrings, classFilter, methodFilter)
+        val base = if (usingStrings.isNotEmpty()) {
+            val classFilter = t.optString("class_name_match")
+                .ifEmpty { t.optString("class") }
+            val methodFilter = t.optString("method_name_match")
+                .ifEmpty { t.optString("method") }
+            val matches = DexStringSearcher.findMatches(
+                lpparam,
+                usingStrings,
+                classFilter,
+                methodFilter,
+            )
             if (matches.isEmpty()) {
-                log("[${lpparam.packageName}] using_strings $usingStrings 未查到匹配方法")
-                return 0
-            }
-            log("[${lpparam.packageName}] using_strings $usingStrings 查到 ${matches.size} 个匹配方法: ${matches.map { "${it.className}.${it.methodName}" }}")
-            var count = 0
-            for (m in matches) {
-                try {
-                    val subT = JSONObject(t.toString())
-                    subT.put("class", m.className)
-                    subT.put("method", m.methodName)
-                    if (!t.has("params")) {
-                        subT.put("params", JSONArray(m.paramTypes))
+                log(
+                    "[${lpparam.packageName}] using_strings " +
+                        "$usingStrings 未查到匹配方法"
+                )
+                HookInstallResult(emptyList(), emptyList())
+            } else {
+                log(
+                    "[${lpparam.packageName}] using_strings " +
+                        "$usingStrings 查到 ${matches.size} 个匹配方法"
+                )
+                val handles = mutableListOf<LiveHookHandle>()
+                val members = mutableListOf<String>()
+                for (m in matches) {
+                    try {
+                        val subT = JSONObject(t.toString())
+                        subT.put("class", m.className)
+                        subT.put("method", m.methodName)
+                        if (!t.has("params")) {
+                            subT.put(
+                                "params",
+                                JSONArray(m.paramTypes),
+                            )
+                        }
+                        val installed = installExplicitJavaHook(
+                            lpparam = lpparam,
+                            io = io,
+                            t = subT,
+                            cl = classLoader,
+                            runtimeState = runtimeState,
+                            eventBus = eventBus,
+                            contextRuntime = contextRuntime,
+                        )
+                        handles.addAll(installed.handles)
+                        members.addAll(installed.members)
+                    } catch (th: Throwable) {
+                        log(
+                            "[${lpparam.packageName}] 搜索挂钩 " +
+                                "${m.className}.${m.methodName} 失败: $th"
+                        )
                     }
-                    count += installExplicitJavaHook(lpparam, io, subT)
-                } catch (th: Throwable) {
-                    log("[${lpparam.packageName}] 搜索挂钩 ${m.className}.${m.methodName} 失败: $th")
                 }
+                HookInstallResult(handles, members)
             }
-            return count
+        } else {
+            installExplicitJavaHook(
+                lpparam = lpparam,
+                io = io,
+                t = t,
+                cl = classLoader,
+                runtimeState = runtimeState,
+                eventBus = eventBus,
+                contextRuntime = contextRuntime,
+            )
         }
 
-        return installExplicitJavaHook(lpparam, io, t)
+        if (base.handles.isEmpty()) {
+            return base
+        }
+
+        return attachEventHandlers(
+            base = base,
+            pkg = lpparam.packageName,
+            t = t,
+            classLoader = classLoader,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+            contextRuntime = contextRuntime,
+        )
     }
 
     private fun installExplicitJavaHook(
         lpparam: XC_LoadPackage.LoadPackageParam,
         io: InjectSocket,
         t: JSONObject,
-    ): Int {
-        val cl = lpparam.classLoader
+        cl: ClassLoader,
+        runtimeState: RuntimeStateStore,
+        eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
+    ): HookInstallResult {
         val className = t.optString("class")
-        if (className.isEmpty()) return 0
+        if (className.isEmpty()) {
+            return HookInstallResult(emptyList(), emptyList())
+        }
         val methodName = t.optString("method")
         val clazz = cl.loadClass(className)
-        val callback = TraceCallback(io, lpparam.packageName, cl, t)
+        val callback = TraceCallback(
+            io = io,
+            pkg = lpparam.packageName,
+            classLoader = cl,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+            contextRuntime = contextRuntime,
+            spec = t,
+        )
 
         val paramsSpec = t.optJSONArray("params")
 
         if (methodName == "<init>") {
             return if (paramsSpec != null) {
-                val ctor = clazz.getDeclaredConstructor(*resolveParams(cl, paramsSpec))
-                XposedBridge.hookMethod(ctor, callback)
-                1
+                val ctor = clazz.getDeclaredConstructor(
+                    *resolveParams(cl, paramsSpec)
+                )
+                val handle = XposedBridge.hookMethod(
+                    ctor,
+                    callback,
+                )
+                HookInstallResult(
+                    handles = listOf(
+                        XposedLiveHookHandle(handle)
+                    ),
+                    members = listOf(ctor.toString()),
+                )
             } else {
-                XposedBridge.hookAllConstructors(clazz, callback).size
+                val handles = XposedBridge.hookAllConstructors(
+                    clazz,
+                    callback,
+                ).map {
+                    XposedLiveHookHandle(it)
+                }
+                HookInstallResult(
+                    handles = handles,
+                    members = clazz.declaredConstructors
+                        .map { it.toString() },
+                )
             }
         }
 
-        if (methodName.isEmpty()) return 0
+        if (methodName.isEmpty()) {
+            return HookInstallResult(emptyList(), emptyList())
+        }
 
         return if (paramsSpec != null) {
-            val m = findMethodRecursive(clazz, methodName, resolveParams(cl, paramsSpec))
-                ?: throw NoSuchMethodException("$className.$methodName(指定参数)")
-            XposedBridge.hookMethod(m, callback)
-            1
+            val method = findMethodRecursive(
+                clazz,
+                methodName,
+                resolveParams(cl, paramsSpec),
+            ) ?: throw NoSuchMethodException(
+                "$className.$methodName(指定参数)"
+            )
+            val handle = XposedBridge.hookMethod(
+                method,
+                callback,
+            )
+            HookInstallResult(
+                handles = listOf(
+                    XposedLiveHookHandle(handle)
+                ),
+                members = listOf(method.toString()),
+            )
         } else {
-            XposedBridge.hookAllMethods(clazz, methodName, callback).size
+            val handles = XposedBridge.hookAllMethods(
+                clazz,
+                methodName,
+                callback,
+            ).map {
+                XposedLiveHookHandle(it)
+            }
+            val members = clazz.declaredMethods
+                .filter { it.name == methodName }
+                .map { it.toString() }
+            HookInstallResult(
+                handles = handles,
+                members = members,
+            )
         }
+    }
+
+    private fun attachEventHandlers(
+        base: HookInstallResult,
+        pkg: String,
+        t: JSONObject,
+        classLoader: ClassLoader,
+        runtimeState: RuntimeStateStore,
+        eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
+    ): HookInstallResult {
+        return try {
+            val eventPart = installEventHandlers(
+                pkg = pkg,
+                t = t,
+                classLoader = classLoader,
+                runtimeState = runtimeState,
+                eventBus = eventBus,
+                contextRuntime = contextRuntime,
+            )
+            HookInstallResult(
+                handles = base.handles + eventPart.handles,
+                members = base.members + eventPart.members,
+            )
+        } catch (t: Throwable) {
+            for (handle in base.handles.asReversed()) {
+                try {
+                    handle.unhook()
+                } catch (_: Throwable) {
+                }
+            }
+            throw t
+        }
+    }
+
+    private fun installEventHandlers(
+        pkg: String,
+        t: JSONObject,
+        classLoader: ClassLoader,
+        runtimeState: RuntimeStateStore,
+        eventBus: RuntimeEventBus,
+        contextRuntime: RuntimeContextProvider,
+    ): HookInstallResult {
+        val definitions = mutableListOf<JSONObject>()
+        val array = t.optJSONArray("on_event")
+            ?: t.optJSONArray("event_handlers")
+        if (array != null) {
+            for (index in 0 until array.length()) {
+                val row = array.optJSONObject(index)
+                if (row != null) {
+                    definitions.add(
+                        JSONObject(row.toString())
+                    )
+                }
+            }
+        } else {
+            val single = t.optJSONObject("on_event")
+                ?: t.optJSONObject("event_handler")
+            if (single != null) {
+                definitions.add(
+                    JSONObject(single.toString())
+                )
+            }
+        }
+
+        val lifecycleArray = t.optJSONArray("on_lifecycle")
+        if (lifecycleArray != null) {
+            for (index in 0 until lifecycleArray.length()) {
+                val row = lifecycleArray.optJSONObject(index)
+                    ?: continue
+                definitions.add(
+                    LifecycleTrigger.normalizeHandler(row)
+                )
+            }
+        } else {
+            val lifecycleSingle = t.optJSONObject("on_lifecycle")
+            if (lifecycleSingle != null) {
+                definitions.add(
+                    LifecycleTrigger.normalizeHandler(
+                        lifecycleSingle
+                    )
+                )
+            }
+        }
+
+        if (definitions.isEmpty()) {
+            return HookInstallResult(
+                emptyList(),
+                emptyList(),
+            )
+        }
+
+        val ownerId = t.optString("id", "runtime")
+        val handles = mutableListOf<LiveHookHandle>()
+        val members = mutableListOf<String>()
+
+        try {
+            for (handler in definitions) {
+                val eventName = handler.optString(
+                    "name",
+                    handler.optString("event"),
+                ).trim()
+                if (eventName.isEmpty()) {
+                    throw IllegalArgumentException(
+                        "on_event.name 不能为空"
+                    )
+                }
+
+                val handle = eventBus.subscribe(
+                    ownerHookId = ownerId,
+                    eventName = eventName,
+                ) { event ->
+                    if (!LifecycleTrigger.matches(handler, event)) {
+                        return@subscribe
+                    }
+
+                    val ctx = ActionContext(
+                        param = null,
+                        classLoader = classLoader,
+                        pkg = pkg,
+                        hookId = ownerId,
+                        runtimeState = runtimeState,
+                        eventBus = eventBus,
+                        runtimeEvent = event,
+                        contextRuntime = contextRuntime,
+                    )
+                    ActionExecutor.executeEventHandler(
+                        ctx,
+                        handler,
+                    )
+                }
+                handles.add(handle)
+                members.add("event:$eventName")
+            }
+        } catch (t: Throwable) {
+            for (handle in handles.asReversed()) {
+                try {
+                    handle.unhook()
+                } catch (_: Throwable) {
+                }
+            }
+            throw t
+        }
+
+        return HookInstallResult(
+            handles = handles,
+            members = members,
+        )
     }
 
     private fun resolveParams(cl: ClassLoader, arr: JSONArray): Array<Class<*>> =
@@ -233,6 +667,9 @@ private class TraceCallback(
     private val io: InjectSocket,
     private val pkg: String,
     private val classLoader: ClassLoader,
+    private val runtimeState: RuntimeStateStore,
+    private val eventBus: RuntimeEventBus,
+    private val contextRuntime: RuntimeContextProvider,
     spec: JSONObject,
 ) : XC_MethodHook() {
 
@@ -245,7 +682,15 @@ private class TraceCallback(
     private val tamper = action != null
 
     override fun beforeHookedMethod(param: MethodHookParam) {
-        val ctx = ActionContext(param, classLoader, pkg)
+        val ctx = ActionContext(
+            param = param,
+            classLoader = classLoader,
+            pkg = pkg,
+            hookId = id,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+            contextRuntime = contextRuntime,
+        )
         // 先按原始输入出事件，再改参数/执行 before pipeline
         if (whenPhase == "before" || whenPhase == "both") emit(param, "before", withRet = false)
         try {
@@ -256,7 +701,15 @@ private class TraceCallback(
     }
 
     override fun afterHookedMethod(param: MethodHookParam) {
-        val ctx = ActionContext(param, classLoader, pkg)
+        val ctx = ActionContext(
+            param = param,
+            classLoader = classLoader,
+            pkg = pkg,
+            hookId = id,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+            contextRuntime = contextRuntime,
+        )
         try {
             ActionExecutor.executeActions(ctx, action, "after")
         } catch (t: Throwable) {
@@ -500,7 +953,15 @@ private class TraceCallback(
      * @return 解析到的原始对象（可能为 null=字段本就是 null）；无法解析返回哨兵 MISSING。
      */
     private fun resolvePath(param: MethodHookParam, expr0: String): Any? {
-        val ctx = ActionContext(param, classLoader, pkg)
+        val ctx = ActionContext(
+            param = param,
+            classLoader = classLoader,
+            pkg = pkg,
+            hookId = id,
+            runtimeState = runtimeState,
+            eventBus = eventBus,
+            contextRuntime = contextRuntime,
+        )
         return ActionExecutor.resolvePath(ctx, expr0)
     }
 

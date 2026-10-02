@@ -72,6 +72,18 @@ class Settings:
         or ((INSTALL_ROOT.drive or PROJECT_ROOT.drive) + "/ReconBridgeTools")
     )
 
+    # 重型本地分析任务资源预算。默认每个任务最多 4 GiB，同时只跑 1 个，
+    # 避免 jadx / Ghidra / Androguard 在大 APK/so 上把整机内存吃满。
+    max_memory_mb: int = max(256, int(_env("RECONBRIDGE_MAX_MEMORY_MB", "4096") or "4096"))
+    heavy_max_parallel: int = max(1, int(_env("RECONBRIDGE_MAX_PARALLEL", "1") or "1"))
+    process_log_tail_kb: int = max(16, int(_env("RECONBRIDGE_LOG_TAIL_KB", "200") or "200"))
+
+    # 可按工具单独覆盖；未设置时继承全局 RECONBRIDGE_MAX_MEMORY_MB。
+    jadx_memory_mb: int = max(256, int(_env("RECONBRIDGE_JADX_MEMORY_MB", str(max_memory_mb)) or str(max_memory_mb)))
+    ghidra_memory_mb: int = max(256, int(_env("RECONBRIDGE_GHIDRA_MEMORY_MB", str(max_memory_mb)) or str(max_memory_mb)))
+    dexkit_memory_mb: int = max(256, int(_env("RECONBRIDGE_DEXKIT_MEMORY_MB", str(max_memory_mb)) or str(max_memory_mb)))
+    hermes_memory_mb: int = max(256, int(_env("RECONBRIDGE_HERMES_MEMORY_MB", str(max_memory_mb)) or str(max_memory_mb)))
+
     # 网络超时（秒）
     timeout: float = float(_env("RECONBRIDGE_TIMEOUT", "600") or "600")
 

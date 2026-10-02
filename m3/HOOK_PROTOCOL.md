@@ -6,7 +6,7 @@ PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并�
 - 目标：arm64-v8a，AAPCS64 调用约定（整型/指针参数走 x0–x7，返回值 x0）。
 - **参数/返回值只支持整型与指针寄存器（x0–x7 / x0）**；浮点参数（d0–d7）M3 不抓。
 - 注入时机：Zygisk 在 zygote fork 目标进程时注入。**配置在进程启动时读取**，对已运行的进程需重启该 App 才生效（可用 `restart:true` 让守护进程 `am force-stop` 触发重启）。
-- **免重启热加（P0-2，仅 M5 Java tracer）**：注入 socket 是双向的——tracer 握手后发 `'H'` 帧声明可热加并注册进连接表。`POST /hook` 若 `restart:false` 且目标进程在跑，守护进程向其下发 `'R'`(reload) 控制帧（payload=合并后的新配置），tracer 按 id 去重增量装新 target（只加不删）。响应含 `hot_injected`=热注入到的进程数。**native 层不发 `'H'`，不响应 `'R'`，故 native 目标仍需 `restart`。**配合 `mode:"append"` 可迭代追加 hook 而全程不 force-stop。
+- **M5 Java live reconcile（仅 LSPosed tracer）**：tracer 握手后发 `'H'` 声明支持实时同步，daemon 用 `'R'` 下发**完整期望配置**。进程内 HookRegistry 对 target id 做 add/remove/replace：同 ID 配置改变会 live replace，配置中消失会立即 `Unhook.unhook()`；tracer 再用 `'S'` 回报真实 HookRegistry 状态。响应仍含 `hot_injected`。**native M3 不发 `'H'/'S'`，不响应 `'R'`，故 native 目标仍需 restart/下次启动生效。**
 - 执行器 hook 点上限 64（够用；可编译期调整）。
 
 ## 下发：`POST /hook`
@@ -52,15 +52,18 @@ PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并�
 
 ## 移除：`POST /unhook`
 ```jsonc
-{"package": "com.target.app"}          // 移除该包全部 hook（删除配置文件）
+{"package": "com.target.app"}          // 移除该包全部期望 hook
 {"package": "com.target.app", "id": "enc1"}   // 只移除某个 hook 点
 ```
+对 **M5 Java Tracer**，daemon 会同步剩余完整配置（或 `targets:[]`），HookRegistry 立即执行 live unhook；对 **M3 native**，这里只更新配置，已在当前进程安装的 native hook 仍按原有重启语义处理。
 
-## 查询：`GET /hooks`
-返回当前已下发的 hook 配置（读 `/data/adb/reconbridge/hooks/*.json`）：
+## 查询：`GET /hooks` / `GET /runtime_status`
+`GET /hooks` 返回磁盘上的**期望 hook 配置**（读 `/data/adb/reconbridge/hooks/*.json`）：
 ```jsonc
 {"count":1,"hooks":[{"package":"com.target.app","targets":[...],"active_processes":[12300]}]}
 ```
+
+M5 Java Tracer 的真实进程状态改用 `GET /runtime_status?package=com.target.app`（MCP: `runtime_hook_status`），可看到每个连接进程的 pid、实际 installed id/member、`live_unhook` 和 `replace_supported`。
 
 ## 事件流：`GET /events`（SSE）与 `WS /events`
 hook 命中实时推流。每条事件：

@@ -383,6 +383,23 @@ static json nullable(const char* type, const json& def = nullptr) {
     return p;
 }
 
+static json any_json(const json& def = nullptr) {
+    json p = {{
+        "anyOf",
+        json::array({
+            json{{"type", "string"}},
+            json{{"type", "number"}},
+            json{{"type", "integer"}},
+            json{{"type", "boolean"}},
+            json{{"type", "object"}},
+            json{{"type", "array"}},
+            json{{"type", "null"}}
+        })
+    }};
+    if (!def.is_null()) p["default"] = def;
+    return p;
+}
+
 static json schema(json properties = json::object(), json required = json::array()) {
     json s = {{"type", "object"}, {"properties", std::move(properties)}};
     if (!required.empty()) s["required"] = std::move(required);
@@ -419,8 +436,98 @@ static const json& tools() {
              schema({{"bundle_path", prop("string")}, {"output_dir", prop("string", "")}}, {"bundle_path"})),
         tool("post_hook", "下发 native 或 Java hook 配置。",
              schema({{"config", prop("object")}}, {"config"})),
-        tool("list_hooks", "列出当前 hook 配置。", schema()),
-        tool("unhook", "移除某包全部 hook 或指定 hook id。",
+        tool("list_hooks", "列出当前磁盘上的期望 hook 配置。", schema()),
+        tool("runtime_hook_status", "查看运行中 M5 Runtime 的 Hook/ClassLoader/State/Event/Context 与 Runtime Command 能力。",
+             schema({{"package", prop("string", "")}})),
+        tool("runtime_state_get", "直接读取在线 M5 Runtime State，不创建临时 Hook。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"scope", prop("string", "process")}, {"hook_id", prop("string", "")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key"})),
+        tool("runtime_state_set", "直接写入在线 M5 Runtime State。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"value", any_json()}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key", "value"})),
+        tool("runtime_state_remove", "删除在线 M5 Runtime State 的一个 key 并返回旧值。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"scope", prop("string", "process")}, {"hook_id", prop("string", "")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key"})),
+        tool("runtime_state_increment", "原子增加在线 M5 Runtime State 数值。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"delta", prop("number", 1.0)}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key"})),
+        tool("runtime_state_append", "向在线 M5 Runtime State 列表追加 JSON 值。",
+             schema({{"package", prop("string")}, {"key", prop("string")},
+                     {"value", any_json()}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "key", "value"})),
+        tool("runtime_state_clear", "清空在线 M5 Runtime 的一个 State scope。",
+             schema({{"package", prop("string")}, {"scope", prop("string", "process")},
+                     {"hook_id", prop("string", "")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}},
+                    {"package"})),
+        tool("runtime_event_emit", "从手机 MCP 直接向在线 M5 Runtime EventBus 发事件。",
+             schema({{"package", prop("string")}, {"name", prop("string")},
+                     {"payload", nullable("object")}, {"source_hook", prop("string", "__remote__")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "name"})),
+        tool("runtime_context_status", "实时读取目标进程 Application Context Activity Lifecycle 状态。",
+             schema({{"package", prop("string")}, {"process", prop("string", "")},
+                     {"timeout_ms", prop("integer", 3000)}}, {"package"})),
+        tool("runtime_activity_action", "在当前 Activity 上直接执行 Action Pipeline，不创建 Java Hook。",
+             schema({{"package", prop("string")}, {"actions", prop("array")},
+                     {"process", prop("string", "")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "actions"})),
+        tool("runtime_program_install", "安装一个命名 Runtime Program。",
+             schema({{"package", prop("string")}, {"manifest", prop("object")},
+                     {"enable", prop("boolean", true)}, {"restart", prop("boolean", false)},
+                     {"timeout_ms", prop("integer", 3000)},
+                     {"approve_once", nullable("array")}},
+                    {"package", "manifest"})),
+        tool("runtime_program_replace", "替换 Runtime Program 并保留 rollback 历史。",
+             schema({{"package", prop("string")}, {"manifest", prop("object")},
+                     {"enable", nullable("boolean")}, {"expected_revision", prop("integer", 0)},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)},
+                     {"approve_once", nullable("array")}},
+                    {"package", "manifest"})),
+        tool("runtime_program_enable", "启用已安装 Runtime Program。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)},
+                     {"approve_once", nullable("array")}},
+                    {"package", "program_id"})),
+        tool("runtime_program_disable", "禁用 Runtime Program 并执行 state_cleanup。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "program_id"})),
+        tool("runtime_program_rollback", "回滚 Runtime Program 到上一份 manifest。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"restart", prop("boolean", false)}, {"timeout_ms", prop("integer", 3000)},
+                     {"approve_once", nullable("array")}},
+                    {"package", "program_id"})),
+        tool("runtime_program_status", "查看 Runtime Program 版本、启用状态和 rollback 深度。",
+             schema({{"package", prop("string")}, {"program_id", prop("string", "")}},
+                    {"package"})),
+        tool("runtime_program_policy_status", "查看设备端 Runtime Program 权限策略与每个 Program 的有效状态。",
+             schema({{"package", prop("string")}}, {"package"})),
+        tool("runtime_program_policy_set", "设置设备端 Runtime Program 权限 allow/ask/deny 策略；收紧会立即执行。",
+             schema({{"package", prop("string")}, {"default_action", prop("string", "")},
+                     {"permissions", nullable("object")}, {"clear_approvals", prop("boolean", false)},
+                     {"timeout_ms", prop("integer", 3000)}}, {"package"})),
+        tool("runtime_program_approve", "持久批准一个 Program 的 ask 权限。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"permissions", prop("array")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "program_id", "permissions"})),
+        tool("runtime_program_revoke_approval", "撤销 Program 的持久权限批准。",
+             schema({{"package", prop("string")}, {"program_id", prop("string")},
+                     {"permissions", prop("array")}, {"timeout_ms", prop("integer", 3000)}},
+                    {"package", "program_id", "permissions"})),
+        tool("unhook", "移除某包全部 hook 或指定 hook id；运行中 M5 会立即 live unhook。",
              schema({{"package", prop("string")}, {"hook_id", prop("string", "")}}, {"package"})),
         tool("collect_events", "收集 hook 命中事件，支持最近事件补捞与早停。",
              schema({{"seconds", prop("number", 10.0)}, {"max_events", prop("integer", 200)},
@@ -458,7 +565,8 @@ static const json& tools() {
                      {"trace", prop("boolean", true)}, {"capture_args", nullable("array")},
                      {"this", prop("string", "class")}, {"when", prop("string", "after")},
                      {"hook_id", prop("string", "")}, {"debug", prop("boolean", false)},
-                     {"restart", prop("boolean", true)}, {"seconds", prop("number", 0.0)},
+                     {"restart", prop("boolean", true)}, {"hot", prop("boolean", false)},
+                     {"seconds", prop("number", 0.0)},
                      {"max_events", prop("integer", 100)}}, {"package", "class_name", "method"})),
         tool("dump_dex", "下发内存 DEX dump hook。",
              schema({{"package", prop("string")}, {"symbol", prop("string", "")},
@@ -722,6 +830,187 @@ static json invoke_tool(const std::string& name, const json& a) {
         return http_post("/hook", cfg);
     }
     if (name == "list_hooks") return http_get("/hooks");
+    if (name == "runtime_hook_status") {
+        std::string pkg = a.value("package", "");
+        if (!pkg.empty()) return http_get("/runtime_status", {{"package", pkg}});
+        return http_get("/runtime_status");
+    }
+    if (
+        name == "runtime_state_get" ||
+        name == "runtime_state_set" ||
+        name == "runtime_state_remove" ||
+        name == "runtime_state_increment" ||
+        name == "runtime_state_append" ||
+        name == "runtime_state_clear" ||
+        name == "runtime_event_emit" ||
+        name == "runtime_context_status" ||
+        name == "runtime_activity_action"
+    ) {
+        json command = json::object();
+        if (name == "runtime_state_get") {
+            command = {
+                {"op", "state_get"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_state_set") {
+            command = {
+                {"op", "state_set"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")},
+                {"value", a.contains("value") ? a["value"] : json(nullptr)}
+            };
+        } else if (name == "runtime_state_remove") {
+            command = {
+                {"op", "state_remove"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_state_increment") {
+            command = {
+                {"op", "state_increment"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"delta", a.value("delta", 1.0)},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_state_append") {
+            command = {
+                {"op", "state_append"},
+                {"scope", a.value("scope", "process")},
+                {"key", a.value("key", "")},
+                {"hook_id", a.value("hook_id", "")},
+                {"value", a.contains("value") ? a["value"] : json(nullptr)}
+            };
+        } else if (name == "runtime_state_clear") {
+            command = {
+                {"op", "state_clear"},
+                {"scope", a.value("scope", "process")},
+                {"hook_id", a.value("hook_id", "")}
+            };
+        } else if (name == "runtime_event_emit") {
+            command = {
+                {"op", "event_emit"},
+                {"name", a.value("name", "")},
+                {"payload", a.contains("payload") && !a["payload"].is_null()
+                    ? a["payload"] : json::object()},
+                {"source_hook", a.value("source_hook", "__remote__")}
+            };
+        } else if (name == "runtime_context_status") {
+            command = {{"op", "context_status"}};
+        } else {
+            command = {
+                {"op", "activity_action"},
+                {"actions", a.value("actions", json::array())}
+            };
+        }
+
+        json body = {
+            {"package", a.value("package", "")},
+            {"timeout_ms", a.value("timeout_ms", 3000)},
+            {"command", command}
+        };
+        const std::string process = a.value("process", "");
+        if (!process.empty()) body["process"] = process;
+        return http_post("/runtime_command", body);
+    }
+    if (
+        name == "runtime_program_install" ||
+        name == "runtime_program_replace"
+    ) {
+        json body = {
+            {"package", a.value("package", "")},
+            {"manifest", a.value("manifest", json::object())},
+            {"mode", name == "runtime_program_install"
+                ? "install"
+                : "replace"},
+            {"restart", a.value("restart", false)},
+            {"timeout_ms", a.value("timeout_ms", 3000)}
+        };
+        if (a.contains("enable") && !a["enable"].is_null())
+            body["enable"] = a["enable"];
+        if (name == "runtime_program_install" &&
+            !body.contains("enable"))
+            body["enable"] = true;
+        const int expected = a.value("expected_revision", 0);
+        if (expected > 0)
+            body["expected_revision"] = expected;
+        if (a.contains("approve_once") &&
+            a["approve_once"].is_array())
+            body["approve_once"] = a["approve_once"];
+        return http_post("/runtime_program/install", body);
+    }
+    if (
+        name == "runtime_program_enable" ||
+        name == "runtime_program_disable" ||
+        name == "runtime_program_rollback"
+    ) {
+        json body = {
+            {"package", a.value("package", "")},
+            {"id", a.value("program_id", "")},
+            {"restart", a.value("restart", false)},
+            {"timeout_ms", a.value("timeout_ms", 3000)}
+        };
+        if (a.contains("approve_once") &&
+            a["approve_once"].is_array())
+            body["approve_once"] = a["approve_once"];
+        std::string endpoint;
+        if (name == "runtime_program_enable")
+            endpoint = "/runtime_program/enable";
+        else if (name == "runtime_program_disable")
+            endpoint = "/runtime_program/disable";
+        else
+            endpoint = "/runtime_program/rollback";
+        return http_post(endpoint, body);
+    }
+    if (name == "runtime_program_status") {
+        Params params = {
+            {"package", a.value("package", "")}
+        };
+        const std::string program_id =
+            a.value("program_id", "");
+        if (!program_id.empty())
+            params.emplace("id", program_id);
+        return http_get("/runtime_programs", params);
+    }
+    if (name == "runtime_program_policy_status") {
+        return http_get(
+            "/runtime_program/policy",
+            {{"package", a.value("package", "")}});
+    }
+    if (name == "runtime_program_policy_set") {
+        json body = {
+            {"package", a.value("package", "")},
+            {"clear_approvals", a.value("clear_approvals", false)},
+            {"timeout_ms", a.value("timeout_ms", 3000)}
+        };
+        const std::string action =
+            a.value("default_action", "");
+        if (!action.empty())
+            body["default"] = action;
+        if (a.contains("permissions") &&
+            a["permissions"].is_object())
+            body["permissions"] = a["permissions"];
+        return http_post(
+            "/runtime_program/policy",
+            body);
+    }
+    if (name == "runtime_program_approve" ||
+        name == "runtime_program_revoke_approval") {
+        json body = {
+            {"package", a.value("package", "")},
+            {"id", a.value("program_id", "")},
+            {"permissions", a.value("permissions", json::array())},
+            {"revoke", name == "runtime_program_revoke_approval"},
+            {"timeout_ms", a.value("timeout_ms", 3000)}
+        };
+        return http_post(
+            "/runtime_program/approval",
+            body);
+    }
     if (name == "unhook") {
         json body = {{"package", a.value("package", "")}};
         if (!a.value("hook_id", "").empty()) body["id"] = a["hook_id"];
@@ -823,6 +1112,7 @@ static json invoke_tool(const std::string& name, const json& a) {
         if(a.contains("after_actions")&&!a["after_actions"].is_null()) action["after_actions"]=a["after_actions"];
         if(a.value("skip_original",false)) action["skip_original"]=true; if(!action.empty()) target["action"]=action;
         json cfg={{"package",a.value("package","")},{"restart",a.value("restart",true)},{"debug",a.value("debug",false)},{"targets",json::array({target})}};
+        if(a.value("hot",false)){cfg["restart"]=false;cfg["mode"]="append";}
         json posted=http_post("/hook",cfg), result={{"posted",posted}}; if(a.value("seconds",0.0)>0){json ev=collect_events(a);result["count"]=ev["count"];result["seconds"]=a["seconds"];result["events"]=ev["events"];} return result;
     }
     if (name == "dump_dex") {

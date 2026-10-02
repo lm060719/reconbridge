@@ -155,18 +155,1135 @@ patch_java(package, class_name, method,
 下发一条带 `action` 的 java target（篡改**持久生效**直到 `unhook`）。`seconds>0` 时顺便采集命中。
 常见用法：换某 String 参数、让校验方法恒返回 true（`replace_return` + `skip_original`）、拦掉某调用。
 
-## 移除：`POST /unhook`（复用 M3）
-`{"package":"com.miui.voiceassist"}` 删整包配置；带 `"id"` 只删某目标。模块下次进程启动即不再挂。
+## 实时配置同步 / 移除
+
+M5 Tracer 现在使用进程内 `HookRegistry` 保存每个 target id 对应的 LSPosed `Unhook` handle。
+daemon 下发的配置被视为“完整期望状态”，运行中收到新配置后会执行 reconcile：
+
+- 新 id → live install；
+- 同 id 且配置未变 → 保持；
+- 同 id 但配置改变 → **先装新 Hook，成功后再卸载旧 Hook**，避免 replace 失败导致已有能力消失；
+- 配置中消失的 id → 立即调用 `Unhook.unhook()`；
+- `targets:[]` → 清空当前进程全部 M5 Java Hook。
+
+因此 `POST /unhook` 对运行中的 M5 Tracer 已经是 **live unhook**：
+
+```json
+{"package":"com.miui.voiceassist"}
+{"package":"com.miui.voiceassist","id":"sendStream"}
+```
+
+无需再 force-stop 才能恢复。若目标进程未运行，则只更新磁盘期望配置，下次启动自然不会再安装。
+
+> **Phase 6 之后的边界**：普通 `POST /unhook` / MCP `unhook` 只管理手工 Hook。已启用 Runtime Program 的物化 targets 会自动重新加入最终期望配置；要停 Program 必须调用 `runtime_program_disable`。直接尝试 unhook `rp:<program>:<target>` 会返回冲突提示。
+
+查询分两层：
+
+- `GET /hooks` / MCP `list_hooks`：磁盘上的**期望配置**；
+- `GET /runtime_status?package=...` / MCP `runtime_hook_status`：运行中 Tracer 的**完整 M5 Runtime 状态**，包含 HookRegistry / ClassLoader、Runtime State / Event Bus，以及 Context / Lifecycle Runtime。
+
+## 远程 Runtime Command（Runtime Phase 5）
+
+Phase 5 复用现有 `@reconbridge_inject` 双向 socket，不再通过“临时 Hook”间接操作 Runtime：
+
+```text
+Tracer -> K                 # 声明支持 Runtime Command
+daemon -> C + JSON          # 下发命令，带 request_id
+Tracer -> A + JSON          # Ack，带同一个 request_id
+```
+
+daemon 暴露 `POST /runtime_command`，PC / 手机 MCP 提供对应高层工具：
+
+- `runtime_state_get`
+- `runtime_state_set`
+- `runtime_state_remove`
+- `runtime_state_increment`
+- `runtime_state_append`
+- `runtime_state_clear`
+- `runtime_event_emit`
+- `runtime_context_status`
+- `runtime_activity_action`
+
+示例：
+
+```text
+runtime_state_set("com.target.app", key="debug", value=true)
+runtime_state_increment("com.target.app", key="hits", delta=1)
+runtime_state_append("com.target.app", key="history", value={"page":"vip"})
+runtime_state_remove("com.target.app", key="debug")
+
+runtime_event_emit(
+    "com.target.app",
+    name="debug.toggle",
+    payload={"enabled": true}
+)
+
+runtime_context_status("com.target.app")
+
+runtime_activity_action(
+    "com.target.app",
+    actions=[
+        {"action":"call_method","target":"activity","method":"finish"}
+    ]
+)
+```
+
+State 的远程 scope 支持 `process/package/hook`。远程命令**不支持 thread scope**：socket command 线程的 ThreadLocal 不能代表真实 Hook 业务线程。hook scope 必须传 `hook_id`。
+
+多进程 App 未指定 `process` 时，daemon 会把命令并行发给该包所有在线且声明 `K` 能力的 Tracer，并返回 `results[]`；需要只操作主进程或 `:service` 时显式传完整 process name。
+
+`activity_action` 直接复用现有 Action Pipeline；若当前有真实 Android Activity，会把动作调度到主线程并等待 Ack。没有当前 Activity 时明确失败，不会偷偷回退 application context。HTTP `timeout_ms` 会被限制在 200–10000ms。
+
+Runtime Command 不修改 `hooks/<pkg>.json`，也不创建临时 Hook，因此适合交互式调试、状态开关、远程触发 Event Bus 和当前 Activity 操作。Tracer 每次命令后会重新发布 runtime status，便于 `runtime_hook_status` 看到最新 State/Event/Context 状态。
+
+## Runtime Program / Module Manifest（Runtime Phase 6）
+
+Phase 6 把一组 Java/Runtime targets、State 初始化和模块元数据打包成一个**命名 Runtime Program**。Program 持久化在设备端 daemon：
+
+```text
+/data/adb/reconbridge/runtime_programs/<package>/<program_id>.json
+```
+
+manifest 示例：
+
+```jsonc
+{
+  "id": "vip_debug",
+  "name": "VIP 调试模块",
+  "version": "1.0.0",
+  "description": "把会员状态和页面行为组合成一个可启停 Runtime Program",
+
+  "targets": [
+    {
+      "id": "vip_source",
+      "kind": "java",
+      "class": "com.target.UserRepo",
+      "method": "refreshVip",
+      "capture": {"when": "none"},
+      "action": {
+        "after_actions": [
+          {
+            "action": "emit_event",
+            "name": "vip.changed",
+            "payload": {"vip": "${ret}"}
+          }
+        ]
+      }
+    },
+    {
+      "id": "vip_listener",
+      "kind": "runtime",
+      "on_event": {
+        "name": "vip.changed",
+        "actions": [
+          {
+            "action": "set_state",
+            "scope": "process",
+            "key": "last_vip",
+            "value": "${event.vip}"
+          }
+        ]
+      }
+    }
+  ],
+
+  "state_init": [
+    {
+      "scope": "process",
+      "key": "vip_program_enabled",
+      "value": true
+    }
+  ],
+
+  "state_cleanup": [
+    {
+      "scope": "process",
+      "key": "vip_program_enabled"
+    }
+  ]
+}
+```
+
+对应 MCP：
+
+```text
+runtime_program_install(package, manifest)
+runtime_program_replace(package, manifest, expected_revision=...)
+runtime_program_enable(package, program_id)
+runtime_program_disable(package, program_id)
+runtime_program_rollback(package, program_id)
+runtime_program_status(package, program_id="")
+```
+
+### Target 命名空间
+
+manifest 内的 target id 是 Program 局部 id。daemon 物化到 HookRegistry 时自动改成：
+
+```text
+rp:<program_id>:<local_target_id>
+```
+
+例如：
+
+```text
+vip_source
+→ rp:vip_debug:vip_source
+```
+
+因此不同 Program 都可以拥有 `id:"listener"`，不会互相覆盖。物化 target 还带 `__reconbridge_program / __reconbridge_local_id / __reconbridge_program_revision` 元数据，便于状态与排错。
+
+普通 `post_hook/unhook` 只管理手工 Hook；已启用 Program targets 会在最终期望配置中自动重新加入。直接对 `rp:<program>:<target>` 调 `unhook` 会被拒绝，应该使用 `runtime_program_disable` 或 `runtime_program_replace`。
+
+### state_init / state_cleanup
+
+Phase 6 的 Program State 声明目前支持 `process/package` scope。
+
+`state_init` 有两层保证：
+
+1. Program install/enable/replace/rollback 后，如果目标 Runtime 在线，daemon 立即通过 Phase 5 Runtime Command 执行 `state_set`；
+2. daemon 还会自动生成一个 Program 私有 bootstrap target，在未来进程启动时监听 `lifecycle.application_attached` 再执行同一批初始化。
+
+因此 `state_init` 不会只在安装当下有效。对应 bootstrap id：
+
+```text
+rp:<program_id>:__bootstrap
+```
+
+`state_cleanup` 在 disable/replace/rollback 时对在线 Runtime 执行 `state_remove`。进程未在线时不会报 Program 安装失败；持久化 manifest 和未来启动 bootstrap 仍然有效。
+
+### revision / replace / rollback
+
+每个 Program 有单调递增的 `revision`。同 id 更新使用 `runtime_program_replace`，旧 manifest 会进入最多 **5 层**历史。
+
+```text
+revision 1   install v1
+revision 2   replace v2
+revision 3   replace v3
+revision 4   rollback → 恢复 v2 manifest
+```
+
+rollback 会消费最近一层历史，但 revision 继续递增，不会倒退。这样 PC/手机两端可以用 `expected_revision` 做乐观并发检查，避免覆盖另一端刚写入的 Program。
+
+`runtime_program_status` 会返回：
+- 当前 revision / enabled；
+- name / version / description；
+- target/state_init/state_cleanup 数量；
+- history_depth；
+- effective_target_ids；
+- 原始 manifest。
+
+Program disable 只移除该 Program 的物化 targets，并保留 manifest/history，所以之后可以无重装再次 enable。
+
+## Runtime Program Package / 签名与权限（Runtime Phase 7）
+
+Phase 7 在 Phase 6 Program 之上增加可移植的 `.rbprog.json` 签名包。签名与信任管理由 **PC MCP** 完成，使用 Ed25519；Android daemon 不依赖 OpenSSL/libsodium，但会独立重新扫描 manifest 权限，防止绕过 PC 后少声明危险能力。
+
+PC MCP：
+
+```text
+runtime_program_export(package, program_id, signer="default", allowed_packages=[...])
+runtime_program_verify_package(bundle_or_path, target_package="", require_trusted=False)
+runtime_program_import(package, bundle_or_path, mode="install", allow_untrusted=False)
+runtime_program_trust_signer(public_key_b64, label="")
+runtime_program_signer_status()
+```
+
+首次 export 某个 signer 名称时，PC 会在本地工作目录下生成 Ed25519 keypair：
+
+```text
+<workdir>/.runtime_program_security/signers/<name>.json
+```
+
+私钥只保存在 PC 本地；导出包仅携带 public key、key_id 和 detached signature。本机自己生成的 signer 会自动加入本机 trusted signer 列表。分享给另一台 PC 后，接收端应先检查公钥指纹，再显式调用 `runtime_program_trust_signer`。
+
+签名包核心结构：
+
+```jsonc
+{
+  "format": "reconbridge.runtime-program-package",
+  "schema": 1,
+  "exported_at": 0,
+  "program": {
+    "id": "vip_debug",
+    "source_package": "com.example.app",
+    "source_revision": 3,
+    "enabled": true,
+    "manifest": { ... }
+  },
+  "allowed_packages": ["com.example.app"],
+  "permissions": ["hook.java", "state.write"],
+  "payload_sha256": "...",
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "...",
+    "public_key_b64": "...",
+    "signature_b64": "..."
+  }
+}
+```
+
+验签顺序：
+
+1. 校验 format/schema；
+2. 重新扫描 manifest 所需权限；
+3. 校验 package.permissions 与 manifest.permissions 一致；
+4. 校验目标 package 在签名覆盖的 `allowed_packages` 内（`"*"` 表示任意包）；
+5. 重新计算 canonical payload SHA-256；
+6. 校验 key_id 与 public key；
+7. Ed25519 验签；
+8. 默认要求 signer 已在本机 trusted signer 列表。
+
+`allow_untrusted=true` **只跳过“公钥是否已信任”这一步**，不会跳过 SHA-256、Ed25519、allowed_packages 或权限校验。
+
+当前权限名：
+
+| permission | 含义 |
+|---|---|
+| `hook.java` | 安装 Java/Xposed Hook |
+| `hook.tamper` | 修改参数/返回值、skip original |
+| `runtime.event` | 发送/订阅 Runtime Event |
+| `runtime.lifecycle` | Lifecycle trigger |
+| `state.write` | 修改 Runtime State |
+| `java.call` | 主动调用 Java 方法 |
+| `java.field_write` | 修改字段/对象路径 |
+| `java.construct` | 构造 Java 对象 |
+| `code.eval_js` | 执行 Rhino JS |
+| `code.eval_dex` | 动态加载/执行 DEX |
+| `shell.exec` | 执行 shell |
+| `shell.root` | 请求 root shell |
+| `activity.access` | 直接操作当前 Activity |
+
+**两层权限检查**：
+
+- PC 签名包要求 `manifest.permissions` 显式覆盖扫描到的全部能力；少声明直接拒绝签名包导入。
+- daemon 的 `runtime_program_install/replace` 也会再次扫描。显式 permissions 少声明会返回错误；Phase 6 旧 manifest 没有 permissions 时，为兼容会自动推导并保存 `permissions_inferred=true`。
+
+因此直接绕过 PC 调 daemon 也不能用“低权限声明”隐藏 `eval_dex / root shell / 字段修改` 等能力。
+
+> 签名包操作目前刻意只放在 PC MCP：私钥和 signer trust store 不进入 Android 设备。手机 MCP 仍可管理已安装的 Phase 6 Program，但不会持有或导出签名私钥。
+
+## Runtime Program Permission Policy（Runtime Phase 8）
+
+Phase 8 把 Phase 7 的“权限声明”升级为**设备侧权限策略与运行时强制执行**。签名可信只说明包没有被篡改、signer 被信任；是否允许模块真正启用，由目标设备自己的 policy 决定。
+
+设备按 package 持久化策略，默认值为：
+
+```json
+{
+  "default": "allow",
+  "permissions": {}
+}
+```
+
+默认 `allow` 是为了兼容已经存在的 Phase 6/7 Program；管理员可以逐项覆盖成：
+
+- `allow`：无需额外审批；
+- `ask`：必须有当前 revision 批准或 Program 持久批准；
+- `deny`：无论签名、一次批准、持久批准如何都不能启用。
+
+例如：
+
+```text
+runtime_program_policy_set(
+    "com.example.app",
+    default_action="allow",
+    permissions={
+        "shell.root": "deny",
+        "code.eval_dex": "ask",
+        "java.field_write": "ask"
+    }
+)
+```
+
+策略顺序：
+
+```text
+deny
+  > ask + approval
+  > allow
+```
+
+Program 的 install / replace / enable / rollback 都会在写入或启用之前经过同一个 policy gate。若命中 deny，返回 403；若命中 ask 且未批准，返回 409，并在 `policy.approval_required` 给出需要批准的权限。
+
+### 当前 revision 一次批准
+
+`approve_once=[...]` 表示“批准当前 revision 的这次激活”。批准会写入 Program 记录的 `revision_approvals`，因此目标 App 重启后仍可继续运行当前 revision；但：
+
+- disable 会清空 revision_approvals；
+- replace 进入新 revision 后必须重新批准；
+- rollback 产生新的 revision，也必须重新批准；
+- `clear_approvals=true` 会同时清除持久批准与 revision 批准。
+
+示例：
+
+```text
+runtime_program_enable(
+    "com.example.app",
+    "vip_debug",
+    approve_once=["code.eval_dex"]
+)
+```
+
+`approve_once` 只能批准 manifest 实际请求的权限；传入未请求权限会被拒绝。
+
+### Program 持久批准
+
+```text
+runtime_program_approve(
+    "com.example.app",
+    "vip_debug",
+    ["code.eval_dex"]
+)
+
+runtime_program_revoke_approval(
+    "com.example.app",
+    "vip_debug",
+    ["code.eval_dex"]
+)
+```
+
+持久批准保存在设备 policy store 中，跨 revision 生效，但永远不能覆盖 deny。撤销批准后，如果当前 enabled Program 依赖该批准，daemon 会立即重新物化配置并 live disable/cleanup。
+
+### 策略收紧即时执行
+
+修改策略不是“下次启动才生效”。daemon 会立即扫描全部 enabled Program：
+
+```text
+policy_set
+↓
+重新评估每个 Program
+↓
+ask 未批准 / deny
+↓
+enabled=false
+↓
+live reconcile
+↓
+state_cleanup
+```
+
+同时 `compose_hook_config_with_runtime_programs` 每次物化都会再次执行 policy evaluation，所以即使手工修改持久化 Program JSON，把 `enabled` 改回 true，也不会绕过策略。
+
+`runtime_program_status` 现在区分：
+
+- `enabled`：Program 记录想要启用；
+- `effective_enabled`：当前策略下是否真的允许运行；
+- `declared_target_ids`：manifest 声明的 target；
+- `effective_target_ids`：当前实际可物化的 target；
+- `policy.decision`：allow / ask / deny；
+- `policy.approval_required` / `policy.denied`：具体原因。
+
+设备 policy 文件保存在：
+
+```text
+/data/adb/reconbridge/runtime_program_policies/<package>.json
+```
+
+> Phase 8 策略只约束 **Runtime Program**。手工 `trace_java/patch_java/post_hook` 和直接 Runtime Command 仍属于开发/调试通道，不受 Program policy 管理。
+
+## Runtime State + Event Bus（Runtime Phase 3）
+
+Phase 3 让不同 Hook 不再彼此独立。每个目标 App **进程**拥有一份 `RuntimeStateStore` 和 `RuntimeEventBus`，Java Hook、动态 ClassLoader 后补装 Hook、以及纯事件 target 都共享它们。
+
+### Runtime State
+
+State 支持四种作用域：
+
+| scope | 生命周期 / 语义 |
+|---|---|
+| `process` | 当前 Android 进程长期共享；所有 Hook 可读写 |
+| `package` | 当前实现同样是**进程内**包级状态；多进程 App 不会自动跨进程同步 |
+| `hook` | 按 target `id` 隔离；真正 remove/unhook 时自动清理；同 ID live replace 会保留 |
+| `thread` | `ThreadLocal`；只在当前线程可见，不在 runtime status 中枚举具体线程值 |
+
+Action Pipeline 新增：
+
+```jsonc
+{
+  "before_actions": [
+    {
+      "action": "set_state",
+      "scope": "process",
+      "key": "current_user",
+      "value": "${args[0]}"
+    },
+    {
+      "action": "get_state",
+      "scope": "process",
+      "key": "current_user",
+      "save_to": "$user"
+    },
+    {
+      "action": "increment_state",
+      "scope": "hook",
+      "key": "hits",
+      "delta": 1,
+      "save_to": "$count"
+    },
+    {
+      "action": "append_state",
+      "scope": "package",
+      "key": "recent_users",
+      "value": "${args[0]}"
+    },
+    {
+      "action": "remove_state",
+      "scope": "process",
+      "key": "old_key"
+    },
+    {
+      "action": "clear_state",
+      "scope": "thread"
+    }
+  ]
+}
+```
+
+`increment_state` 和 `append_state` 在单个 scope map 内原子执行；多个 Hook 线程同时命中不会因为简单的 get→set 竞争而丢计数。
+
+默认容量保护：
+
+- 每个长期 scope 最多 **256 keys**，按 LRU 淘汰；
+- 最多 **128 个 hook scope**；
+- `append_state` 每个列表最多 **128 项**，超出从最旧元素开始移除；
+- State 可以保存真实 Java 对象引用，因此对象会一直存活到被覆盖、删除、LRU 淘汰或进程结束。需要长期保存大对象时应主动控制数量。
+
+现有统一表达式系统直接支持：
+
+```text
+state.process.current_user
+state.package.vip_enabled
+state.hook.hits
+state.thread.request_id
+```
+
+所以可以用于：
+
+```jsonc
+{
+  "condition": {
+    "path": "state.process.vip_enabled",
+    "op": "eq",
+    "value": true
+  }
+}
+```
+
+以及模板：
+
+```jsonc
+{
+  "action": "call_method",
+  "target": "class:com.foo.Logger",
+  "method": "log",
+  "args": [
+    {"value": "user=${state.process.current_user}, hits=${state.hook.hits}"}
+  ]
+}
+```
+
+`mutate/set_path` 也可直接写 `state.*` 路径。
+
+Rhino JS 中额外注入：
+
+```javascript
+$state.process
+$state.package
+$state.hook
+$state.thread
+$stateStore
+$event
+```
+
+其中 `$state` 是当前 Hook 的状态视图；`$stateStore` 是底层 Store 对象。
+
+### Event Bus：Hook → Event → Action
+
+Java Hook 可以在 before/after Action Pipeline 中发事件：
+
+```jsonc
+{
+  "action": "emit_event",
+  "name": "vip_changed",
+  "payload": {
+    "vip": "${ret}",
+    "user": "${state.process.current_user}"
+  },
+  "save_to": "$listener_count"
+}
+```
+
+payload 会递归解析模板、path/value 对象和数组，不是只做字符串替换。
+
+事件监听有两种配置方式。
+
+**1. 纯 Runtime target** —— 不依赖某个 Java 方法，只负责监听事件：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "vip_state_listener",
+  "on_event": [
+    {
+      "name": "vip_changed",
+      "condition": {
+        "path": "event.vip",
+        "op": "eq",
+        "value": true
+      },
+      "actions": [
+        {
+          "action": "set_state",
+          "scope": "process",
+          "key": "vip_enabled",
+          "value": "${event.vip}"
+        },
+        {
+          "action": "increment_state",
+          "scope": "process",
+          "key": "vip_change_count"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**2. Java target 自带监听器**：
+
+```jsonc
+{
+  "kind": "java",
+  "id": "user_runtime",
+  "class": "com.foo.UserManager",
+  "method": "refresh",
+  "action": {
+    "after_actions": [
+      {
+        "action": "emit_event",
+        "name": "user_refreshed",
+        "payload": {"user": "${args[0]}"}
+      }
+    ]
+  },
+  "on_event": {
+    "name": "vip_changed",
+    "actions": [
+      {
+        "action": "call_method",
+        "target": "class:com.foo.Logger",
+        "method": "log",
+        "args": [{"value": "vip=${event.vip}"}]
+      }
+    ]
+  }
+}
+```
+
+`on_event` / `event_handlers` 可为单个对象或数组。
+
+事件上下文支持：
+
+```text
+event.name
+event.source_hook
+event.ts
+event.tid
+event.payload.vip
+event.vip
+```
+
+payload 字段同时平铺到 `event` 根节点，因此 `event.vip` 是 `event.payload.vip` 的快捷形式；内置元数据键不会被 payload 覆盖。
+
+Event Bus 当前为**同步分发**：
+
+```text
+Hook A emit_event
+    ↓ 同一线程
+listener condition
+    ↓
+listener actions / state mutation
+    ↓
+返回 Hook A
+```
+
+因此 listener 对 Runtime State 的修改可以立刻影响当前线程后续逻辑。为了防止 `emit_event → listener → emit_event` 无限递归：
+
+- 最大事件递归深度默认 **16**；
+- 最大订阅 handler 数默认 **256**；
+- 超过递归深度的事件会被丢弃并计入 `dropped_depth`；
+- 单个 listener 异常只计入 `handler_errors`，不会阻断其它 listener。
+
+事件订阅本身也是 `LiveHookHandle`，和 Java Hook 一样由 HookRegistry 管理。因此：
+
+- 同 ID replace：新 listener 安装成功后再卸载旧 listener；
+- `unhook(package, id)`：立即卸载 listener；
+- 删除 target 后不会留下“幽灵监听器”；
+- hook-scope State 在真正 remove 时同步清理；replace 同 ID 时保留。
+
+纯事件 handler 的 ActionContext 没有方法调用上下文，因此 `this / args / ret` 不可用；应主要使用 `event.*`、`state.*`、静态 `class:...` 调用或自行 construct/eval_js/eval_dex。
+
+## Lifecycle + Context Runtime（Runtime Phase 4）
+
+Phase 4 把 Android 进程里的 `Application / Context / 当前 Activity / Activity 生命周期` 接入现有 ActionContext 和 Event Bus。
+
+实现策略不是给每个 Activity 子类逐个挂 `onResume()` Hook，而是：
+
+```text
+Application.attach(Context)
+        ↓
+ContextRegistry 记录 Application / applicationContext
+        ↓
+Application.registerActivityLifecycleCallbacks(...)
+        ↓
+Activity created/started/resumed/paused/stopped/destroyed
+        ↓
+ContextRegistry 更新当前 Activity
+        ↓
+RuntimeEventBus.emit("lifecycle....")
+```
+
+当前 Activity 只通过 **WeakReference** 保存；Runtime 不会为了提供 `${activity}` 而阻止页面被回收。
+
+### Action / 模板中的 Context 根对象
+
+现有 path / template / condition / `call_method.target` 现在都可直接使用：
+
+| 根路径 | 含义 |
+|---|---|
+| `application` / `${application}` | 当前进程 Application 对象 |
+| `context` / `${context}` | 优先当前 Activity；没有 Activity 时退回 applicationContext / Application |
+| `activity` / `${activity}` | 当前 Activity 弱引用；页面不存在时解析为 missing |
+| `lifecycle.activity_class` | 当前 Activity 完整类名 |
+| `lifecycle.activity_state` | created/started/resumed/paused/stopped/destroyed 等当前状态 |
+| `lifecycle.has_activity` | 当前 Activity 是否仍可取到 |
+| `lifecycle.last_event` | 最近一次 lifecycle 事件 |
+| `lifecycle.last_event_at` | 最近事件时间戳 |
+| `lifecycle.package / process` | 当前包名 / 进程名 |
+
+例如：
+
+```jsonc
+{
+  "condition": {
+    "path": "lifecycle.activity_state",
+    "op": "eq",
+    "value": "resumed"
+  },
+  "before_actions": [
+    {
+      "action": "call_method",
+      "target": "activity",
+      "method": "getIntent",
+      "save_to": "$intent"
+    },
+    {
+      "action": "set_state",
+      "scope": "process",
+      "key": "screen",
+      "value": "${lifecycle.activity_class}"
+    }
+  ]
+}
+```
+
+Rhino JS 同步注入：
+
+```text
+$application
+$context
+$activity
+$lifecycle
+```
+
+因此 JS、模板、condition 和 Action target 使用的是同一套 Runtime 对象。
+
+### 标准 Lifecycle Event
+
+LifecycleManager 会向现有 RuntimeEventBus 发出：
+
+```text
+lifecycle.application_attached
+lifecycle.activity_created
+lifecycle.activity_started
+lifecycle.activity_resumed
+lifecycle.activity_paused
+lifecycle.activity_stopped
+lifecycle.activity_save_instance_state
+lifecycle.activity_destroyed
+```
+
+Activity 事件 payload 至少包含：
+
+```text
+event.activity
+event.activity_class
+event.context
+event.application
+event.state
+event.package
+```
+
+因此也可以直接使用普通 `on_event`：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "screen_listener",
+  "on_event": {
+    "name": "lifecycle.activity_resumed",
+    "condition": {
+      "path": "event.activity_class",
+      "op": "contains",
+      "value": "VipActivity"
+    },
+    "actions": [
+      {
+        "action": "set_state",
+        "scope": "process",
+        "key": "vip_page_visible",
+        "value": true
+      }
+    ]
+  }
+}
+```
+
+### `on_lifecycle` 简写
+
+Phase 4 额外提供 `on_lifecycle`，避免手写完整事件名：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "vip_page_runtime",
+  "on_lifecycle": [
+    {
+      "stage": "resumed",
+      "activity": "VipActivity",
+      "actions": [
+        {
+          "action": "set_state",
+          "scope": "process",
+          "key": "vip_page_visible",
+          "value": true
+        }
+      ]
+    },
+    {
+      "stage": "paused",
+      "activity_match": ".*VipActivity$",
+      "actions": [
+        {
+          "action": "set_state",
+          "scope": "process",
+          "key": "vip_page_visible",
+          "value": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+`stage:"resumed"` 会标准化为 `lifecycle.activity_resumed`。也接受 `activity_resumed`、完整的 `lifecycle.activity_resumed` 或 `application_attached`。
+
+Activity 过滤：
+- `activity:"com.foo.VipActivity"`：完整类名；
+- `activity:"VipActivity"`：简单类名；
+- `activity_match:".*VipActivity$"`：正则。
+
+`on_lifecycle` 最终仍然注册成 EventBus 的 LiveHookHandle，因此 target live remove / replace 时生命周期 listener 会和普通 `on_event` 一样立即卸载。
+
+### Runtime Status
+
+`runtime_hook_status(package)` 的每个进程状态现在除 HookRegistry / ClassLoader 信息外，还包含：
+
+```jsonc
+{
+  "runtime_state": {
+    "enabled": true,
+    "max_keys_per_scope": 256,
+    "max_hook_scopes": 128,
+    "max_append_items": 128,
+    "process": {"count": 2, "values": {"vip_enabled": true}},
+    "package_scope": {"count": 0, "values": {}},
+    "hooks": {
+      "vip_hook": {
+        "count": 1,
+        "values": {"hits": 14}
+      }
+    },
+    "thread_scope": {
+      "thread_local": true,
+      "enumerable": false
+    },
+    "operations": {
+      "reads": 20,
+      "writes": 18,
+      "removes": 0,
+      "clears": 0
+    }
+  },
+  "event_bus": {
+    "enabled": true,
+    "synchronous": true,
+    "handler_count": 1,
+    "max_handlers": 256,
+    "max_depth": 16,
+    "emitted": 8,
+    "delivered": 8,
+    "dropped_depth": 0,
+    "handler_errors": 0,
+    "handlers": [
+      {
+        "owner_hook_id": "vip_state_listener",
+        "event": "vip_changed"
+      }
+    ],
+    "recent_events": ["vip_changed"]
+  }
+}
+```
+
+另外还会包含：
+
+```jsonc
+{
+  "context_runtime": {
+    "enabled": true,
+    "application_available": true,
+    "context_available": true,
+    "activity_available": true,
+    "activity_class": "com.foo.VipActivity",
+    "activity_state": "resumed",
+    "last_event": "activity_resumed",
+    "activity_weak_reference": true
+  },
+  "lifecycle_runtime": {
+    "enabled": true,
+    "attach_hook_count": 1,
+    "callbacks_registered": true,
+    "registered_application_alive": true,
+    "application_attach_events": 1,
+    "lifecycle_events": 12,
+    "event_prefix": "lifecycle."
+  }
+}
+```
+
+Lifecycle 变化后 Tracer 会主动重新发送 runtime status，因此 `runtime_hook_status(package)` 不需要等下一次 Hook 配置同步才能看到当前 Activity 状态。
+
+runtime status 对任意非标量 Java 对象只返回有限摘要，不应把它当成对象 dump 接口；需要对象细节仍使用 `capture.fields / capture.paths / render:"deep"`。
+
+Lifecycle 变化后的 runtime status 采用后台合并刷新（约 120ms 去抖），不会在 Activity 主线程同步写整份状态快照。Lifecycle Runtime 是**进程内**的；多进程 App 每个已连接进程各有自己的 Application/Activity 状态。Compose/Fragment/自绘视图不是独立 Activity 生命周期，若要判断其内部状态仍应 Hook 对应业务方法或自行 emit 自定义事件。
+
+## Runtime Command Dispatcher（Runtime Phase 5）
+
+Phase 5 在现有 `@reconbridge_inject` 双向 socket 上增加交互式 Runtime Command，不再需要为了“读一个 state / 发一个 event / 调当前 Activity”临时创建 Hook。
+
+新增帧：
+
+```text
+Tracer → daemon  K  声明支持 Runtime Command
+daemon → Tracer  C  Runtime Command JSON
+Tracer → daemon  A  Command Ack JSON
+```
+
+`C/A` 使用 request_id 对应请求和响应；期间 `R` 热重载、`S` runtime status、`E` Hook 事件仍可正常穿插。daemon 对每个目标进程维护独立 waiter，超时或进程断线都会唤醒请求，不会永久挂起。
+
+PC / 手机 MCP 提供：
+
+```text
+runtime_state_get
+runtime_state_set
+runtime_state_clear
+runtime_event_emit
+runtime_context_status
+runtime_activity_action
+```
+
+### 直接操作 Runtime State
+
+```text
+runtime_state_set(
+    package="com.foo",
+    scope="process",
+    key="debug_enabled",
+    value=true
+)
+
+runtime_state_get(
+    package="com.foo",
+    scope="process",
+    key="debug_enabled"
+)
+
+runtime_state_clear(
+    package="com.foo",
+    scope="hook",
+    hook_id="vip_hook"
+)
+```
+
+远程命令支持 `process / package / hook` scope。**不支持远程 thread scope**：ThreadLocal 属于命令 socket 的处理线程，读取它不能代表任意 Hook 实际运行的业务线程，因此 Runtime 会明确拒绝，而不是返回误导值。
+
+`runtime_state_set.value` 支持 JSON 标量、对象、数组和 null；对象/数组进入 Runtime 后会变成普通 Map/List，可继续被现有模板和 path 系统读取。
+
+### 从 PC 主动发 Event
+
+```text
+runtime_event_emit(
+    package="com.foo",
+    name="debug.toggle",
+    payload={"enabled": true}
+)
+```
+
+这个事件进入的就是 Phase 3 同一个 `RuntimeEventBus`，现有：
+
+```jsonc
+{
+  "kind": "runtime",
+  "id": "debug_listener",
+  "on_event": {
+    "name": "debug.toggle",
+    "actions": [
+      {
+        "action": "set_state",
+        "scope": "process",
+        "key": "debug_enabled",
+        "value": "${event.enabled}"
+      }
+    ]
+  }
+}
+```
+
+会在目标进程中同步响应。
+
+### 直接读取 Context / Activity
+
+```text
+runtime_context_status(package="com.foo")
+```
+
+返回当前进程 ContextRegistry / Lifecycle 视图。它不会 dump Activity 对象本身，只返回有限状态摘要。
+
+`runtime_activity_action` 可直接把现有 Action Pipeline 运行在当前 Activity：
+
+```text
+runtime_activity_action(
+    package="com.foo",
+    actions=[
+      {
+        "action": "call_method",
+        "target": "activity",
+        "method": "finish"
+      }
+    ]
+)
+```
+
+也可以在 actions 中使用 `set_state / emit_event / call_method / set_field / eval_js` 等现有动作。没有当前 Activity 时会返回明确错误，不会静默退回 Application。真实 Android Activity 的 Action Pipeline 会自动切到主线程同步执行；主线程调度使用同一条 Runtime Command 的 `timeout_ms` 预算，避免 socket 线程直接操作 View/Activity。
+
+### 多进程语义
+
+所有 Runtime Command 都接受可选 `process`。不传时，daemon 会并行下发到该包所有**在线且声明 Runtime Command 能力**的 Tracer 进程，并返回：
+
+```jsonc
+{
+  "targeted": 2,
+  "succeeded": 2,
+  "results": [
+    {"process": "com.foo", "...": "..."},
+    {"process": "com.foo:service", "...": "..."}
+  ]
+}
+```
+
+因此多进程 App 不会被偷偷折叠成一个状态。要只操作主进程或某个 `:service`，请明确传 `process`。
+
+`runtime_hook_status` 的进程行也新增 `runtime_command:true/false`；旧版 Tracer 只会声明 live reconcile，不会被 daemon 误判成支持 Runtime Command。
+
+## 动态 ClassLoader / Pending Hook（Runtime Phase 2）
+
+显式指定 `"class":"com.foo.PluginEntry"` 的 Java target 在同步时会依次尝试当前已知 ClassLoader。若所有已知 loader 都抛出 `ClassNotFoundException / NoClassDefFoundError`，它不会计为安装失败，而是进入：
+
+```text
+state = pending_class
+```
+
+进程内现在有两层 ClassLoader 发现机制：
+
+1. **BaseDexClassLoader 构造监听**：常驻但低频，用来发现常见的 `PathClassLoader` / `DexClassLoader` / `InMemoryDexClassLoader`。新 loader 一出现就立刻拿它重试所有 pending target，不需要等目标类被业务代码主动调用。
+2. **ClassLoader.loadClass 监听**：仅当 `pending_count > 0` 时临时启用，并只对 pending 的精确类名触发安装回调。pending 清空后立即卸载 watcher，减少长期类加载开销。
+
+Watcher 与 HookRegistry 都有线程递归保护；Registry 自己为了安装 target 调用 `loader.loadClass()` 时不会再次进入 pending 安装回调。
+
+pending 与 live replace 可以组合：如果同一个 Hook ID 的旧版本已经 installed，而新版本把目标改成了尚未加载的插件类，则旧 Hook **继续保持生效**，新 spec 以 `replacing_installed:true` 等待；只有新类在某个 loader 上成功安装后，Registry 才卸载旧 Hook 并完成 replace。
+
+`unhook(package, id)` / 全量 reconcile 删除 ID 时会同时删除对应 pending；不会出现“已经取消，但以后插件类出现又突然装回来”的情况。
+
+ClassLoaderRegistry 对 loader 实例使用**弱引用**。运行时状态保存 loader id / 实现类 / first_seen / last_seen / last_loaded_class 等轻量元数据，但不会仅因为监控就永久阻止可卸载插件 ClassLoader 被 GC。
+
+典型 `runtime_hook_status(package)` 片段：
+
+```jsonc
+{
+  "installed_count": 1,
+  "pending_count": 1,
+  "pending_hook_supported": true,
+  "dynamic_classloader_supported": true,
+  "hooks": [
+    {
+      "id": "main_check",
+      "state": "installed",
+      "class_loader_id": "cl1",
+      "class_loader_class": "dalvik.system.PathClassLoader"
+    }
+  ],
+  "pending_hooks": [
+    {
+      "id": "plugin_check",
+      "class": "com.foo.plugin.Checker",
+      "state": "pending_class",
+      "attempts": 2,
+      "last_error": "java.lang.ClassNotFoundException: ...",
+      "replacing_installed": false
+    }
+  ],
+  "class_loader_count": 2,
+  "class_loaders": [
+    {
+      "id": "cl1",
+      "class": "dalvik.system.PathClassLoader",
+      "source": "lpparam.classLoader",
+      "alive": true
+    }
+  ],
+  "class_loader_watch": {
+    "base_dex_constructor_watch": true,
+    "load_class_watch": true
+  }
+}
+```
+
+注意：
+- 自动 pending 最可靠的是**显式 `class` target**。只有 `using_strings`、没有确定类名的搜索型 target 仍依赖当前能扫描到的 DEX，不能保证在未来插件 DEX 出现后自动重新做字符串搜索。
+- 极少数完全绕过标准 `BaseDexClassLoader` / `ClassLoader.loadClass` 语义的自定义 native loader 仍可能观察不到。
+- 首次让 Tracer 进入目标进程的限制仍然存在：如果目标进程启动时完全没有 M5 配置，Tracer 不会建立长期控制通道。第一次下发到一个已运行且从未连接过的进程，仍建议 `restart:true`。
 
 ## 语义与限制
 
 - **trace（观测）+ 实时篡改（action）** 均支持。篡改在 Xposed before（改参数/skip）/after（改返回值）阶段生效。
-- 类解析用目标进程主 classloader（`lpparam.classLoader`）；动态加载进独立 classloader 的类暂不覆盖。
-- 模块进程启动时读配置装 hook。**首个 hook 需 `restart:true`**（force-stop 让目标带配置起来）；
-  此后目标进程活着时支持**免重启热加**（`restart:false` + `mode:"append"`）：daemon 向运行中的 tracer
-  下发 `'R'`(reload) 控制帧，tracer 按 id 去重**增量装新 target（只加不删）**——迭代加 hook 不再反复 force-stop。
-  PC 侧 `trace_java(hot=True)` 即走此路；`hot_injected` 返回热注入到的进程数（0=目标没在跑，退回 restart）。
-  （注入 socket 因此变双向：tracer 握手后发 `'H'` 声明可热加；native 层不发 `'H'`，故 native 目标仍需 restart。）
+- 类解析不再只限主 loader：HookRegistry 会先尝试所有已知 loader；找不到的显式类进入 pending，并由 BaseDexClassLoader / loadClass watcher 后续自动补装。
+- 首个 hook 仍需目标进程先加载 Tracer；最稳妥的起手式仍是 `restart:true`。
+- 进程已连接后，`restart:false` 会走实时 reconcile：daemon 用 `'R'` 下发**完整期望配置**，
+  HookRegistry 自动 add/remove/replace。PC 侧 `trace_java(hot=True)` 继续可免重启追加；
+  同 ID target 发生变化时会 live replace，`unhook` 会 live remove。
+- tracer 通过 `'S'` 帧持续回报完整 M5 Runtime 状态；`runtime_hook_status` 可核对 installed/pending/ClassLoader、Runtime State/Event Bus，以及当前 Application/Context/Activity/Lifecycle。
+- native M3 目标不发送 `'H'/'S'`，因此这些 live reconcile 能力目前只保证 M5 Java Hook。
 - 复杂对象默认只 `toString()` + 类名；要看内部状态用 `fields`（点名反射某字段）、`paths`（按路径取深埋值）
   或 `render:"deep"`（整棵对象图序列化，有深度/环/节点预算防爆）。
 - 篡改值类型要与目标 Java 签名匹配（显式 `type`）；类型不符会在命中时抛异常并打日志（不影响原方法）。

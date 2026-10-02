@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from .settings import settings
+from .dex_index import index_is_ready, index_path_for_apk, index_status, query_index
+from .resource import java_memory_env, run_limited
+from .settings import FROZEN, settings
 
 COMSPEC = os.environ.get("COMSPEC", "cmd.exe")
 
@@ -74,7 +77,6 @@ def toolchain_status() -> dict:
     ghidra = _find_ghidra_headless()
     jdk = _find_jdk21()
     try:
-        import androguard  # noqa: F401
         import importlib.metadata as m
         andro = m.version("androguard")
     except Exception:
@@ -85,6 +87,14 @@ def toolchain_status() -> dict:
         "ghidra_headless": str(ghidra) if ghidra else None,
         "ghidra_jdk21": str(jdk) if jdk else None,
         "system_java": shutil.which("java"),
+        "resource_limits": {
+            "max_parallel": settings.heavy_max_parallel,
+            "log_tail_kb": settings.process_log_tail_kb,
+            "jadx_memory_mb": settings.jadx_memory_mb,
+            "ghidra_memory_mb": settings.ghidra_memory_mb,
+            "dexkit_memory_mb": settings.dexkit_memory_mb,
+            "hermes_memory_mb": settings.hermes_memory_mb,
+        },
         "hints": {
             "jadx": None if jadx else "缺 jadx：下载 https://github.com/skylot/jadx 解压到 pc/tools/jadx",
             "ghidra": None if ghidra else "缺 Ghidra：解压到 pc/tools/ghidra_*",
@@ -110,112 +120,190 @@ def decompile_apk(apk_path: str, output_dir: str = "", no_res: bool = True) -> d
     if no_res:
         cmd.append("--no-res")  # 跳过资源，只出 Java 源码，快
     cmd.append(str(apk))
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.timeout,
-                       encoding="utf-8", errors="replace")
-    java_files = list(out.rglob("*.java"))
-    ok = out.exists() and len(java_files) > 0
+    env = java_memory_env(os.environ.copy(), settings.jadx_memory_mb)
+    p = run_limited(
+        cmd,
+        timeout=settings.timeout,
+        memory_mb=settings.jadx_memory_mb,
+        env=env,
+    )
+    java_file_count = sum(1 for _ in out.rglob("*.java"))
+    ok = p.returncode == 0 and not p.timed_out and java_file_count > 0
     return {
         "ok": ok,
         "output_dir": str(out),
-        "java_file_count": len(java_files),
+        "java_file_count": java_file_count,
         "sources_root": str(out / "sources"),
         "jadx_exit": p.returncode,
-        "log_tail": (p.stdout + p.stderr)[-1500:],
+        "timed_out": p.timed_out,
+        "memory_limit_enforced": p.memory_limit_enforced,
+        "memory_limit_mb": settings.jadx_memory_mb,
+        "log_tail": p.log_tail[-1500:],
     }
 
 
 # ---------------------------------------------------------------------------
-# dexkit_search —— 用 androguard 做类/方法/字段/字符串定位
+# dexkit_search —— 首次建立 SQLite 持久索引，后续只查数据库
 # ---------------------------------------------------------------------------
-def dexkit_search(apk_path: str, query: dict) -> dict:
+def ensure_dex_index(apk_path: str, force: bool = False) -> dict:
+    """确保 APK 已有可用 DEX 索引；首次构建在受内存限制的 worker 中完成。"""
     apk = Path(apk_path)
     if not apk.exists():
         return {"ok": False, "error": f"apk 不存在: {apk_path}"}
-    try:
-        from androguard.misc import AnalyzeAPK
-    except Exception:
-        return {"ok": False, "error": "androguard 未安装", "hint": "pip install androguard"}
 
-    import re as _re
-
-    def _pat(p: str) -> str:
-        """普通名字（无正则元字符）按子串匹配；否则当正则透传。androguard 的匹配是锚定的，
-        故对普通 token 包成 .*token.* 以符合直觉。"""
-        if not p or p == ".*":
-            return ".*"
-        if _re.search(r"[\\^$.|?*+()\[\]{}]", p):
-            return p
-        return ".*" + _re.escape(p) + ".*"
-
-    find = query.get("find", "method")
-    limit = int(query.get("max_results", 100))
-    results: list[dict] = []
-    try:
-        a, dlist, dx = AnalyzeAPK(str(apk))
-    except Exception as e:
-        return {"ok": False, "error": f"androguard 解析失败: {e}"}
-
-    def meth_row(ma) -> dict:
-        # ma 可能是 MethodClassAnalysis / MethodAnalysis / EncodedMethod / ExternalMethod
-        m = ma.get_method() if hasattr(ma, "get_method") else ma
+    target = index_path_for_apk(apk)
+    if not force and index_is_ready(apk):
         return {
-            "class": m.get_class_name(),
-            "method": m.get_name(),
-            "descriptor": m.get_descriptor() if hasattr(m, "get_descriptor") else "",
-            "access": m.get_access_flags_string() if hasattr(m, "get_access_flags_string") else "",
+            "ok": True,
+            "built": False,
+            "reused": True,
+            **index_status(apk),
         }
 
-    try:
-        if find == "string":
-            pat = query.get("string", ".*")
-            for s in dx.find_strings(pat):
-                results.append({"string": s.get_value()})
-                if len(results) >= limit:
-                    break
-        elif find == "class":
-            pat = _pat(query.get("class_name", ".*"))
-            for c in dx.find_classes(pat):
-                results.append({"class": c.name})
-                if len(results) >= limit:
-                    break
-        elif find == "field":
-            fpat = _pat(query.get("field_name", ".*"))
-            cpat = _pat(query.get("class_name", ".*"))
-            for fa in dx.find_fields(classname=cpat, fieldname=fpat):
-                f = fa.get_field()
-                results.append({"class": f.get_class_name(), "field": f.get_name(),
-                                "type": f.get_descriptor()})
-                if len(results) >= limit:
-                    break
-        else:  # method
-            using = query.get("using_strings")
-            if using:
-                seen = set()
-                for kw in using:
-                    for s in dx.find_strings(kw):
-                        for xref in s.get_xref_from():
-                            # androguard 各版本 xref 元组可能是 (class, method) 或 (class, method, offset)
-                            row = meth_row(xref[1])
-                            key = (row["class"], row["method"], row["descriptor"])
-                            if key in seen:
-                                continue
-                            seen.add(key)
-                            row["matched_string"] = kw
-                            results.append(row)
-                            if len(results) >= limit:
-                                break
-            else:
-                cpat = _pat(query.get("class_name", ".*"))
-                mpat = _pat(query.get("method_name", ".*"))
-                for ma in dx.find_methods(classname=cpat, methodname=mpat):
-                    results.append(meth_row(ma))
-                    if len(results) >= limit:
-                        break
-    except Exception as e:
-        return {"ok": False, "error": f"查询失败: {e}", "query": query}
+    import json as _json
+    import tempfile
 
-    return {"ok": True, "backend": "androguard", "find": find,
-            "count": len(results), "results": results}
+    if force:
+        target.unlink(missing_ok=True)
+        target.with_suffix(target.suffix + ".building").unlink(missing_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="reconbridge-dex-index-") as td:
+        td_path = Path(td)
+        req = td_path / "request.json"
+        resp = td_path / "response.json"
+        req.write_text(
+            _json.dumps(
+                {
+                    "operation": "build_index",
+                    "apk_path": str(apk),
+                    "index_path": str(target),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        if FROZEN:
+            cmd = [sys.executable, "--dex-worker", str(req), str(resp)]
+        else:
+            cmd = [sys.executable, "-m", "reconbridge_mcp.dex_worker", str(req), str(resp)]
+
+        p = run_limited(
+            cmd,
+            timeout=settings.timeout,
+            memory_mb=settings.dexkit_memory_mb,
+            env=os.environ.copy(),
+        )
+
+        if not resp.exists():
+            reason = "超时" if p.timed_out else "worker 未产出结果"
+            return {
+                "ok": False,
+                "error": f"DEX 索引构建{reason}，可能触发了内存上限",
+                "worker_exit": p.returncode,
+                "timed_out": p.timed_out,
+                "memory_limit_enforced": p.memory_limit_enforced,
+                "memory_limit_mb": settings.dexkit_memory_mb,
+                "log_tail": p.log_tail,
+            }
+
+        try:
+            result = _json.loads(resp.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"DEX 索引 worker 返回损坏: {exc}",
+                "worker_exit": p.returncode,
+                "log_tail": p.log_tail,
+            }
+
+        result["worker_exit"] = p.returncode
+        result["timed_out"] = p.timed_out
+        result["memory_limit_enforced"] = p.memory_limit_enforced
+        result["memory_limit_mb"] = settings.dexkit_memory_mb
+        result["built"] = bool(result.get("ok"))
+        result["reused"] = False
+        if p.log_tail:
+            result["log_tail"] = p.log_tail[-2000:]
+
+        if result.get("ok") and not index_is_ready(apk):
+            return {
+                **result,
+                "ok": False,
+                "error": "worker 返回成功，但索引完整性校验未通过",
+            }
+        if result.get("ok"):
+            result.update(index_status(apk))
+        return result
+
+
+def dexkit_search(apk_path: str, query: dict) -> dict:
+    """优先查询持久 SQLite 索引；首次调用只需解析 APK 一次。"""
+    apk = Path(apk_path)
+    if not apk.exists():
+        return {"ok": False, "error": f"apk 不存在: {apk_path}"}
+
+    prepared = ensure_dex_index(str(apk))
+    if prepared.get("ok"):
+        result = query_index(apk, query)
+        result["index_reused"] = bool(prepared.get("reused"))
+        result["index_built"] = bool(prepared.get("built"))
+        if prepared.get("memory_limit_enforced") is not None:
+            result["memory_limit_enforced"] = prepared.get("memory_limit_enforced")
+        return result
+
+    # 构建索引失败时保留一次性 worker 查询兜底，避免升级后直接丢失旧能力。
+    import json as _json
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="reconbridge-dexkit-fallback-") as td:
+        td_path = Path(td)
+        req = td_path / "request.json"
+        resp = td_path / "response.json"
+        req.write_text(
+            _json.dumps(
+                {"operation": "search", "apk_path": str(apk), "query": query},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        if FROZEN:
+            cmd = [sys.executable, "--dex-worker", str(req), str(resp)]
+        else:
+            cmd = [sys.executable, "-m", "reconbridge_mcp.dex_worker", str(req), str(resp)]
+
+        p = run_limited(
+            cmd,
+            timeout=settings.timeout,
+            memory_mb=settings.dexkit_memory_mb,
+            env=os.environ.copy(),
+        )
+        if not resp.exists():
+            return {
+                **prepared,
+                "ok": False,
+                "error": prepared.get("error") or "DEX 索引与兜底查询均失败",
+                "fallback_exit": p.returncode,
+                "fallback_log_tail": p.log_tail,
+            }
+
+        try:
+            result = _json.loads(resp.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"兜底 worker 返回损坏: {exc}",
+                "index_error": prepared.get("error"),
+            }
+
+        result["backend"] = result.get("backend", "androguard-worker-fallback")
+        result["index_error"] = prepared.get("error")
+        result["index_reused"] = False
+        result["index_built"] = False
+        result["memory_limit_enforced"] = p.memory_limit_enforced
+        result["memory_limit_mb"] = settings.dexkit_memory_mb
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -279,13 +367,34 @@ def ghidra_analyze(so_path: str, options: dict) -> dict:
         "-scriptPath", str(script_dir),
         "-postScript", _GHIDRA_SCRIPT,
     ]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=settings.timeout,
-                       env=env, encoding="utf-8", errors="replace")
+    env = java_memory_env(env, settings.ghidra_memory_mb)
+    p = run_limited(
+        cmd,
+        timeout=settings.timeout,
+        memory_mb=settings.ghidra_memory_mb,
+        env=env,
+    )
     if out_json.exists():
         data = _json.loads(out_json.read_text(encoding="utf-8"))
-        return {"ok": True, "so": str(so), "analysis": data, "ghidra_exit": p.returncode}
-    return {"ok": False, "error": "Ghidra 未产出结果",
-            "ghidra_exit": p.returncode, "log_tail": (p.stdout + p.stderr)[-2000:]}
+        return {
+            "ok": p.returncode == 0 and not p.timed_out,
+            "so": str(so),
+            "analysis": data,
+            "ghidra_exit": p.returncode,
+            "timed_out": p.timed_out,
+            "memory_limit_enforced": p.memory_limit_enforced,
+            "memory_limit_mb": settings.ghidra_memory_mb,
+            "log_tail": p.log_tail[-2000:],
+        }
+    return {
+        "ok": False,
+        "error": "Ghidra 未产出结果",
+        "ghidra_exit": p.returncode,
+        "timed_out": p.timed_out,
+        "memory_limit_enforced": p.memory_limit_enforced,
+        "memory_limit_mb": settings.ghidra_memory_mb,
+        "log_tail": p.log_tail[-2000:],
+    }
 
 
 # Ghidra headless 里跑的 Java GhidraScript：导出/导入表、字符串、函数、可疑函数、可选反编译。
@@ -491,13 +600,24 @@ def hermes_decompile(bundle_path: str, output_dir: str = "") -> dict:
     # 优先 hbctool（若已安装）
     hbc = shutil.which("hbctool")
     if hbc:
-        p = subprocess.run([hbc, "disasm", str(b), str(out)],
-                           capture_output=True, text=True, timeout=settings.timeout,
-                           encoding="utf-8", errors="replace")
-        produced = list(out.rglob("*"))
-        return {"ok": bool(produced), "tool": "hbctool", "output_dir": str(out),
-                "files": len(produced), "exit": p.returncode,
-                "log_tail": (p.stdout + p.stderr)[-1500:]}
+        p = run_limited(
+            [hbc, "disasm", str(b), str(out)],
+            timeout=settings.timeout,
+            memory_mb=settings.hermes_memory_mb,
+            env=os.environ.copy(),
+        )
+        produced_count = sum(1 for _ in out.rglob("*"))
+        return {
+            "ok": p.returncode == 0 and not p.timed_out and produced_count > 0,
+            "tool": "hbctool",
+            "output_dir": str(out),
+            "files": produced_count,
+            "exit": p.returncode,
+            "timed_out": p.timed_out,
+            "memory_limit_enforced": p.memory_limit_enforced,
+            "memory_limit_mb": settings.hermes_memory_mb,
+            "log_tail": p.log_tail[-1500:],
+        }
 
     # 退回：识别 Hermes 版本号，给出后续指引（hbctool 强依赖版本，需匹配）
     ver = None

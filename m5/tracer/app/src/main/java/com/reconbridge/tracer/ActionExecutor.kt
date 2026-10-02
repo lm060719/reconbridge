@@ -63,10 +63,15 @@ internal fun setFieldAny(obj: Any, name: String, value: Any?): Boolean {
     return false
 }
 
-class ActionContext(
-    val param: MethodHookParam,
+internal class ActionContext(
+    val param: MethodHookParam?,
     val classLoader: ClassLoader,
     val pkg: String,
+    val hookId: String = "",
+    val runtimeState: RuntimeStateStore? = null,
+    val eventBus: RuntimeEventBus? = null,
+    val runtimeEvent: RuntimeEvent? = null,
+    val contextRuntime: RuntimeContextProvider? = null,
 ) {
     private var fallbackThis: Any? = null
     private var fallbackArgs: Array<Any?>? = null
@@ -76,59 +81,87 @@ class ActionContext(
     @Suppress("UNCHECKED_CAST")
     val registers: HashMap<String, Any?> = run {
         var regs: HashMap<String, Any?>? = null
-        try {
-            regs = param.getObjectExtra("recon_registers") as? HashMap<String, Any?>
-        } catch (_: Throwable) {}
+        val methodParam = param
+        if (methodParam != null) {
+            try {
+                regs = methodParam.getObjectExtra(
+                    "recon_registers"
+                ) as? HashMap<String, Any?>
+            } catch (_: Throwable) {
+            }
+        }
         if (regs == null) {
             regs = HashMap()
-            try {
-                param.setObjectExtra("recon_registers", regs)
-            } catch (_: Throwable) {}
+            if (methodParam != null) {
+                try {
+                    methodParam.setObjectExtra(
+                        "recon_registers",
+                        regs,
+                    )
+                } catch (_: Throwable) {
+                }
+            }
         }
         regs
     }
 
     var thisObject: Any?
-        get() = try {
-            val t = param.thisObject
-            if (t != null) t else fallbackThis
-        } catch (_: Throwable) {
-            fallbackThis
+        get() {
+            val methodParam = param ?: return fallbackThis
+            return try {
+                val value = methodParam.thisObject
+                if (value != null) value else fallbackThis
+            } catch (_: Throwable) {
+                fallbackThis
+            }
         }
         set(value) {
             fallbackThis = value
+            val methodParam = param ?: return
             try {
-                param.thisObject = value
-            } catch (_: Throwable) {}
+                methodParam.thisObject = value
+            } catch (_: Throwable) {
+            }
         }
 
     val args: Array<Any?>?
-        get() = try {
-            val a = param.args
-            if (a != null) a else fallbackArgs
-        } catch (_: Throwable) {
-            fallbackArgs
+        get() {
+            val methodParam = param ?: return fallbackArgs
+            return try {
+                val value = methodParam.args
+                if (value != null) value else fallbackArgs
+            } catch (_: Throwable) {
+                fallbackArgs
+            }
         }
 
     var result: Any?
-        get() = if (hasFallbackResult) {
-            fallbackResult
-        } else {
-            try { param.result } catch (_: Throwable) { fallbackResult }
+        get() {
+            if (hasFallbackResult) {
+                return fallbackResult
+            }
+            val methodParam = param ?: return fallbackResult
+            return try {
+                methodParam.result
+            } catch (_: Throwable) {
+                fallbackResult
+            }
         }
         set(value) {
             fallbackResult = value
             hasFallbackResult = true
+            val methodParam = param ?: return
             try {
-                param.setResult(value)
-            } catch (_: Throwable) {}
+                methodParam.setResult(value)
+            } catch (_: Throwable) {
+            }
         }
 }
 
 
 
 
-object ActionExecutor {
+internal object ActionExecutor {
 
     val MISSING = Any()
 
@@ -190,6 +223,25 @@ object ActionExecutor {
         }
     }
 
+    fun executeEventHandler(
+        ctx: ActionContext,
+        handler: JSONObject,
+    )
+    {
+        val condition = handler.opt("condition") ?: handler.opt("if")
+        if (
+            condition != null &&
+            !evaluateCondition(ctx, condition)
+        ) {
+            return
+        }
+
+        val actions = handler.optJSONArray("actions")
+            ?: handler.optJSONArray("steps")
+            ?: JSONArray()
+        runPipeline(ctx, actions)
+    }
+
     private fun runPipeline(ctx: ActionContext, steps: JSONArray) {
         for (i in 0 until steps.length()) {
             val step = steps.optJSONObject(i) ?: continue
@@ -218,6 +270,13 @@ object ActionExecutor {
             "eval_dex", "dex" -> stepEvalDex(ctx, step)
             "set_arg" -> stepSetArg(ctx, step)
             "set_result", "replace_return" -> stepSetResult(ctx, step)
+            "set_state" -> stepSetState(ctx, step)
+            "get_state" -> stepGetState(ctx, step)
+            "remove_state" -> stepRemoveState(ctx, step)
+            "clear_state" -> stepClearState(ctx, step)
+            "increment_state", "inc_state" -> stepIncrementState(ctx, step)
+            "append_state" -> stepAppendState(ctx, step)
+            "emit_event" -> stepEmitEvent(ctx, step)
             else -> logW("[${ctx.pkg}] 未知 action 类型: $type")
         }
     }
@@ -315,6 +374,14 @@ object ActionExecutor {
     fun mutatePath(ctx: ActionContext, pathExpr: String, newValue: Any?): Boolean {
         val expr = pathExpr.trim()
         if (expr.isEmpty()) return false
+
+        if (expr.startsWith("state.")) {
+            return ctx.runtimeState?.setPath(
+                expr,
+                newValue,
+                ctx.hookId,
+            ) == true
+        }
 
         var lastDotOrBracket = -1
         var inQuote = false
@@ -584,6 +651,62 @@ object ActionExecutor {
             ScriptableObject.putProperty(scope, "\$ret", org.mozilla.javascript.Context.javaToJS(ctx.result, scope))
             ScriptableObject.putProperty(scope, "\$ctx", org.mozilla.javascript.Context.javaToJS(ctx, scope))
             ScriptableObject.putProperty(scope, "\$regs", org.mozilla.javascript.Context.javaToJS(ctx.registers, scope))
+            ScriptableObject.putProperty(
+                scope,
+                "\$state",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.runtimeState?.view(ctx.hookId),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$stateStore",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.runtimeState,
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$event",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.runtimeEvent?.asMap(),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$application",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.applicationObject(),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$context",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.contextObject(),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$activity",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.activityObject(),
+                    scope,
+                ),
+            )
+            ScriptableObject.putProperty(
+                scope,
+                "\$lifecycle",
+                org.mozilla.javascript.Context.javaToJS(
+                    ctx.contextRuntime?.lifecycleView(),
+                    scope,
+                ),
+            )
 
             val res = jsCtx.evaluateString(scope, script, "<m5_script>", 1, null)
             return when (res) {
@@ -654,6 +777,212 @@ object ActionExecutor {
         ctx.result = resolveValueItem(ctx, step.opt("value"))
     }
 
+    private fun stepSetState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("set_state.key 不能为空")
+        }
+
+        val value = resolveStructuredValue(
+            ctx,
+            step.opt("value"),
+        )
+        state.set(scope, key, value, ctx.hookId)
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = value
+        }
+    }
+
+    private fun stepGetState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("get_state.key 不能为空")
+        }
+
+        val value = state.get(scope, key, ctx.hookId)
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = value
+        }
+    }
+
+    private fun stepRemoveState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("remove_state.key 不能为空")
+        }
+
+        val removed = state.remove(scope, key, ctx.hookId)
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = removed
+        }
+    }
+
+    private fun stepClearState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val count = state.clear(scope, ctx.hookId)
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = count
+        }
+    }
+
+    private fun stepIncrementState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("increment_state.key 不能为空")
+        }
+
+        val rawDelta = resolveValueItem(
+            ctx,
+            if (step.has("delta")) {
+                step.opt("delta")
+            } else {
+                1
+            },
+        )
+        val delta = when (rawDelta) {
+            is Number -> rawDelta.toDouble()
+            else -> rawDelta?.toString()?.toDoubleOrNull() ?: 1.0
+        }
+        val value = state.increment(
+            scope,
+            key,
+            delta,
+            ctx.hookId,
+        )
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = value
+        }
+    }
+
+    private fun stepAppendState(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val state = ctx.runtimeState
+            ?: throw IllegalStateException("Runtime State 未初始化")
+        val scope = step.optString("scope", "process")
+        val key = resolveValueItem(
+            ctx,
+            step.opt("key"),
+        )?.toString()?.trim().orEmpty()
+        if (key.isEmpty()) {
+            throw IllegalArgumentException("append_state.key 不能为空")
+        }
+
+        val value = resolveStructuredValue(
+            ctx,
+            step.opt("value"),
+        )
+        val list = state.append(
+            scope,
+            key,
+            value,
+            ctx.hookId,
+        )
+
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = list
+        }
+    }
+
+    private fun stepEmitEvent(
+        ctx: ActionContext,
+        step: JSONObject,
+    )
+    {
+        val bus = ctx.eventBus
+            ?: throw IllegalStateException("Runtime Event Bus 未初始化")
+        val rawName = resolveValueItem(
+            ctx,
+            step.opt("name") ?: step.opt("event"),
+        )
+        val name = rawName?.toString()?.trim().orEmpty()
+        if (name.isEmpty()) {
+            throw IllegalArgumentException("emit_event.name 不能为空")
+        }
+
+        val payload = LinkedHashMap<String, Any?>()
+        val rawPayload = step.optJSONObject("payload")
+        if (rawPayload != null) {
+            val iterator = rawPayload.keys()
+            while (iterator.hasNext()) {
+                val key = iterator.next()
+                payload[key] = resolveStructuredValue(
+                    ctx,
+                    rawPayload.opt(key),
+                )
+            }
+        }
+
+        val delivered = bus.emit(
+            RuntimeEvent(
+                name = name,
+                payload = payload,
+                sourceHookId = ctx.hookId,
+            )
+        )
+        val saveTo = step.optString("save_to")
+        if (saveTo.isNotEmpty()) {
+            ctx.registers[saveTo] = delivered
+        }
+    }
+
     private fun applyReplaceArgs(ctx: ActionContext, replaceArgs: JSONArray) {
         val args = ctx.args ?: return
         for (i in 0 until replaceArgs.length()) {
@@ -679,6 +1008,69 @@ object ActionExecutor {
         var s: String
 
         when {
+            expr == "application" ||
+                expr.startsWith("application.") ||
+                expr.startsWith("application[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.applicationObject() ?: return MISSING
+                s = if (expr == "application") {
+                    ""
+                } else {
+                    expr.substring("application".length)
+                }
+            }
+            expr == "context" ||
+                expr.startsWith("context.") ||
+                expr.startsWith("context[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.contextObject() ?: return MISSING
+                s = if (expr == "context") {
+                    ""
+                } else {
+                    expr.substring("context".length)
+                }
+            }
+            expr == "activity" ||
+                expr.startsWith("activity.") ||
+                expr.startsWith("activity[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.activityObject() ?: return MISSING
+                s = if (expr == "activity") {
+                    ""
+                } else {
+                    expr.substring("activity".length)
+                }
+            }
+            expr == "lifecycle" ||
+                expr.startsWith("lifecycle.") ||
+                expr.startsWith("lifecycle[") -> {
+                val runtime = ctx.contextRuntime ?: return MISSING
+                cur = runtime.lifecycleView()
+                s = if (expr == "lifecycle") {
+                    ""
+                } else {
+                    expr.substring("lifecycle".length)
+                }
+            }
+            expr.startsWith("state.") -> {
+                val state = ctx.runtimeState ?: return MISSING
+                return state.resolve(
+                    expr,
+                    ctx.hookId,
+                )
+            }
+            expr == "event" ||
+                expr.startsWith("event.") ||
+                expr.startsWith("event[") -> {
+                val eventMap = ctx.runtimeEvent?.asMap()
+                    ?: return MISSING
+                cur = eventMap
+                s = if (expr == "event") {
+                    ""
+                } else {
+                    expr.substring(5)
+                }
+            }
             expr == "this" || expr.startsWith("this.") || expr.startsWith("this[") -> {
                 cur = ctx.thisObject
                 s = if (expr == "this") "" else expr.substring(4)
@@ -843,6 +1235,69 @@ object ActionExecutor {
             }
         }
         return vObj
+    }
+
+    private fun resolveStructuredValue(
+        ctx: ActionContext,
+        value: Any?,
+    ): Any?
+    {
+        if (value == null || value === JSONObject.NULL) {
+            return null
+        }
+
+        return when (value) {
+            is JSONObject -> {
+                if (isValueDescriptor(value)) {
+                    resolveValue(ctx, value)
+                } else {
+                    val out = LinkedHashMap<String, Any?>()
+                    val iterator = value.keys()
+                    while (iterator.hasNext()) {
+                        val key = iterator.next()
+                        out[key] = resolveStructuredValue(
+                            ctx,
+                            value.opt(key),
+                        )
+                    }
+                    out
+                }
+            }
+
+            is JSONArray -> {
+                val out = ArrayList<Any?>()
+                for (index in 0 until value.length()) {
+                    out.add(
+                        resolveStructuredValue(
+                            ctx,
+                            value.opt(index),
+                        )
+                    )
+                }
+                out
+            }
+
+            else -> resolveValueItem(ctx, value)
+        }
+    }
+
+    private fun isValueDescriptor(value: JSONObject): Boolean
+    {
+        if (value.has("path") || value.has("var")) {
+            return true
+        }
+        if (!value.has("value")) {
+            return false
+        }
+
+        val allowed = setOf("value", "type")
+        val iterator = value.keys()
+        while (iterator.hasNext()) {
+            if (!allowed.contains(iterator.next())) {
+                return false
+            }
+        }
+        return true
     }
 
     private fun interpolateTemplateString(ctx: ActionContext, str: String): String {

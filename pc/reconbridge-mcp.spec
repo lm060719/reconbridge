@@ -38,13 +38,27 @@ binaries += collect_dynamic_libs("androguard")
 # PyInstaller 默认不带 dist-info，缺了会 PackageNotFoundError → 报成 androguard 缺失。
 datas += copy_metadata("androguard")
 
+# cryptography：Runtime Program Package 使用 Ed25519；显式收集保证 Windows onedir
+# 带上 Rust/OpenSSL 后端动态库与 metadata。
+hiddenimports += collect_submodules("cryptography")
+binaries += collect_dynamic_libs("cryptography")
+datas += copy_metadata("cryptography")
+
 # httpx / anyio：MCP stdio 传输与 HTTP client 走它们；子模块补全避免漏收
 hiddenimports += collect_submodules("httpx")
 hiddenimports += collect_submodules("anyio")
 hiddenimports += ["reconbridge_mcp", "reconbridge_mcp.server",
                   "reconbridge_mcp.register", "reconbridge_mcp.webconsole",
                   "reconbridge_mcp.client", "reconbridge_mcp.external",
-                  "reconbridge_mcp.settings"]
+                  "reconbridge_mcp.settings", "reconbridge_mcp.resource",
+                  "reconbridge_mcp.dex_worker", "reconbridge_mcp.dex_index",
+                  "reconbridge_mcp.evidence", "reconbridge_mcp.candidate",
+                  "reconbridge_mcp.pipeline", "reconbridge_mcp.runtime_path",
+                  "reconbridge_mcp.scenario_path", "reconbridge_mcp.branch_condition",
+                  "reconbridge_mcp.condition_probe", "reconbridge_mcp.state_origin",
+                  "reconbridge_mcp.writer_probe", "reconbridge_mcp.value_lineage",
+                  "reconbridge_mcp.runtime_lineage", "reconbridge_mcp.root_cause",
+                  "reconbridge_mcp.hypothesis_verify", "reconbridge_mcp.program_package", "reconbridge_mcp.investigation"]
 
 # 打进 PC 控制台单页 HTML（webconsole.py 用 importlib.resources 读包内 webconsole.html）
 datas += collect_data_files("reconbridge_mcp", includes=["*.html"])

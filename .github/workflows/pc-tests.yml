@@ -1,0 +1,87 @@
+name: PC MCP Tests
+
+on:
+  push:
+    branches:
+      - master
+      - "chatgpt/**"
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  pytest:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: pc
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pc/requirements.txt
+
+      - name: 安装依赖
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 PC 侧测试
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: pytest -q
+
+  tracer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: m5/tracer
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: 运行 M5 Tracer 单元测试并编译 APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon
+
+      - name: 上传 Tracer APK 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReconBridge-Tracer-debug
+          path: m5/tracer/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  daemon-syntax:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 检查 daemon 动态层 C++ 语法
+        run: |
+          g++ -std=c++17 -pthread -Isrc -fsyntax-only src/dynamic.cpp
+          g++ -std=c++17 -pthread -Isrc -fsyntax-only src/mobile_mcp.cpp
+

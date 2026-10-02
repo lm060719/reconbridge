@@ -27,10 +27,31 @@ def test_mcp_import_and_registration():
         "device_status", "list_packages", "pull_apk", "pull_libs",
         "read_remote_file", "proc_info", "remote_shell", "decompile_apk",
         "dexkit_search", "ghidra_analyze", "hermes_decompile", "post_hook",
-        "list_hooks", "unhook", "collect_events", "capture_scenario",
+        "list_hooks", "runtime_hook_status", "runtime_state_get", "runtime_state_set",
+        "runtime_state_remove", "runtime_state_increment", "runtime_state_append",
+        "runtime_state_clear", "runtime_event_emit", "runtime_context_status",
+        "runtime_activity_action", "runtime_program_install", "runtime_program_replace",
+        "runtime_program_enable", "runtime_program_disable", "runtime_program_rollback",
+        "runtime_program_status", "runtime_program_export", "runtime_program_verify_package",
+        "runtime_program_import", "runtime_program_trust_signer",
+        "runtime_program_signer_status", "runtime_program_policy_status",
+        "runtime_program_policy_set", "runtime_program_approve",
+        "runtime_program_revoke_approval", "unhook", "collect_events", "capture_scenario",
         "list_scenarios", "diff_scenarios", "recent_events", "trace_java",
         "patch_java", "dump_dex", "list_dumps", "list_artifacts",
-        "toolchain_status",
+        "toolchain_status", "open_target", "investigation_status", "prepare_index",
+        "prepare_target", "search_target", "investigate", "inspect_method",
+        "inspect_call_graph", "verify_call_path", "capture_call_graph_scenario",
+        "list_call_graph_scenarios", "diff_call_graph_scenarios",
+        "analyze_scenario_divergence", "capture_divergence_probe",
+        "compare_divergence_probes", "inspect_condition_origin",
+        "verify_condition_writer", "inspect_value_lineage",
+        "verify_value_lineage", "compare_value_lineage_runtime",
+        "rank_root_causes", "verify_root_cause_hypothesis",
+        "compare_root_cause_hypothesis", "rank_candidates",
+        "verify_candidates",
+        "trace_target", "evidence_graph",
+        "explain_evidence", "close_investigation",
     }
     assert expected.issubset(tool_names)
 
@@ -86,10 +107,61 @@ async def test_mcp_stdio_e2e():
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = (await session.list_tools()).tools
-            assert len(tools) >= 25
+            assert len(tools) >= 79
             names = {t.name for t in tools}
             assert "device_status" in names
             assert "toolchain_status" in names
+            assert "runtime_hook_status" in names
+            assert "runtime_state_get" in names
+            assert "runtime_state_set" in names
+            assert "runtime_state_remove" in names
+            assert "runtime_state_increment" in names
+            assert "runtime_state_append" in names
+            assert "runtime_state_clear" in names
+            assert "runtime_event_emit" in names
+            assert "runtime_context_status" in names
+            assert "runtime_activity_action" in names
+            assert "runtime_program_install" in names
+            assert "runtime_program_replace" in names
+            assert "runtime_program_enable" in names
+            assert "runtime_program_disable" in names
+            assert "runtime_program_rollback" in names
+            assert "runtime_program_status" in names
+            assert "runtime_program_export" in names
+            assert "runtime_program_verify_package" in names
+            assert "runtime_program_import" in names
+            assert "runtime_program_trust_signer" in names
+            assert "runtime_program_signer_status" in names
+            assert "runtime_program_policy_status" in names
+            assert "runtime_program_policy_set" in names
+            assert "runtime_program_approve" in names
+            assert "runtime_program_revoke_approval" in names
+            assert "open_target" in names
+            assert "search_target" in names
+            assert "prepare_index" in names
+            assert "investigate" in names
+            assert "inspect_method" in names
+            assert "inspect_call_graph" in names
+            assert "verify_call_path" in names
+            assert "capture_call_graph_scenario" in names
+            assert "list_call_graph_scenarios" in names
+            assert "diff_call_graph_scenarios" in names
+            assert "analyze_scenario_divergence" in names
+            assert "capture_divergence_probe" in names
+            assert "compare_divergence_probes" in names
+            assert "inspect_condition_origin" in names
+            assert "verify_condition_writer" in names
+            assert "inspect_value_lineage" in names
+            assert "verify_value_lineage" in names
+            assert "compare_value_lineage_runtime" in names
+            assert "rank_root_causes" in names
+            assert "verify_root_cause_hypothesis" in names
+            assert "compare_root_cause_hypothesis" in names
+            assert "rank_candidates" in names
+            assert "verify_candidates" in names
+            assert "trace_target" in names
+            assert "evidence_graph" in names
+            assert "explain_evidence" in names
 
             # Test offline tool execution via stdio MCP protocol
             r = await session.call_tool("toolchain_status", {})
