@@ -1,6 +1,6 @@
 id=reconbridge
-name=ReconBridge 逆向工作台 
-version=M3.3
-versionCode=5
+name=ReconBridge 逆向工作台
+version=M5.8
+versionCode=6
 author=limo
-description=通用逆向能力后端：静态接口(拉包/读文件/列so/procfs/shell) + 动态 Zygisk hook 执行器(/hook /unhook /hooks + SSE/WS 事件)。
+description=通用逆向能力后端：静态接口(拉包/读文件/列so/procfs/shell) + 动态 Zygisk native hook + Runtime Command 远程控制/状态事件 + Runtime Program 签名模块与权限策略(Phase 8)。Java 运行时侦察由独立 LSPosed 模块 ReconBridge-Tracer.apk 提供。

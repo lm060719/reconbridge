@@ -11,7 +11,15 @@ if (-not (Test-Path (Join-Path $mod "bin\reconbridge_daemon"))) {
 }
 
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
-$zip = Join-Path $dist "ReconBridge-M1.zip"
+
+# zip name follows module.prop's version so releases are not misnamed (e.g. the old M3.3 name).
+# Read as UTF-8 via .NET: module.prop is UTF-8, and PS 5.1 Get-Content defaults to ANSI(GBK),
+# where the Chinese name line's trailing byte swallows the next newline and hides the version line.
+$propText = [System.IO.File]::ReadAllText((Join-Path $mod "module.prop"), [System.Text.Encoding]::UTF8)
+$ver = if ($propText -match '(?m)^version=(.+?)\s*$') { $Matches[1].Trim() } else { "dev" }
+$ver = $ver -replace '[^A-Za-z0-9._-]', '_'
+$zip = Join-Path $dist "ReconBridge-$ver.zip"
+Write-Host "module version: $ver"
 
 Add-Type -ReferencedAssemblies System.IO.Compression, System.IO.Compression.FileSystem -TypeDefinition @"
 using System;

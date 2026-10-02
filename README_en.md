@@ -90,10 +90,10 @@ The device must be rooted (KernelSU) with ZygiskNext installed (required for M3/
 
 ```powershell
 ./build.ps1               # compile arm64-v8a with the NDK (requires Android NDK, see below)
-./pack.ps1                # package dist/ReconBridge-M1.zip
+./pack.ps1                # package dist/ReconBridge-M5.8.zip
 ```
 
-In KernelSU Manager → Modules → Install from local `dist/ReconBridge-M1.zip` → reboot.
+In KernelSU Manager → Modules → Install from local `dist/ReconBridge-M5.8.zip` → reboot.
 > The repo ships prebuilt artifacts (`module/bin`, `module/zygisk`, `module/system/lib64`); if you don't want to compile yourself, just run `./pack.ps1` to package, or use the zip from [Releases](../../releases).
 
 Once installed, just tell Claude Code "connect to my phone and check status" to begin. See the milestone docs below for details.
@@ -147,7 +147,7 @@ Downloads support HEAD, byte ranges, and ETag. The global MCP `X-Token` also wor
 | **M4** | Packer/anti-debug enhancements: general in-memory dex dump (`/dump_dex`) + anti-detection hook config templates | [`m4/README.md`](m4/README.md) |
 | **M5** | General-purpose Java trace & real-time tampering / Action Pipeline (LSPosed module) | [`m5/README.md`](m5/README.md) · protocol [`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md) |
 
-Build all artifacts: `./build.ps1` → `./pack.ps1` (generates `dist/ReconBridge-M1.zip`).
+Build all artifacts: `./build.ps1` → `./pack.ps1` (generates `dist/ReconBridge-M5.8.zip`).
 > Device-side note: on Windows, passing `/data/...` paths through adb requires `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` (Git Bash otherwise rewrites Unix paths).
 
 ---
@@ -199,16 +199,16 @@ Artifact: `module/bin/reconbridge_daemon` (AArch64 PIE ELF, ~900 KB, statically 
 
 ```powershell
 ./pack.ps1
-# generates dist/ReconBridge-M1.zip
+# generates dist/ReconBridge-M5.8.zip
 ```
 
 ### 3. Flash
 
-- KernelSU Manager → Modules → Install from local → select `ReconBridge-M1.zip` → **reboot**.
+- KernelSU Manager → Modules → Install from local → select `ReconBridge-M5.8.zip` → **reboot**.
 - Or via `adb`:
   ```
-  adb push dist/ReconBridge-M1.zip /data/local/tmp/
-  adb shell su -c "ksud module install /data/local/tmp/ReconBridge-M1.zip"
+  adb push dist/ReconBridge-M5.8.zip /data/local/tmp/
+  adb shell su -c "ksud module install /data/local/tmp/ReconBridge-M5.8.zip"
   adb reboot
   ```
 

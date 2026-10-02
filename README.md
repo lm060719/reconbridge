@@ -94,10 +94,10 @@ cd reconbridge
 
 ```powershell
 ./build.ps1               # 用 NDK 编译 arm64-v8a（需 Android NDK，见下）
-./pack.ps1                # 打包 dist/ReconBridge-M1.zip
+./pack.ps1                # 打包 dist/ReconBridge-M5.8.zip
 ```
 
-在 KernelSU Manager → 模块 → 从本地安装 `dist/ReconBridge-M1.zip` → 重启。
+在 KernelSU Manager → 模块 → 从本地安装 `dist/ReconBridge-M5.8.zip` → 重启。
 > 仓库已内置预编译产物（`module/bin`、`module/zygisk`、`module/system/lib64`），若不想自己编译，直接 `./pack.ps1` 打包即可，或用 [Releases](../../releases) 里的 zip。
 
 装好后对 Claude Code 说一句「连一下手机看状态」即可开始。详见下方各里程碑文档。
@@ -151,7 +151,7 @@ curl -L -C - \
 | **M4** | 加固/反调试增强：通用内存 dex dump（`/dump_dex`）+ 反检测 hook 配置模板 | [`m4/README.md`](m4/README.md) |
 | **M5** | 通用 Java trace + 实时篡改与 Action Pipeline（LSPosed 模块） | [`m5/README.md`](m5/README.md) · 协议 [`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md) |
 
-构建全部产物：`./build.ps1` → `./pack.ps1`（生成 `dist/ReconBridge-M1.zip`）。
+构建全部产物：`./build.ps1` → `./pack.ps1`（生成 `dist/ReconBridge-M5.8.zip`）。
 > 设备端注意：Windows 经 adb 传 `/data/...` 路径需 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`（Git Bash 否则会改写 Unix 路径）。
 
 ---
@@ -203,16 +203,16 @@ cmake --build build
 
 ```powershell
 ./pack.ps1
-# 生成 dist/ReconBridge-M1.zip
+# 生成 dist/ReconBridge-M5.8.zip
 ```
 
 ### 三、刷入
 
-- KernelSU Manager → 模块 → 从本地安装 → 选 `ReconBridge-M1.zip` → **重启**。
+- KernelSU Manager → 模块 → 从本地安装 → 选 `ReconBridge-M5.8.zip` → **重启**。
 - 或 `adb`：
   ```
-  adb push dist/ReconBridge-M1.zip /data/local/tmp/
-  adb shell su -c "ksud module install /data/local/tmp/ReconBridge-M1.zip"
+  adb push dist/ReconBridge-M5.8.zip /data/local/tmp/
+  adb shell su -c "ksud module install /data/local/tmp/ReconBridge-M5.8.zip"
   adb reboot
   ```
 
