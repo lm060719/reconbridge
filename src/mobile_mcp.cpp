@@ -774,7 +774,12 @@ static json invoke_tool(const std::string& name, const json& a) {
     if (name == "read_remote_file") {
         std::string path = a.value("path", ""), save = a.value("save_as", "");
         if (path.empty() || path[0] != '/') throw std::runtime_error("path must be absolute");
-        if (save.empty()) save = g_ctx.work_dir + "/files/" + safe_name(basename_of(path));
+        // save_as 为空或相对名（如裸文件名）时统一落到工作目录 files/ 下：裸名的
+        // parent_path() 为空会让 create_directories 抛异常；且只有 work_dir 内的文件
+        // 才能通过 allowed_artifact_path 发布为可下载 artifact。
+        if (save.empty()) save = basename_of(path);
+        if (save.empty() || save[0] != '/')
+            save = g_ctx.work_dir + "/files/" + safe_name(save);
         std::filesystem::create_directories(std::filesystem::path(save).parent_path());
         size_t bytes = 0;
         if (!copy_file(path, save, bytes)) throw std::runtime_error("cannot read file: " + path);
