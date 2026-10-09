@@ -86,3 +86,14 @@ JNI 静态导出与注销/卸载跟踪；apkanalyzer/UI Automator/Perfetto 接�
 - 增加实际代理分派并发测试和 daemon socketpair 集成测试，更新双架构构建及工具文档。
 - 本地 Python 193 项通过，C++ 实时配置/代理分派测试通过；完整记录见 [本批验证](docs/validation/2026-10-09/native-live/README.md)。
 - 真机、Native 物理撤钩、库卸载和浮点支持仍未完成。
+
+## 2026-10-10：Native float / double 标量 ABI
+
+- 新增 AAPCS64 / SysV AMD64 汇编网关，保存并恢复整数、浮点参数及返回值。
+- 显式完整 signature 支持最多 8 个 int64/ptr/float/double 参数与标量或 void 返回值。
+- 支持 float/double 采集、参数替换、返回值替换；采集保留 bits，NaN/Inf 使用 null + special。
+- 禁用按保留签名透传，同一点签名变化拒绝并要求重启，在途调用保持原配置。
+- 双架构真实 CPU ABI 测试加入 CI，包含混合/满寄存器/栈参数、特殊值与异常展开。
+- 构建入口纳入汇编，打包指纹覆盖 .S；更新双架构设备产物。
+- 用法：[NATIVE_FLOAT.md](pc/NATIVE_FLOAT.md)；验证：[本批记录](docs/validation/2026-10-10/native-float/README.md)。
+- 仍待真机验收、物理撤钩与库卸载跟踪；可变参数、结构体/向量不在本次范围。

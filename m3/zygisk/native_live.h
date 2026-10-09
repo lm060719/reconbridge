@@ -4,6 +4,9 @@
 #include <array>
 #include <cerrno>
 #include <cstdlib>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -12,7 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
-enum ArgType { T_INT, T_PTR, T_STR, T_BYTES };
+enum ArgType { T_INT, T_PTR, T_STR, T_BYTES, T_FLOAT, T_DOUBLE, T_VOID };
 enum ActionType { ACT_OBSERVE, ACT_REPLACE_RET, ACT_REPLACE_ARG };
 
 struct ArgSpec {
@@ -41,10 +44,21 @@ struct NativeSpec {
     ActionType action = ACT_OBSERVE;
     int64_t ret_value = 0;
     std::vector<std::pair<int, int64_t>> arg_overrides;
+    bool explicit_signature = false;
+    size_t signature_count = 8;
+    std::array<ArgType, 8> signature_args{};  // legacy: eight machine-word integers
+    ArgType signature_ret = T_INT;
+    double fp_ret_value = 0;
+    std::vector<std::pair<int, double>> fp_arg_overrides;
     size_t config_index = 0;
     nlohmann::json requested;
     std::string site_key() const {
         return lib + "\n" + (has_offset ? "offset:" + std::to_string(offset) : "symbol:" + symbol);
+    }
+    std::string abi_key() const {
+        std::string key = std::to_string(signature_ret);
+        for (size_t i = 0; i < signature_count; ++i) key += ":" + std::to_string(signature_args[i]);
+        return key;
     }
 };
 
@@ -53,7 +67,34 @@ inline ArgType parse_type(const std::string& s) {
     if (s == "string") return T_STR;
     if (s == "bytes") return T_BYTES;
     if (s == "int") return T_INT;
+    if (s == "float") return T_FLOAT;
+    if (s == "double") return T_DOUBLE;
     throw std::invalid_argument("unsupported native capture type: " + s);
+}
+
+inline bool native_floating(ArgType type) { return type == T_FLOAT || type == T_DOUBLE; }
+inline ArgType parse_abi_type(const std::string& type, bool result = false) {
+    if (type == "int" || type == "int64") return T_INT;
+    if (type == "ptr") return T_PTR;
+    if (type == "float") return T_FLOAT;
+    if (type == "double") return T_DOUBLE;
+    if (result && type == "void") return T_VOID;
+    throw std::invalid_argument("unsupported scalar native ABI type: " + type);
+}
+inline double native_fp_config(const nlohmann::json& value, ArgType type) {
+    if (!value.is_number()) throw std::invalid_argument("floating replacement must be numeric");
+    const double number = value.get<double>();
+    if (!std::isfinite(number) || (type == T_FLOAT && std::abs(number) > std::numeric_limits<float>::max()))
+        throw std::invalid_argument("floating replacement must be finite and representable");
+    return number;
+}
+inline uint64_t native_fp_bits(ArgType type, double value) {
+    uint64_t bits = 0;
+    if (type == T_FLOAT) {
+        const float rounded = static_cast<float>(value);
+        std::memcpy(&bits, &rounded, sizeof(rounded));
+    } else std::memcpy(&bits, &value, sizeof(value));
+    return bits;
 }
 
 inline NativeSpec parse_native_spec(const nlohmann::json& jt, size_t ordinal) {
@@ -85,6 +126,18 @@ inline NativeSpec parse_native_spec(const nlohmann::json& jt, size_t ordinal) {
                 throw std::invalid_argument("offset must be a nonnegative integer");
             t.offset = jt["offset"].get<uint64_t>();
         }
+    }
+    if (jt.contains("signature")) {
+        const auto& sig = jt["signature"];
+        if (!sig.is_object() || !sig.contains("args") || !sig["args"].is_array() ||
+            sig["args"].size() > 8 || !sig.contains("ret") || !sig["ret"].is_string())
+            throw std::invalid_argument("signature requires args (0..8 scalar types) and ret");
+        if (sig.value("variadic", false)) throw std::invalid_argument("variadic native ABI is unsupported");
+        t.explicit_signature = true;
+        t.signature_count = sig["args"].size();
+        for (size_t i = 0; i < t.signature_count; ++i)
+            t.signature_args[i] = parse_abi_type(sig["args"][i].get<std::string>());
+        t.signature_ret = parse_abi_type(sig["ret"].get<std::string>(), true);
     }
     // capture
     if (jt.contains("capture")) {
@@ -130,19 +183,47 @@ inline NativeSpec parse_native_spec(const nlohmann::json& jt, size_t ordinal) {
             throw std::invalid_argument("unsupported native action");
         t.action = (at == "replace_ret") ? ACT_REPLACE_RET : (at == "replace_arg") ? ACT_REPLACE_ARG : ACT_OBSERVE;
         if (ac.contains("ret_value")) {
-            if (!ac["ret_value"].is_number_integer()) throw std::invalid_argument("ret_value must be an integer");
-            t.ret_value = ac["ret_value"].get<int64_t>();
+            if (native_floating(t.signature_ret)) t.fp_ret_value = native_fp_config(ac["ret_value"], t.signature_ret);
+            else {
+                if (!ac["ret_value"].is_number_integer()) throw std::invalid_argument("ret_value must be an integer (declare signature for floating return)");
+                t.ret_value = ac["ret_value"].get<int64_t>();
+            }
         }
         if (ac.contains("arg_overrides") && !ac["arg_overrides"].is_array())
             throw std::invalid_argument("arg_overrides must be an array");
         if (ac.contains("arg_overrides") && ac["arg_overrides"].is_array())
             for (auto& ov : ac["arg_overrides"]) {
                 const int index = ov.value("index", 0);
-                if (index < 0 || index > 7 || !ov.contains("value") || !ov["value"].is_number_integer())
+                if (index < 0 || size_t(index) >= t.signature_count || !ov.contains("value"))
                     throw std::invalid_argument("invalid native argument override");
-                t.arg_overrides.push_back({index, ov["value"].get<int64_t>()});
+                if (native_floating(t.signature_args[index]))
+                    t.fp_arg_overrides.push_back({index, native_fp_config(ov["value"], t.signature_args[index])});
+                else {
+                    if (!ov["value"].is_number_integer()) throw std::invalid_argument("integer argument requires an integer replacement");
+                    t.arg_overrides.push_back({index, ov["value"].get<int64_t>()});
+                }
             }
     }
+    auto integer_arg = [&](int index) {
+        return index >= 0 && size_t(index) < t.signature_count && !native_floating(t.signature_args[index]);
+    };
+    for (const auto& arg : t.args) {
+        if (size_t(arg.index) >= t.signature_count ||
+            (native_floating(arg.type) ? (!t.explicit_signature || arg.type != t.signature_args[arg.index])
+                                       : native_floating(t.signature_args[arg.index])))
+            throw std::invalid_argument("capture type/index does not match complete native signature");
+        if (arg.len_from >= 0 && !integer_arg(arg.len_from))
+            throw std::invalid_argument("capture len_from must refer to an integer argument");
+    }
+    if (t.cap_ret && (t.signature_ret == T_VOID ||
+        (native_floating(t.ret_type) ? (!t.explicit_signature || t.ret_type != t.signature_ret)
+                                    : native_floating(t.signature_ret))))
+        throw std::invalid_argument("return capture does not match native signature");
+    if (t.action == ACT_REPLACE_RET && t.signature_ret == T_VOID)
+        throw std::invalid_argument("cannot replace a void return");
+    if (t.has_dump && (!integer_arg(t.dump_base_arg) ||
+        (t.dump_size_fixed < 0 && !integer_arg(t.dump_size_arg))))
+        throw std::invalid_argument("dump pointers/lengths require integer-class arguments");
     if (t.id.empty()) throw std::invalid_argument("native id cannot be empty");
     for (const auto* value : {&t.id, &t.lib, &t.symbol})
         if (value->find('\0') != std::string::npos || value->find('\n') != std::string::npos)
@@ -166,6 +247,7 @@ public:
 private:
     mutable std::mutex writer_;
     std::unordered_map<std::string, size_t> sites_;
+    std::unordered_map<std::string, std::string> signatures_;
     std::shared_ptr<const Plan> plan_ = std::make_shared<const Plan>();
 public:
     std::shared_ptr<const Plan> snapshot() const { return std::atomic_load(&plan_); }
@@ -192,6 +274,7 @@ public:
         auto previous = snapshot();
         if (desired == previous->desired) return {previous, {}, false};
         auto sites = sites_;
+        auto signatures = signatures_;
         auto next = std::make_shared<Plan>();
         next->revision = previous->revision + 1;
         next->desired = std::move(desired);
@@ -199,11 +282,16 @@ public:
         for (auto& spec : specs) {
             auto found = sites.find(spec->site_key());
             size_t slot;
-            if (found != sites.end()) slot = found->second;
+            if (found != sites.end()) {
+                if (signatures.at(spec->site_key()) != spec->abi_key())
+                    throw std::invalid_argument("cannot change ABI of a retained native point; restart required");
+                slot = found->second;
+            }
             else {
                 if (sites.size() >= capacity) throw std::invalid_argument("native slot capacity exhausted; restart required");
                 slot = sites.size();
                 sites[spec->site_key()] = slot;
+                signatures[spec->site_key()] = spec->abi_key();
                 added.push_back({slot, spec});
             }
             next->active[slot] = spec;
@@ -211,6 +299,7 @@ public:
         // Validate the complete transaction before publishing any slot/config.
         for (const auto& item : added) prepare_slot(item.slot, *item.spec);
         sites_ = std::move(sites);
+        signatures_ = std::move(signatures);
         std::shared_ptr<const Plan> committed = next;
         std::atomic_store(&plan_, committed);
         return {committed, std::move(added), true};
@@ -225,7 +314,12 @@ long invoke_native(const NativeLiveRegistry& registry, size_t slot,
     if (!spec) return original(args);
     if (spec->action == ACT_REPLACE_ARG)
         for (const auto& override : spec->arg_overrides) args[override.first] = override.second;
+    if (spec->action == ACT_REPLACE_ARG)
+        for (const auto& override : spec->fp_arg_overrides)
+            args[override.first] = static_cast<long>(native_fp_bits(spec->signature_args[override.first], override.second));
     const long result = original(args);
     emit(*spec, plan->revision, args, result);
-    return spec->action == ACT_REPLACE_RET ? spec->ret_value : result;
+    if (spec->action != ACT_REPLACE_RET) return result;
+    return native_floating(spec->signature_ret)
+        ? static_cast<long>(native_fp_bits(spec->signature_ret, spec->fp_ret_value)) : spec->ret_value;
 }

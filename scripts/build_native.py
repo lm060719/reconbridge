@@ -17,7 +17,7 @@ def source_fingerprint(root: Path = ROOT) -> str:
     digest = hashlib.sha256()
     for folder in (root / "src", root / "m3/zygisk"):
         for path in sorted(folder.rglob("*")):
-            if path.is_file() and path.suffix in {".cpp", ".h", ".hpp"}:
+            if path.is_file() and path.suffix in {".cpp", ".h", ".hpp", ".S"}:
                 digest.update(path.relative_to(root).as_posix().encode() + b"\0")
                 digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
@@ -53,7 +53,7 @@ def build(ndk: Path, abi: str, output: Path, api: int = 26) -> Path:
         *(str(ROOT / f"src/{name}.cpp") for name in ("daemon", "dynamic", "mobile_mcp")),
         "-static-libstdc++", "-pthread", "-Wl,--gc-sections", "-Wl,--strip-all", "-o", str(daemon)], check=True)
     subprocess.run(common + ["-O2", "-fPIC", "-shared", "-I", str(ROOT / "m3/zygisk"),
-        str(ROOT / "m3/zygisk/module.cpp"), "-static-libstdc++", "-llog", "-ldl",
+        str(ROOT / "m3/zygisk/module.cpp"), str(ROOT / "m3/zygisk/native_bridge.S"), "-static-libstdc++", "-llog", "-ldl",
         "-Wl,--gc-sections", "-Wl,--exclude-libs,ALL", "-o", str(zygisk)], check=True)
     subprocess.run([str(strip), str(zygisk)], check=True)
     if initial_source != source_fingerprint():

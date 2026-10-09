@@ -235,3 +235,5 @@ Python 包,入口 `python -m reconbridge_mcp`(stdio MCP)。
 ## Native 实时配置补充
 
 - [运行中新增、停用、替换及能力边界](pc/NATIVE_LIVE.md)
+
+- [Native float/double 签名、采集与替换](pc/NATIVE_FLOAT.md)

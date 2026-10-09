@@ -6,10 +6,10 @@
 PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并用 ShadowHook 注入。改 hook 无需重新编译刷入。
 
 ## 约束与说明
-- 目标：arm64-v8a，AAPCS64 调用约定（整型/指针参数走 x0–x7，返回值 x0）。
-- **参数/返回值只支持整型与指针寄存器（x0–x7 / x0）**；浮点参数（d0–d7）M3 不抓。
-- 注入时机：Zygisk 在 zygote fork 目标进程时注入。**配置在进程启动时读取**，对已运行的进程需重启该 App 才生效（可用 `restart:true` 让守护进程 `am force-stop` 触发重启）。
-- **M5 Java live reconcile（仅 LSPosed tracer）**：tracer 握手后发 `'H'` 声明支持实时同步，daemon 用 `'R'` 下发**完整期望配置**。进程内 HookRegistry 对 target id 做 add/remove/replace：同 ID 配置改变会 live replace，配置中消失会立即 `Unhook.unhook()`；tracer 再用 `'S'` 回报真实 HookRegistry 状态。响应仍含 `hot_injected`。**native M3 不发 `'H'/'S'`，不响应 `'R'`，故 native 目标仍需 restart/下次启动生效。**
+- 目标：arm64-v8a / x86_64，最多 8 个标量参数。整数/指针与 float/double 分别使用对应 ABI 寄存器或栈位置。
+- 浮点函数必须声明完整 `signature`；签名、替换与特殊值编码见 [Native 浮点支持](../pc/NATIVE_FLOAT.md)。
+- 首次注入发生于目标进程启动；在线 Native 连接支持 H(kind=native) / R / S 实时新增、替换和透传停用。签名变更需重启。
+- M5 Java Tracer 使用 HookRegistry 执行实时新增、替换与物理 unhook。Native 停用保留机器码跳板，边界见 [Native 实时配置](../pc/NATIVE_LIVE.md)。
 - 执行器 hook 点上限 64（够用；可编译期调整）。
 
 ## 下发：`POST /hook`
@@ -26,20 +26,20 @@ PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并�
       "symbol": "encrypt",       // 符号名；与 offset 二选一
       "offset": "0x12f40",       // 相对 so 加载基址的偏移（hex 字符串或整数）；与 symbol 二选一
       "capture": {
-        "args": [                // 要抓的参数（arm64 x0..x7）
+        "args": [                // 要抓的逻辑参数（从 0 开始）
           {"index": 0, "type": "int"},
           {"index": 1, "type": "string", "max": 256},        // char*，读到 NUL，最长 max
           {"index": 2, "type": "bytes", "len_from": 3},      // 指针+长度，长度取自第 3 个参数
           {"index": 2, "type": "bytes", "len": 16},          // 指针+固定长度
           {"index": 4, "type": "ptr"}                        // 原始指针值（hex）
         ],
-        "ret": {"capture": true, "type": "int"},             // 抓返回值 + 类型（int|ptr|string|bytes）
+        "ret": {"capture": true, "type": "int"},             // 抓返回值 + 类型（另支持 float|double）
         "backtrace": false                                    // 是否抓调用栈（返回原始 PC 列表）
       },
       "action": {
         "type": "observe",       // observe（只读） | replace_ret（篡改返回值） | replace_arg（篡改参数）
-        "ret_value": 0,          // type=replace_ret：新的返回值（整型/指针）
-        "arg_overrides": [       // type=replace_arg：进入原函数前覆盖这些寄存器
+        "ret_value": 0,          // type=replace_ret：新的返回值（浮点需 signature）
+        "arg_overrides": [       // type=replace_arg：进入原函数前覆盖这些逻辑参数
           {"index": 0, "value": 1}
         ]
       }
@@ -48,7 +48,7 @@ PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并�
 }
 ```
 
-**类型取值**：`int`（有符号 64 位）、`ptr`（指针，hex 输出）、`string`（C 字符串）、`bytes`（原始字节，hex 输出，需 `len` 或 `len_from`）。
+**采集类型取值**：`float`、`double`（需匹配完整 signature），`int`（有符号 64 位）、`ptr`（指针，hex 输出）、`string`（C 字符串）、`bytes`（原始字节，hex 输出，需 `len` 或 `len_from`）。
 
 **响应**：`{"ok":true,"package":"...","installed":[{"id":"enc1"}],"note":"..."}`
 （note 会提示“配置已写入，注入在目标下次启动时生效”或“已 force-stop 触发重启”。）
@@ -58,7 +58,7 @@ PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并�
 {"package": "com.target.app"}          // 移除该包全部期望 hook
 {"package": "com.target.app", "id": "enc1"}   // 只移除某个 hook 点
 ```
-对 **M5 Java Tracer**，daemon 会同步剩余完整配置（或 `targets:[]`），HookRegistry 立即执行 live unhook；对 **M3 native**，这里只更新配置，已在当前进程安装的 native hook 仍按原有重启语义处理。
+对 **M5 Java Tracer**，daemon 会同步剩余完整配置（或 `targets:[]`），HookRegistry 立即执行 live unhook；对支持实时配置的 **M3 native**，后续调用透传原函数，在途调用保留旧配置；未物理撤钩。
 
 ## 查询：`GET /hooks` / `GET /runtime_status`
 `GET /hooks` 返回磁盘上的**期望 hook 配置**（读 `/data/adb/reconbridge/hooks/*.json`）：

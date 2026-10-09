@@ -46,7 +46,8 @@ runtime_hook_status("com.example.app")
   pending 在停用期间不进行 Dobby 轮询；ShadowHook 已登记的 pending 任务仍可能完成，但代理保持透传。
 - 进程退出或通道断开后不自动重连；已安装行为保持最后配置，新的配置需等下次连接/启动。
 - JNI 观察器仍按启动配置安装；变更时 `configuration.jni_restart_required: true`，需要重启。
-- 未增加浮点 ABI 或类/库卸载跟踪；`installed` 是安装结果，不是持续有效性证明。
+- float / double 需完整签名，见 [Native 浮点支持](NATIVE_FLOAT.md)；同一保留点不可运行中更改签名。
+- 未增加类/库卸载跟踪；`installed` 是安装结果，不是持续有效性证明。
 
 ## 实现与验证
 

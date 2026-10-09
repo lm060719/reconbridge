@@ -4385,6 +4385,8 @@ def post_hook(config: dict | str) -> dict:
     """下发原始 hook 配置（M3 native / M5 Java）。
     M5 Java Tracer 已支持运行中完整配置 reconcile；restart:false 时可 live add/remove/replace。
     支持 live_reconcile 的 M3 native 可运行中新增/替换/停用；停用保留透传跳板。
+    Native float/double 需完整 signature.args/ret（最多 8 个标量参数），采集类型需匹配。
+    同一 Native 点更改签名需重启；使用前核对 native_float_abi.version。
     hot_injected 只表示配置投递；请用 runtime_hook_status 确认实际结果。
     首次注入（尚无在线 Native Runtime）以及 JNI 配置变更仍需启动/重启目标。
     """

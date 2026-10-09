@@ -1,0 +1,70 @@
+{
+  "recorded_utc": "2026-10-09T23:32:46.029584+00:00",
+  "baseline_commit": "8f4ff41ec24766e8e4a153d832eb3380ddf8a966",
+  "host": "Windows",
+  "python_tests": {
+    "passed": 194,
+    "skipped": 1
+  },
+  "config_host_test": "passed (MSVC C++17)",
+  "abi_test_compilation": "passed for both Android targets; actual CPU execution via CI",
+  "builds": [
+    {
+      "abi": "arm64-v8a",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "6cd8be37b9cb5b7dcb6ed6af19db202a15853a4b0408d35f13181ba95f7fd4c2",
+      "files": {
+        "bin/reconbridge_daemon": {
+          "sha256": "4c97c2edf068413df0ecde1786cc55d5221b3356f3f10bcbec808d5b2d483e9c",
+          "bytes": 1695600
+        },
+        "zygisk/arm64-v8a.so": {
+          "sha256": "a52a37b63ebdd1c88138d77350ac4ba73a84785fe130f3739f481e65440741b8",
+          "bytes": 606712
+        }
+      }
+    },
+    {
+      "abi": "x86_64",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "6cd8be37b9cb5b7dcb6ed6af19db202a15853a4b0408d35f13181ba95f7fd4c2",
+      "files": {
+        "bin/reconbridge_daemon_x86_64": {
+          "sha256": "3042b3284455dd95e69d98249e656e097f03126912ce06f8c0dbab09f0b7740b",
+          "bytes": 1696936
+        },
+        "zygisk/x86_64.so": {
+          "sha256": "76644d56e131058f79356758807463a1e6944ecb0b9fcc493d5046867e60e079",
+          "bytes": 605064
+        }
+      }
+    }
+  ],
+  "artifacts": {
+    "module/bin/reconbridge_daemon": {
+      "bytes": 1695600,
+      "sha256": "4c97c2edf068413df0ecde1786cc55d5221b3356f3f10bcbec808d5b2d483e9c"
+    },
+    "module/bin/reconbridge_daemon_x86_64": {
+      "bytes": 1696936,
+      "sha256": "3042b3284455dd95e69d98249e656e097f03126912ce06f8c0dbab09f0b7740b"
+    },
+    "module/zygisk/arm64-v8a.so": {
+      "bytes": 606712,
+      "sha256": "a52a37b63ebdd1c88138d77350ac4ba73a84785fe130f3739f481e65440741b8"
+    },
+    "module/zygisk/x86_64.so": {
+      "bytes": 605064,
+      "sha256": "76644d56e131058f79356758807463a1e6944ecb0b9fcc493d5046867e60e079"
+    },
+    "dist/ReconBridge-native-float.zip": {
+      "bytes": 1858241,
+      "sha256": "8a75d40148a0a81f7123d03cb86e885e8563adb1b217881cf5a9b2da36a4f4e3"
+    }
+  },
+  "module_zip_verification": "passed",
+  "remote_ci": "See commit-associated GitHub Actions; full logs saved after push.",
+  "device_tests": "Deferred by user."
+}

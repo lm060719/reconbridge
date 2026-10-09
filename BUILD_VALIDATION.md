@@ -76,3 +76,5 @@ python ../scripts/generate_tool_catalog.py --check
 ```
 
 真机验证单独进行；本轮按用户要求未连接/部署设备，JNI 运行时兼容性仍待验证。
+
+`native-abi` 在 Linux ARM64 与 x86_64 实际执行生产汇编网关（混合参数、栈参数、浮点替换、特殊值、异常展开），是模块打包的前置检查。源码指纹包括 `.S` 汇编。

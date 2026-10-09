@@ -22,7 +22,7 @@ $llvmBin = Join-Path $ndk "toolchains\llvm\prebuilt\windows-x86_64\bin"
 $strip = Join-Path $llvmBin "llvm-strip.exe"
 $outDir = Join-Path $root "module\bin"
 $zygOutDir = Join-Path $root "module\zygisk"
-$zygSrc = Join-Path $root "m3\zygisk\module.cpp"
+$zygSrc = @((Join-Path $root "m3\zygisk\module.cpp"), (Join-Path $root "m3\zygisk\native_bridge.S"))
 $src = @((Join-Path $root "src\daemon.cpp"), (Join-Path $root "src\dynamic.cpp"),
          (Join-Path $root "src\mobile_mcp.cpp"))
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null

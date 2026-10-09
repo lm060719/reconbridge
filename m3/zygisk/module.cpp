@@ -41,6 +41,7 @@
 #include "third_party/json.hpp"
 #include "native_status.h"
 #include "native_live.h"
+#include "native_abi.h"
 #if defined(__aarch64__)
 #include "third_party/shadowhook.h"
 #elif defined(__x86_64__)
@@ -290,6 +291,7 @@ static void publish_native_status() {
     status["hooks"] = std::move(active);
     status["retained_hooks"] = std::move(retained);
     status["native_status_version"] = 2;
+    status["native_float_abi"] = {{"version", 1}, {"types", {"float", "double"}}, {"max_args", 8}, {"explicit_signature", true}};
     status["config_revision"] = plan->revision;
     status["live_reconcile"] = g_control_connected.load();
     status["live_disable"] = g_control_connected.load();
@@ -356,9 +358,16 @@ static void build_and_send(const NativeSpec& t, uint64_t revision, const long a[
     for (size_t k = 0; k < t.args.size(); k++) {
         const ArgSpec& s = t.args[k];
         if (k) o += ",";
+        if (native_floating(s.type)) {
+            auto capture = native_float_capture(s.type, static_cast<uint64_t>(a[s.index]));
+            capture["index"] = s.index;
+            o += capture.dump();
+            continue;
+        }
         o += "{\"index\":" + std::to_string(s.index) + ",\"type\":\"";
         long v = (s.index >= 0 && s.index < 8) ? a[s.index] : 0;
         switch (s.type) {
+            case T_FLOAT: case T_DOUBLE: case T_VOID: break;  // validated/captured above
             case T_INT:
                 o += "int\",\"value\":" + std::to_string(v);
                 break;
@@ -397,7 +406,9 @@ static void build_and_send(const NativeSpec& t, uint64_t revision, const long a[
     o += "]";
 
     // 返回值
-    if (t.cap_ret) {
+    if (t.cap_ret && native_floating(t.ret_type)) {
+        o += ",\"ret\":" + native_float_capture(t.ret_type, static_cast<uint64_t>(ret)).dump();
+    } else if (t.cap_ret) {
         o += ",\"ret\":{\"type\":\"";
         switch (t.ret_type) {
             case T_PTR: {
@@ -464,23 +475,15 @@ static void build_and_send(const NativeSpec& t, uint64_t revision, const long a[
 // ---------------------------------------------------------------------------
 // 代理池：每个 hook 点一个独立 proxy_i，转发到 proxy_common(i, x0..x7)
 // ---------------------------------------------------------------------------
-typedef long (*fn8)(long, long, long, long, long, long, long, long);
-
-static long proxy_common(int idx, long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {
-    return invoke_native(g_live, idx, {a0, a1, a2, a3, a4, a5, a6, a7},
-        [idx](const std::array<long, 8>& args) {
-            auto original = reinterpret_cast<fn8>(g_slots[idx].orig);
-            return original ? original(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]) : 0;
-        },
+extern "C" __attribute__((visibility("hidden"))) void rb_native_dispatch(int idx, NativeFrame* frame) {
+    const auto& retained = g_slots[idx];
+    invoke_native_frame(g_live, idx, retained, retained.orig, *frame,
         [](const NativeSpec& spec, uint64_t revision, const std::array<long, 8>& args, long result) {
             build_and_send(spec, revision, args.data(), result);
         });
 }
 
-#define PROXY(i)                                                                                    \
-    static long proxy_##i(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) { \
-        return proxy_common(i, a0, a1, a2, a3, a4, a5, a6, a7);                                     \
-    }
+#define PROXY(i) extern "C" void rb_proxy_##i();
 // 生成 64 个
 PROXY(0) PROXY(1) PROXY(2) PROXY(3) PROXY(4) PROXY(5) PROXY(6) PROXY(7)
 PROXY(8) PROXY(9) PROXY(10) PROXY(11) PROXY(12) PROXY(13) PROXY(14) PROXY(15)
@@ -491,7 +494,7 @@ PROXY(40) PROXY(41) PROXY(42) PROXY(43) PROXY(44) PROXY(45) PROXY(46) PROXY(47)
 PROXY(48) PROXY(49) PROXY(50) PROXY(51) PROXY(52) PROXY(53) PROXY(54) PROXY(55)
 PROXY(56) PROXY(57) PROXY(58) PROXY(59) PROXY(60) PROXY(61) PROXY(62) PROXY(63)
 
-#define PROXY_REF(i) (void*)proxy_##i
+#define PROXY_REF(i) (void*)rb_proxy_##i
 static void* g_proxy[MAX_HOOKS] = {
     PROXY_REF(0), PROXY_REF(1), PROXY_REF(2), PROXY_REF(3), PROXY_REF(4), PROXY_REF(5), PROXY_REF(6), PROXY_REF(7),
     PROXY_REF(8), PROXY_REF(9), PROXY_REF(10), PROXY_REF(11), PROXY_REF(12), PROXY_REF(13), PROXY_REF(14), PROXY_REF(15),

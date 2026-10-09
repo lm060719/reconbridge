@@ -128,3 +128,5 @@ cd pc
 
 `tests/event_stream_test.cpp` 验证实际 C++ 缓冲实现的并发、丢弃、截断和重启语义，CI 中用 g++ 执行。
 `build.ps1` 编译 arm64/x86_64 daemon 与 Zygisk。Tracer 版本回报由 `:app:testDebugUnitTest :app:assembleDebug` 验证构建。
+
+Native Runtime 的 `native_float_abi` 声明 float/double 能力；使用前需核对完整签名，见 [浮点支持](NATIVE_FLOAT.md)。

@@ -12,6 +12,34 @@ static json hook(const std::string& id, const std::string& symbol, long value) {
 static json config(json targets) { return {{"targets", std::move(targets)}}; }
 
 int main() {
+    // Floating configurations require a complete scalar signature. Validation
+    // runs before any installation, including range and capture mismatches.
+    json floating = {{"id", "fp"}, {"lib", "x.so"}, {"symbol", "fp"},
+        {"signature", {{"args", {"int64", "float", "double"}}, {"ret", "double"}}},
+        {"capture", {{"args", json::array({{{"index", 1}, {"type", "float"}}})},
+                     {"ret", {{"capture", true}, {"type", "double"}}}}},
+        {"action", {{"type", "replace_arg"}, {"arg_overrides", json::array({{{"index", 1}, {"value", 1.25}}})}}}};
+    auto valid = parse_native_spec(floating, 0);
+    assert(valid.signature_count == 3 && valid.fp_arg_overrides[0].second == 1.25);
+    std::vector<json> invalid;
+    auto bad = floating; bad.erase("signature"); invalid.push_back(bad);
+    bad = floating; bad["signature"]["variadic"] = true; invalid.push_back(bad);
+    bad = floating; bad["signature"]["args"] = json::array({"void"}); invalid.push_back(bad);
+    bad = floating; bad["signature"]["args"] = std::vector<std::string>(9, "float"); invalid.push_back(bad);
+    bad = floating; bad["signature"]["ret"] = "struct"; invalid.push_back(bad);
+    bad = floating; bad["signature"]["ret"] = "void"; invalid.push_back(bad);
+    bad = floating; bad["capture"]["args"][0]["type"] = "double"; invalid.push_back(bad);
+    bad = floating; bad["capture"]["args"][0]["len_from"] = 2; invalid.push_back(bad);
+    bad = floating; bad["action"]["arg_overrides"][0]["value"] = 1e100; invalid.push_back(bad);
+    bad = floating; bad["action"]["arg_overrides"][0]["value"] = "1.25"; invalid.push_back(bad);
+    bad = floating; bad["action"]["arg_overrides"][0]["value"] = std::numeric_limits<double>::infinity(); invalid.push_back(bad);
+    bad = floating; bad["action"]["arg_overrides"][0]["index"] = 3; invalid.push_back(bad);
+    bad = floating; bad["action"] = {{"type", "replace_ret"}, {"ret_value", nullptr}}; invalid.push_back(bad);
+    for (const auto& value : invalid) {
+        bool rejected = false;
+        try { parse_native_spec(value, 0); } catch (const std::exception&) { rejected = true; }
+        assert(rejected);
+    }
     NativeLiveRegistry registry;
     int allocations = 0, emits = 0;
     auto prepare = [&](size_t, const NativeSpec&) { ++allocations; };

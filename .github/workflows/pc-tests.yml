@@ -105,6 +105,20 @@ jobs:
           g++ -std=c++17 -pthread -Isrc tests/native_ipc_test.cpp -o /tmp/native-ipc-test
           /tmp/native-ipc-test
 
+  native-abi:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Execute production scalar ABI gateways on native CPU
+        run: |
+          g++ -std=c++17 -O2 -pthread tests/native_abi_test.cpp m3/zygisk/native_bridge.S -o /tmp/native-abi-test
+          /tmp/native-abi-test
+
   native:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -132,7 +146,7 @@ jobs:
           retention-days: 14
 
   module-package:
-    needs: [pytest, tracer, daemon-syntax, native]
+    needs: [pytest, tracer, daemon-syntax, native-abi, native]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

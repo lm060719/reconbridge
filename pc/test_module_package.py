@@ -59,12 +59,15 @@ def test_package_uses_fresh_binaries_and_normalizes_scripts(staged):
     assert output.read_bytes() == first
 
 
-@pytest.mark.parametrize("problem", ["source", "architecture", "checksum", "missing", "toolchain"])
+@pytest.mark.parametrize("problem", ["source", "assembly", "architecture", "checksum", "missing", "toolchain"])
 def test_bad_build_cannot_replace_existing_package(staged, problem):
     repo, native, output = staged
     output.write_bytes(b"previous-deliverable")
     binary = native / "arm64-v8a/bin/reconbridge_daemon"
     if problem == "source": (repo / "src/daemon.cpp").write_text("changed")
+    if problem == "assembly":
+        (repo / "m3/zygisk").mkdir()
+        (repo / "m3/zygisk/native_bridge.S").write_text("// changed assembly")
     if problem == "architecture": binary.write_bytes(elf(62))
     if problem == "checksum": binary.write_bytes(binary.read_bytes() + b"corrupt")
     if problem == "missing": binary.unlink()
