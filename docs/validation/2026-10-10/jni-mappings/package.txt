@@ -1,0 +1,2 @@
+Packaged and verified dist\ReconBridge-jni-mappings.zip
+Verified dist\ReconBridge-jni-mappings.zip

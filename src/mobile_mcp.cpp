@@ -545,12 +545,15 @@ static const json& tools() {
              schema({{"limit", prop("integer", 50)}, {"since_seq", prop("integer", 0)}, {"stream_id", prop("string", "")}})),
         tool("event_stream_status", "检查 daemon 缓冲丢失、重启与订阅队列丢弃；不证明上游完整性。",
              schema({{"since_seq", prop("integer", 0)}, {"stream_id", prop("string", "")}})),
-        tool("configure_jni_capture", "配置下一次启动时观察 RegisterNatives；关闭需退出进程，启用 restart 会 force-stop。",
+        tool("configure_jni_capture", "配置下一次启动时观察 RegisterNatives/UnregisterNatives；关闭需退出进程，启用 restart 会 force-stop。",
              schema({{"package", prop("string")}, {"enable", prop("boolean", true)},
                      {"restart", prop("boolean", false)}}, {"package"})),
         tool("inspect_jni_bindings", "读取已观察到的 JNI 注册历史及 so 偏移；不代表当前全部有效绑定。",
              schema({{"package", prop("string")}, {"class_filter", prop("string", "")},
-                     {"limit", prop("integer", 500)}}, {"package"})),
+                     {"limit", prop("integer", 500)}, {"include_inactive", prop("boolean", true)}}, {"package"})),
+        tool("inspect_jni_exports", "只读分析设备 ELF 的 Java_* 导出候选；不证明库已加载或 JNI 已绑定。",
+             schema({{"path", prop("string")}, {"class_filter", prop("string", "")},
+                     {"limit", prop("integer", 500)}}, {"path"})),
         tool("trace_java", "下发 Java 方法 trace 并采集命中。",
              schema({{"package", prop("string")}, {"class_name", prop("string")}, {"method", prop("string")},
                      {"params", nullable("array")}, {"args_render", prop("string", "tostring")},
@@ -1048,7 +1051,15 @@ static json invoke_tool(const std::string& name, const json& a) {
         const int limit = a.value("limit", 500);
         if (limit < 1 || limit > 4096) throw std::runtime_error("limit must be 1..4096");
         return http_get("/jni/bindings", {{"package", package}, {"class_filter", a.value("class_filter", "")},
-            {"limit", std::to_string(limit)}});
+            {"limit", std::to_string(limit)}, {"include_inactive", a.value("include_inactive", true) ? "true" : "false"}});
+    }
+    if (name == "inspect_jni_exports") {
+        const auto path = a.value("path", "");
+        const int limit = a.value("limit", 500);
+        if (path.empty() || path[0] != '/' || path.find('\0') != std::string::npos)
+            throw std::runtime_error("path must be an absolute device ELF path");
+        if (limit < 1 || limit > 4096) throw std::runtime_error("limit must be 1..4096");
+        return http_get("/jni/exports", {{"path", path}, {"class_filter", a.value("class_filter", "")}, {"limit", std::to_string(limit)}});
     }
     if (name == "configure_jni_capture") {
         const auto package = a.value("package", "");

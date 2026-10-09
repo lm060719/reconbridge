@@ -98,6 +98,9 @@ jobs:
           /tmp/event-stream-test
           g++ -std=c++17 -Isrc -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" tests/jni_observer_test.cpp -o /tmp/jni-observer-test
           /tmp/jni-observer-test
+          g++ -std=c++17 -shared -fPIC tests/jni_exports_fixture.cpp -o /tmp/jni-exports-fixture.so
+          g++ -std=c++17 -pthread tests/jni_mappings_test.cpp -o /tmp/jni-mappings-test
+          /tmp/jni-mappings-test /tmp/jni-exports-fixture.so
           g++ -std=c++17 -pthread tests/native_status_test.cpp -o /tmp/native-status-test
           /tmp/native-status-test
           g++ -std=c++17 -pthread tests/native_live_test.cpp -o /tmp/native-live-test

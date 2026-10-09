@@ -97,3 +97,14 @@ JNI 静态导出与注销/卸载跟踪；apkanalyzer/UI Automator/Perfetto 接�
 - 构建入口纳入汇编，打包指纹覆盖 .S；更新双架构设备产物。
 - 用法：[NATIVE_FLOAT.md](pc/NATIVE_FLOAT.md)；验证：[本批记录](docs/validation/2026-10-10/native-float/README.md)。
 - 仍待真机验收、物理撤钩与库卸载跟踪；可变参数、结构体/向量不在本次范围。
+
+## 2026-10-10：JNI 映射生命周期与静态导出
+
+- JNI observer v2 同时观察成功 RegisterNatives / UnregisterNatives，分别报告安装与 partial 状态。
+- 弱引用类身份区分同名不同 ClassLoader，发现回收后清理引用，身份 ID 不复用。
+- daemon 映射缓存标记 superseded/unregistered/class_collected/runtime_disconnected/identity_unknown，连接隔离 PID 重用。
+- 查询时检查地址的可执行映射与模块路径；明确不等于当前 VM 绑定已验证或持续卸载通知。
+- PC/手机新增 inspect_jni_exports：只读扫描 ELF .dynsym、解析 JNI 转义和重载参数，保留未知返回类型。
+- 更新 JNI 假表语义、生命周期缓存、ELF 边界、真实 ELF 样本与 socket 协议测试；工具清单更新为 PC 95 / 手机 49。
+- 用法：[JNI_MAPPINGS.md](pc/JNI_MAPPINGS.md)；日志：[本批验证](docs/validation/2026-10-10/jni-mappings/README.md)。
+- Android 真机验收继续暂缓；持续 linker 卸载通知、历史绑定枚举、sectionless ELF 仍不覆盖。

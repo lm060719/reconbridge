@@ -112,3 +112,8 @@ POST /hook ─► 守护进程写 /data/adb/reconbridge/hooks/<pkg>.json
 守护进程 inotify 监听 events.log ─► 推给 SSE/WS 客户端
 ```
 （injected 处于 app SELinux 域，不能直接读 /data/adb 或连守护进程，故一切经 root 域的 companion 中转。）
+
+## JNI 映射 v2
+
+`kind: jni` 启动配置观察 RegisterNatives / UnregisterNatives，S 状态分别报告安装结果。
+新增只读 `/jni/exports` 与注册生命周期状态，详见 [JNI 映射](../pc/JNI_MAPPINGS.md)。

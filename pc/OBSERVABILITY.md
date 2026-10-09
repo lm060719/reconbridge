@@ -109,13 +109,11 @@ native observer 不支持 live unhook；关闭只移除下次启动的配置，�
 进程实例与时间。原 RegisterNatives 先执行，仅成功返回且无待处理异常时记录，不修改注册参数或结果。
 Java 与 runtime targets 会被 native 执行器跳过，不再占 native Hook 槽位。
 
-覆盖边界：
-
-- 只观察安装之后、当前 JNI 函数表所指实现收到的 `RegisterNatives`；不补回之前的注册，也不枚举静态 `Java_*` 绑定。
-- 查询结果是**注册历史**，不是当前 VM 的完整绑定表。没有跟踪 UnregisterNatives、类卸载或库卸载；地址可能失效。
-- 同名类可能来自不同 ClassLoader，不能仅用类名+签名推断它们是同一绑定。
-- 独立缓存保留最近 4096 条注册记录，不受普通 Hook 事件挤占。缓存统计为全局；查询另报告本次过滤后的截断。
-- 单次注册最多采集 1024 个方法，超出时 `registration_truncated=true`；上游未观测的丢失仍未知。
+新版补充 **UnregisterNatives、重注册、弱引用类身份、断线状态和查询时地址映射检查**。
+完整状态、缓存与边界见 [JNI 映射说明](JNI_MAPPINGS.md)。静态 `Java_*` 导出由新增
+`inspect_jni_exports(path)` 独立读取设备 ELF 文件，返回候选，不证明 VM 已绑定。
+观察器版本与两个 JNI 函数的安装结果应分别检查；部分安装成功报告 `partial`。
+旧记录缺少类身份时标记 `identity_unknown`，不按类名猜测 ClassLoader。
 
 本功能需真机验证与目标 Android/Hook 引擎的运行时兼容性；编译成功不等于所有 ROM 上均能安装 observer。
 

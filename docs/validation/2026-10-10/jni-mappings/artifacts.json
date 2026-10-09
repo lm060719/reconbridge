@@ -1,0 +1,73 @@
+{
+  "recorded_utc": "2026-10-09T23:45:09.754181+00:00",
+  "baseline_commit": "6a00515f133128b0b8489d2643a14d3a499a3123",
+  "python_tests": {
+    "passed": 195,
+    "skipped": 1
+  },
+  "cpp_host_tests": "MSVC observer and mappings passed; actual NDK ARM64/x86_64 export fixtures parsed successfully",
+  "tool_catalog": {
+    "pc": 95,
+    "mobile": 49,
+    "check": "passed"
+  },
+  "builds": [
+    {
+      "abi": "arm64-v8a",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "460a8fd602d08980d46eb0cab5d645dcf0b36030df29f9de529353f52456eee5",
+      "files": {
+        "bin/reconbridge_daemon": {
+          "sha256": "b6febc43949086a66dce94e696e645a7b31c24d4a2b67b83d555c01a42c12c2b",
+          "bytes": 1735952
+        },
+        "zygisk/arm64-v8a.so": {
+          "sha256": "1e9a769be1775ee8086fea033437df81acefd63e1e09845bbd797e8eb6c5d439",
+          "bytes": 621704
+        }
+      }
+    },
+    {
+      "abi": "x86_64",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "460a8fd602d08980d46eb0cab5d645dcf0b36030df29f9de529353f52456eee5",
+      "files": {
+        "bin/reconbridge_daemon_x86_64": {
+          "sha256": "81c9296eadd341dae49292599e04c04678c26160c6b459af3425ac2182d90ad0",
+          "bytes": 1739792
+        },
+        "zygisk/x86_64.so": {
+          "sha256": "bf9ea1ae48b08b9045475eee14ea82603a7af3cd1e8104185482f8c756344d8c",
+          "bytes": 621896
+        }
+      }
+    }
+  ],
+  "artifacts": {
+    "module/bin/reconbridge_daemon": {
+      "bytes": 1735952,
+      "sha256": "b6febc43949086a66dce94e696e645a7b31c24d4a2b67b83d555c01a42c12c2b"
+    },
+    "module/bin/reconbridge_daemon_x86_64": {
+      "bytes": 1739792,
+      "sha256": "81c9296eadd341dae49292599e04c04678c26160c6b459af3425ac2182d90ad0"
+    },
+    "module/zygisk/arm64-v8a.so": {
+      "bytes": 621704,
+      "sha256": "1e9a769be1775ee8086fea033437df81acefd63e1e09845bbd797e8eb6c5d439"
+    },
+    "module/zygisk/x86_64.so": {
+      "bytes": 621896,
+      "sha256": "bf9ea1ae48b08b9045475eee14ea82603a7af3cd1e8104185482f8c756344d8c"
+    },
+    "dist/ReconBridge-jni-mappings.zip": {
+      "bytes": 1910241,
+      "sha256": "8a1ee545210d23a2baf39691b93588724d755e498ed6b33ca8f568b3fdac34b1"
+    }
+  },
+  "zip_verification": "passed",
+  "remote_ci": "See associated GitHub Actions after push; full raw log saved locally.",
+  "device_tests": "Deferred by user."
+}

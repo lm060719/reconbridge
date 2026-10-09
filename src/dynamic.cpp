@@ -1,6 +1,9 @@
 // M3 动态子系统实现：hook 配置下发 + hook 命中事件推流（SSE + 极简 WS）。
 #include "dynamic.h"
 #include "event_stream.h"
+#include "jni_bindings.h"
+#include "jni_exports.h"
+#include "jni_maps.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -86,6 +89,8 @@ using reconbridge::Broadcaster;
 static Broadcaster g_broadcaster;
 // Keep registration observations separate from high-volume hook hits.
 static Broadcaster g_jni_events(4096);
+static reconbridge::JniBindings g_jni_bindings;
+static std::atomic<uint64_t> g_next_jni_connection{0};
 
 // ---------------------------------------------------------------------------
 // events.log 轮询 tail：把 companion 追加的事件行广播出去
@@ -182,6 +187,7 @@ struct RuntimeCommandWaiter {
 };
 
 struct InjectConn {
+    uint64_t jni_connection = ++g_next_jni_connection;
     int fd;
     std::string base_pkg;
     std::string process_name;
@@ -588,9 +594,11 @@ static void inject_client(int fd) {
         } else if (type == 'E') {
             g_broadcaster.broadcast(payload);
             auto event = json::parse(payload, nullptr, false);
-            if (event.is_object() && event.value("type", "") == "jni_registration") {
+            if (event.is_object() && (event.value("type", "") == "jni_registration" ||
+                event.value("type", "") == "jni_unregistration" || event.value("type", "") == "jni_class_collected")) {
                 event["package"] = base_pkg;
                 event["process"] = pkg;
+                g_jni_bindings.ingest(event, conn->jni_connection);
                 g_jni_events.broadcast(event.dump(-1, ' ', false, json::error_handler_t::replace));
             }
         } else if (type == 'D') {
@@ -617,6 +625,7 @@ static void inject_client(int fd) {
             }
         }
     }
+    g_jni_bindings.disconnect(conn->jni_connection);
     reg_remove(conn);
     reg_fail_pending_commands(
         conn,
@@ -3070,20 +3079,35 @@ static void handle_jni_bindings(const Request& req, Response& res) {
     long limit = req.has_param("limit") ? strtol(req.get_param_value("limit").c_str(), nullptr, 10) : 500;
     limit = std::max(1L, std::min(4096L, limit));
     auto snapshot = g_jni_events.snapshot(0, 4096);
-    json bindings = json::array();
-    for (const auto& e : snapshot["events"]) {
-        if (e.value("package", "") == pkg && e.value("class", "").find(filter) != std::string::npos)
-            bindings.push_back(e);
-    }
-    const size_t available = bindings.size();
-    if (available > static_cast<size_t>(limit))
-        bindings.erase(bindings.begin(), bindings.begin() + (available - limit));
+    const bool include_inactive = !req.has_param("include_inactive") || req.get_param_value("include_inactive") != "false";
+    auto result = g_jni_bindings.snapshot(pkg, filter, static_cast<size_t>(limit), include_inactive);
     snapshot.erase("events");
-    reply(res, 200, {{"package", pkg}, {"count", bindings.size()}, {"bindings", bindings},
-        {"available", available}, {"result_truncated", available > static_cast<size_t>(limit)},
-        {"cache", snapshot}, {"runtime_status", runtime_status_snapshot(pkg)},
-        {"current_bindings_verified", false},
-        {"coverage", "observed successful RegisterNatives calls only; excludes earlier/static registrations; addresses may be stale after unload/unregister/process exit"}});
+    std::unordered_map<int, std::string> maps;
+    for (auto& row : result["bindings"]) {
+        row["address_mapping"] = "unknown";
+        if (!row.value("runtime_connected", false) || !row.contains("pid") || !row["pid"].is_number_integer()) continue;
+        const auto raw_pid = row["pid"].get<int64_t>();
+        if (raw_pid <= 0 || raw_pid > 4194304) continue;
+        const int pid = static_cast<int>(raw_pid);
+        if (!maps.count(pid)) maps[pid] = read_whole_file("/proc/" + std::to_string(pid) + "/maps");
+        row["address_mapping"] = reconbridge::jni_address_mapping(row.value("address", ""), row.value("module", ""), maps[pid]);
+    }
+    result["address_check_scope"] = "query-time proc maps; mappings/reloads do not prove current JNI binding";
+    result["cache"] = snapshot;
+    result["runtime_status"] = runtime_status_snapshot(pkg);
+    reply(res, 200, result);
+}
+
+static void handle_jni_exports(const Request& req, Response& res) {
+    const auto path = req.has_param("path") ? req.get_param_value("path") : "";
+    if (path.empty() || path[0] != '/' || path.find('\0') != std::string::npos) {
+        reply(res, 400, {{"error", "path must be an absolute device ELF path"}}); return;
+    }
+    const auto filter = req.has_param("class_filter") ? req.get_param_value("class_filter") : "";
+    long limit = req.has_param("limit") ? strtol(req.get_param_value("limit").c_str(), nullptr, 10) : 500;
+    limit = std::max(1L, std::min(4096L, limit));
+    try { reply(res, 200, reconbridge::inspect_jni_elf(path, filter, static_cast<size_t>(limit))); }
+    catch (const std::exception& error) { reply(res, 400, {{"error", error.what()}, {"path", path}}); }
 }
 
 // POST /dump_dex —— 便捷封装：下发一个“命中即 dump 内存区”的 hook 配置。
@@ -3171,6 +3195,7 @@ void register_routes(httplib::Server& svr) {
     svr.Get("/events", handle_events_sse);  // SSE
     svr.Get("/event_stream/status", handle_recent);
     svr.Get("/jni/bindings", handle_jni_bindings);
+    svr.Get("/jni/exports", handle_jni_exports);
     svr.Get("/recent", handle_recent);      // 事后采集环形缓冲
 }
 

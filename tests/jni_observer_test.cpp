@@ -9,6 +9,8 @@
 #include <cassert>
 #include <iostream>
 #include <ctime>
+#include <unordered_map>
+#include <mutex>
 
 using json = nlohmann::json;
 static std::vector<json> events;
@@ -46,14 +48,31 @@ static jobject JNICALL call_object(JNIEnv*, jobject, jmethodID, va_list) {
 static const char* JNICALL string_chars(JNIEnv*, jstring, jboolean*) { return "com.example.Native"; }
 static void JNICALL release_chars(JNIEnv*, jstring, const char*) {}
 static void JNICALL delete_ref(JNIEnv*, jobject) {}
+static std::unordered_map<jweak, jobject> weak_refs;
+static uintptr_t next_ref = 100;
+static jobject collected = nullptr;
+static jobject canonical(jobject obj) { return obj == reinterpret_cast<jobject>(0x22) ? reinterpret_cast<jobject>(0x2) : obj; }
+static jweak JNICALL new_weak(JNIEnv*, jobject obj) {
+    auto ref = reinterpret_cast<jweak>(++next_ref); weak_refs[ref] = canonical(obj); return ref;
+}
+static jobject JNICALL new_local(JNIEnv*, jobject obj) {
+    auto value = weak_refs.at(static_cast<jweak>(obj));
+    return value == collected ? nullptr : value;
+}
+static void JNICALL delete_weak(JNIEnv*, jweak ref) { weak_refs.erase(ref); }
+static jboolean JNICALL same(JNIEnv*, jobject a, jobject b) { return canonical(a) == canonical(b); }
+static jint JNICALL unregister_original(JNIEnv*, jclass) { return original_result; }
 
 int main() {
     JNINativeInterface_ table{};
     table.ExceptionCheck = exception_check; table.ExceptionClear = exception_clear;
     table.CallObjectMethodV = call_object; table.GetStringUTFChars = string_chars;
     table.ReleaseStringUTFChars = release_chars; table.DeleteLocalRef = delete_ref;
+    table.NewWeakGlobalRef = new_weak; table.NewLocalRef = new_local;
+    table.DeleteWeakGlobalRef = delete_weak; table.IsSameObject = same;
     JNIEnv env{&table};
     g_register_original = original;
+    g_unregister_original = unregister_original;
     g_class_name = reinterpret_cast<jmethodID>(0x1);
     g_jni_hook_id = "__rb_jni";
     JNINativeMethod method{const_cast<char*>("foo"), const_cast<char*>("(I)I"), reinterpret_cast<void*>(0x1234)};
@@ -62,6 +81,8 @@ int main() {
     assert(original_calls == 1 && events.size() == 1);
     assert(events[0]["class"] == "com.example.Native" && events[0]["offset"] == "0x234");
     assert(events[0]["signature"] == "(I)I");
+    const auto first_id = events[0]["class_id"];
+    assert(!first_id.get<std::string>().empty());
 
     pending = true; original_result = -1;
     assert(observe_register_natives(&env, clazz, &method, 1) == -1);
@@ -73,5 +94,38 @@ int main() {
     const auto before = events.size();
     assert(observe_register_natives(&env, clazz, &method, 1) == 0);
     assert(events.size() == before && original_calls == 4); // Reentrant observer still calls original.
+    g_in_jni_observer = false;
+    observe_register_natives(&env, reinterpret_cast<jclass>(0x22), &method, 1);
+    assert(events.back()["class_id"] == first_id); // Distinct JNI handles, same object.
+    observe_register_natives(&env, reinterpret_cast<jclass>(0x3), &method, 1);
+    assert(events.back()["class_id"] != first_id && events.back()["class"] == events[0]["class"]);
+    const auto second_id = events.back()["class_id"];
+    assert(observe_unregister_natives(&env, clazz) == JNI_OK);
+    assert(events.back()["type"] == "jni_unregistration" && events.back()["class_id"] == first_id);
+    const auto unregistered = events.size();
+    pending = true; original_result = -1;
+    assert(observe_unregister_natives(&env, clazz) == -1 && pending && events.size() == unregistered);
+    assert(cleared == 1); // Never clear the original VM exception.
+    pending = false; original_result = JNI_OK;
+    collected = reinterpret_cast<jobject>(0x3);
+    observe_unregister_natives(&env, clazz);
+    assert(events[events.size()-2]["type"] == "jni_class_collected");
+    assert(events[events.size()-2]["class_id"] == second_id && weak_refs.size() == 1);
+    collected = nullptr;
+    observe_register_natives(&env, reinterpret_cast<jclass>(0x3), &method, 1);
+    assert(events.back()["class_id"] != second_id); // GC/reuse never recycles IDs.
+    pending = true;
+    const auto before_pending = events.size();
+    assert(observe_register_natives(&env, clazz, &method, 1) == JNI_OK && pending);
+    assert(observe_unregister_natives(&env, clazz) == JNI_OK && pending);
+    assert(events.size() == before_pending && cleared == 1);
+    pending = false;
+    g_in_jni_observer = true;
+    assert(observe_unregister_natives(&env, clazz) == JNI_OK && events.size() == before_pending);
+    g_in_jni_observer = false;
+    for (uintptr_t i = 0; i < 1024; ++i)
+        observe_register_natives(&env, reinterpret_cast<jclass>(10000+i), &method, 1);
+    assert(g_jni_classes.size() == 1024 && weak_refs.size() == 1024);
+    assert(events.back()["class_id"] == "" && events.back()["class_identity_verified"] == false);
     std::cout << "JNI observer tests passed\n";
 }

@@ -95,8 +95,34 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         assert(received && rows[0]["runtime"]["config_revision"] == 4);
+        if (scenario == 0) {
+            // Actual framed JNI ingress and HTTP handler: connection-owned
+            // package identity, re-registration, unregister and disconnect.
+            json registration = {{"type","jni_registration"}, {"package","wrong.package"},
+                {"process_instance","test-instance"}, {"class_id","1"}, {"class","sample.Native"},
+                {"method","foo"}, {"signature","()I"}, {"address","0x1000"}};
+            send_frame(fd,'E',registration.dump());
+            registration["address"] = "0x2000";
+            send_frame(fd,'E',registration.dump());
+            registration["type"] = "jni_unregistration";
+            send_frame(fd,'E',registration.dump());
+            bool observed = false;
+            for (int i=0; i<100; ++i) {
+                auto state = g_jni_bindings.snapshot(pkg,"",100,true);
+                if (state["count"] == 2 && state["bindings"][1]["binding_status"] == "unregistered") { observed=true; break; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            assert(observed);
+            httplib::Request query; httplib::Response response;
+            query.params.emplace("package",pkg);
+            handle_jni_bindings(query,response);
+            auto state = json::parse(response.body);
+            assert(state["mapping_version"] == 2 && state["bindings"][0]["binding_status"] == "superseded");
+            assert(state["bindings"][0]["process"] == process && state["current_bindings_verified"] == false);
+        }
         shutdown(fd, SHUT_RDWR); close(fd); server.join();
         assert(runtime_status_snapshot(pkg)["processes"].empty());
+        if (scenario == 0) assert(g_jni_bindings.snapshot(pkg,"",100,true)["bindings"][0]["runtime_connected"] == false);
     }
     std::filesystem::remove_all(directory);
     std::cout << "Native/Java IPC handshake and live config tests passed\n";

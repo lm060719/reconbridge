@@ -2,7 +2,7 @@
 
 由 `scripts/generate_tool_catalog.py` 自动生成。PC 来自实际注册；手机端来自源码声明，非真机探测。
 
-PC：**94**；手机端：**48**。接口及功能范围以各工具说明为准。
+PC：**95**；手机端：**49**。接口及功能范围以各工具说明为准。
 
 | 工具 | PC | 手机 | 说明 |
 |---|---|---|---|
@@ -19,7 +19,7 @@ PC：**94**；手机端：**48**。接口及功能范围以各工具说明为准
 | `compare_divergence_probes` | ✓ | — | 比较已经采集的 A/B 条件探针值，并判断是否与源码 true/false 分支方向一致。 |
 | `compare_root_cause_hypothesis` | ✓ | — | 重新比较已采集的根因假设实验，并返回验证前/后的根因排名变化。 |
 | `compare_value_lineage_runtime` | ✓ | — | 比较已采集的 A/B Runtime Value Lineage，找最早稳定值差异。 |
-| `configure_jni_capture` | ✓ | ✓ | Enable/disable observation of future successful RegisterNatives calls. |
+| `configure_jni_capture` | ✓ | ✓ | Enable/disable observation of future successful RegisterNatives/UnregisterNatives calls. |
 | `create_action_plan` | ✓ | — | Generate a module draft. Dynamic args require input/live-path bindings. |
 | `decompile_apk` | ✓ | ✓ | 用 jadx 反编译 apk 到 Java 源码目录，返回反编译输出目录。 |
 | `device_status` | ✓ | ✓ | 探测手机守护进程状态与连接方式，返回 /health 及当前传输配置。用于排查连不上的问题。 |
@@ -40,6 +40,7 @@ PC：**94**；手机端：**48**。接口及功能范围以各工具说明为准
 | `inspect_call_graph` | ✓ | — | 递归展开一个 Java 方法的静态调用图，并叠加会话里已有的 runtime 命中证据。 |
 | `inspect_condition_origin` | ✓ | — | 从已确认的 A/B 分叉条件继续追踪字段 writer/readers 或条件方法返回值来源。 |
 | `inspect_jni_bindings` | ✓ | ✓ | Read observed class/method/signature -> native address/module/offset mappings. |
+| `inspect_jni_exports` | ✓ | ✓ | Inspect static Java_* export candidates from an ELF file on the device. |
 | `inspect_method` | ✓ | — | 展开一个已知 Java 方法：调用者、被调用方法、关联字符串、同类字段和 JADX 源码上下文。 |
 | `inspect_value_lineage` | ✓ | — | 跨方法递归追踪已确认 A/B 分叉条件的值来源。 |
 | `install_action_plan` | ✓ | — | Install a successfully verified plan, retaining existing Runtime Program permission policy. |

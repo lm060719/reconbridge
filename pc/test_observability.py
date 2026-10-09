@@ -122,6 +122,18 @@ def test_jni_inspection_is_read_only(monkeypatch):
     with pytest.raises(ValueError): jni.inspect_jni_bindings("../app")
 
 
+def test_jni_lifecycle_filter_and_static_exports_are_read_only(monkeypatch):
+    monkeypatch.setattr(jni.client, "post_json", lambda *args: pytest.fail("must not mutate"))
+    monkeypatch.setattr(jni.client, "get_json", lambda path, params: {"path": path, "params": params})
+    result = jni.inspect_jni_bindings("com.example.app", include_inactive=False)
+    assert result["params"]["include_inactive"] == "false"
+    result = jni.inspect_jni_exports("/data/app/libsample.so", class_filter="Native", limit=10)
+    assert result == {"path": "/jni/exports", "params": {"path": "/data/app/libsample.so", "class_filter": "Native", "limit": "10"}}
+    for path in ("relative.so", "C:/local.so", "/lib\x00.so"):
+        with pytest.raises(ValueError): jni.inspect_jni_exports(path)
+    with pytest.raises(ValueError): jni.inspect_jni_exports("/lib.so", limit=4097)
+
+
 def test_client_sends_epoch(monkeypatch):
     monkeypatch.setattr(obs.client, "get_json", lambda path, params: params)
     assert obs.client.get_recent(0, 5, "old")["stream_id"] == "old"
