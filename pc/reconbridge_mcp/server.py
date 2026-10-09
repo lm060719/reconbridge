@@ -4384,7 +4384,9 @@ def hermes_decompile(bundle_path: str, output_dir: str = "") -> dict:
 def post_hook(config: dict | str) -> dict:
     """下发原始 hook 配置（M3 native / M5 Java）。
     M5 Java Tracer 已支持运行中完整配置 reconcile；restart:false 时可 live add/remove/replace。
-    M3 native 仍按原有进程启动/restart 语义。
+    支持 live_reconcile 的 M3 native 可运行中新增/替换/停用；停用保留透传跳板。
+    hot_injected 只表示配置投递；请用 runtime_hook_status 确认实际结果。
+    首次注入（尚无在线 Native Runtime）以及 JNI 配置变更仍需启动/重启目标。
     """
     if isinstance(config, str):
         try:
@@ -4420,8 +4422,9 @@ def runtime_hook_status(package: str = "") -> dict:
     lifecycle_runtime 会报告 attach watcher、ActivityLifecycleCallbacks 和生命周期事件计数。
     pending_hooks 会显示等待类名、重试次数和最后错误；context_runtime 会显示当前
     Application/Context/Activity 与 activity_state，lifecycle_runtime 会显示 callbacks/events；
-    native_status_version=1 的 native Runtime 提供 engine/configuration/hooks 安装结果与错误；
-    pending 不是已安装，installed 不保证库尚未卸载；native 修改仍需重启进程。
+    native_status_version>=1 提供 engine/configuration/hooks 安装结果与错误；
+    v2 增加 config_revision、运行中配置更新与 retained_hooks（透传停用的保留跳板）。
+    pending 不是已安装，installed 不保证库尚未卸载；JNI 配置变更仍需重启进程。
     package 为空时列出全部连接进程。
     """
     params = None
@@ -5188,10 +5191,12 @@ def runtime_program_import(
 
 @mcp.tool()
 def unhook(package: str, hook_id: str = "") -> dict:
-    """移除某包 hook；运行中的 M5 Tracer 会立即 live unhook。
+    """移除期望 Hook；在线 Java Runtime 撤钩，支持实时配置的 native Runtime 停用行为。
 
     不给 hook_id 则清空该包全部期望 Hook；给了则只移除该 id。
     对支持 HookRegistry reconcile 的运行进程会立即调用 LSPosed Unhook，无需 force-stop。
+    Native 新调用透传原函数，已有调用可按旧配置完成；保留跳板，不做物理撤钩。
+    hot_unhooked 是投递数，实际结果以 runtime_hook_status 为准；JNI 观察器仍需重启停止。
     """
     _validate_package_name(package)
     body = {"package": package}

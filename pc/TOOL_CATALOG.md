@@ -94,7 +94,7 @@ PC：**94**；手机端：**48**。接口及功能范围以各工具说明为准
 | `toolchain_status` | ✓ | ✓ | 检查 PC 本地反编译工具链（jadx / DexKit / Ghidra / Hermes）是否就绪及其路径。 |
 | `trace_java` | ✓ | ✓ | 一步下发一个 Java 方法 trace 并采集命中（M5）。 |
 | `trace_target` | ✓ | — | 在当前会话目标上临时 trace 一个 Java 方法，命中即返回，并默认自动卸载 Hook。 |
-| `unhook` | ✓ | ✓ | 移除某包 hook；运行中的 M5 Tracer 会立即 live unhook。 |
+| `unhook` | ✓ | ✓ | 移除期望 Hook；在线 Java Runtime 撤钩，支持实时配置的 native Runtime 停用行为。 |
 | `verify_call_path` | ✓ | — | 一次性动态验证一条代表业务路径，并按方法入口时间还原真实执行顺序。 |
 | `verify_candidates` | ✓ | — | 把排名靠前的多个 Java 候选一次性装 Hook，并在一个共享窗口里验证谁真实命中。 |
 | `verify_condition_writer` | ✓ | — | 动态验证字段 writer 是否真的在一次行为中改变已确认的分叉条件字段。 |

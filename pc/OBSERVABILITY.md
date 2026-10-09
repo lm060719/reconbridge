@@ -21,7 +21,7 @@ Tracer 未启用也可能造成同样现象。安装版本与进程里正在运�
 
 ### Native Hook 安装状态
 
-`runtime_hook_status(package)` 的 native `runtime` 回报 `native_status_version: 1`，
+`runtime_hook_status(package)` 的 native `runtime` 回报 `native_status_version: 2`（兼容读取 v1），
 包含 `engine`、`configuration`、`hooks`、`jni_observers` 与递增 `revision`。
 每条 Hook 记录配置中的 `config_index`、`id`、库名及符号/偏移。
 
@@ -32,7 +32,8 @@ Tracer 未启用也可能造成同样现象。安装版本与进程里正在运�
 | `installed` | 引擎已确认安装成功 |
 | `failed` | 安装或延迟回调注册失败，`detail` 提供错误码和原因 |
 | `timeout` | x86_64 轮询 200 次仍未找到库/符号；重试间隔 150ms |
-| `rejected` | 无效配置或超出 64 个 native slot；包括不支持的采集类型 |
+| `rejected` | v1 的无效配置或容量拒绝；v2 在 `configuration` 中报告整批拒绝并保留旧配置 |
+| `disabled` | v2 的 `retained_hooks`：已停用采集/修改，仅保留透传跳板 |
 
 arm64 符号使用 ShadowHook 完成回调更新状态，offset 使用库加载回调；旧引擎若缺少符号完成回调，
 延迟安装只能保持 pending，并标记 `completion_callback: false`。arm64 不设与 x86_64 相同的轮询期限。
@@ -40,7 +41,8 @@ arm64 符号使用 ShadowHook 完成回调更新状态，offset 使用库加载�
 
 `diagnose_target` 对比期望 native ID 与成功安装 ID，报告缺失、等待、失败和引擎错误。
 旧模块缺少状态协议时不推断为健康。`installed` 仅表示本次进程中的安装结果；
-尚未跟踪库卸载，也未实现 native 实时增删替换。修改配置仍需重启目标进程。
+尚未跟踪库卸载。v2 在线连接支持 native 实时新增、停用和替换，详见 [NATIVE_LIVE.md](NATIVE_LIVE.md)。
+首次注入、JNI 配置变更、物理撤钩/回收槽位仍需重启目标进程；v1 native 配置仍按启动时生效。
 
 ## 事件完整性
 

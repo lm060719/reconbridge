@@ -172,7 +172,7 @@ static std::string read_whole_file(const std::string& path) {
 // LSPosed Runtime Phase 1：注入连接注册表 + 实时配置同步。
 // 每个 tracer 连接注册进来；'H' 声明支持 live reconcile，daemon 用 'R' 下发完整期望配置。
 // tracer 的 HookRegistry 据此执行 add/remove/replace，并通过 'S' 帧回报真实运行时状态。
-// native 层发 'S' 报告安装状态，不发 'H'，仍保持下次启动/重启生效语义。
+// native 层以 H(kind=native) 声明实时配置能力；移除采用透传停用，S 报告实际效果。
 // ---------------------------------------------------------------------------
 struct RuntimeCommandWaiter {
     std::mutex m;
@@ -188,6 +188,7 @@ struct InjectConn {
     std::mutex write_mutex;
     bool alive = true;
     bool reload_capable = false;
+    std::string runtime_kind = "unknown";
     bool command_capable = false;
     json runtime_status = nullptr;
     int64_t status_updated_at = 0;
@@ -206,9 +207,10 @@ static void reg_remove(const std::shared_ptr<InjectConn>& c) {
     for (auto it = g_conns.begin(); it != g_conns.end(); ++it)
         if (*it == c) { g_conns.erase(it); break; }
 }
-static void reg_mark_reloadable(const std::shared_ptr<InjectConn>& c) {
+static void reg_mark_reloadable(const std::shared_ptr<InjectConn>& c, const std::string& kind = "java") {
     std::lock_guard<std::mutex> lk(g_conn_mutex);
     c->reload_capable = true;
+    c->runtime_kind = kind;
 }
 
 static void reg_mark_command_capable(const std::shared_ptr<InjectConn>& c) {
@@ -300,6 +302,7 @@ static json runtime_status_snapshot(const std::string& package_filter) {
             {"package", c->base_pkg},
             {"process", c->process_name},
             {"connected", true},
+            {"kind", c->runtime_kind},
             {"live_reconcile", c->reload_capable},
             {"runtime_command", c->command_capable},
             {"status_updated_at", c->status_updated_at}
@@ -558,8 +561,23 @@ static void inject_client(int fd) {
         std::string payload(len, 0);
         if (len && !sock_read_full(fd, &payload[0], len)) break;
         if (type == 'H') {
-            reg_mark_reloadable(conn);
-            log_line("Tracer 声明支持 live reconcile：" + pkg);
+            const auto hello = json::parse(payload, nullptr, false);
+            const bool native = hello.is_object() && hello.contains("kind") && hello["kind"] == "native";
+            reg_mark_reloadable(conn, native ? "native" : "java");
+            // Replay the latest config after registering: a /hook or /unhook may
+            // have occurred after initial fetch but before this H handshake.
+            // All config writers also send while holding g_program_mutex.
+            {
+                std::lock_guard<std::mutex> config_lk(g_program_mutex);
+                std::string current = read_whole_file(g_hooks_dir + "/" + base_pkg + ".json");
+                if (current.empty()) current = json({{"package", base_pkg}, {"targets", json::array()}}).dump();
+                const uint32_t size = static_cast<uint32_t>(current.size());
+                const char frame = 'R';
+                std::lock_guard<std::mutex> write_lk(conn->write_mutex);
+                if (!sock_write_full(fd, &frame, 1) || !sock_write_full(fd, &size, 4) ||
+                    !sock_write_full(fd, current.data(), current.size())) break;
+            }
+            log_line("Runtime 声明支持 live reconcile：" + pkg);
         } else if (type == 'K') {
             reg_mark_command_capable(conn);
             log_line("Tracer 声明支持 Runtime Command：" + pkg);
@@ -2675,6 +2693,7 @@ static void handle_hook(const Request& req, Response& res) {
         idx++;
     }
 
+    std::unique_lock<std::mutex> config_lk(g_program_mutex);
     // mode:"append" —— 按 id 合并进现有配置（新的替换同 id，追加新 id），用于热加增量追加
     json to_write = body;
     std::string mode = body.value("mode", std::string("replace"));
@@ -2703,7 +2722,6 @@ static void handle_hook(const Request& req, Response& res) {
     // 手工 Hook 与 Runtime Program 共用最终 materialized 配置。
     // 普通 /hook 只负责手工 targets；已启用 Program targets 始终由 Program manager 重建。
     {
-        std::lock_guard<std::mutex> lk(g_program_mutex);
         to_write = compose_hook_config_with_runtime_programs(
             pkg,
             to_write);
@@ -2720,20 +2738,22 @@ static void handle_hook(const Request& req, Response& res) {
     std::string note;
     int hot = 0;
     if (body.value("restart", false)) {
+        config_lk.unlock();
         run_detached({"am", "force-stop", pkg});
         note = "配置已写入，并已 force-stop 目标以触发重新注入";
     } else {
         // 免重启：向运行中的 tracer 下发“完整期望配置”，HookRegistry 会 reconcile add/remove/replace。
         hot = hot_reload(pkg, written);
+        config_lk.unlock();
         if (hot > 0)
-            note = "配置已写入，并已实时同步到 " + std::to_string(hot) + " 个运行中进程";
+            note = "配置已写入，并已实时同步到 " + std::to_string(hot) + " 个 Runtime 连接；实际安装/停用结果请查询 runtime_hook_status";
         else
             note = "配置已写入；无运行中的 live reconcile 进程，将在目标下次启动时生效";
     }
     json installed = json::array();
     for (auto& t : body["targets"]) installed.push_back({{"id", t["id"]}});
     reply(res, 200, {{"ok", true}, {"package", pkg}, {"installed", installed},
-                     {"hot_injected", hot}, {"note", note}});
+                     {"hot_injected", hot}, {"runtime_effect_confirmed", false}, {"note", note}});
 }
 
 static void handle_unhook(const Request& req, Response& res) {
@@ -2750,6 +2770,7 @@ static void handle_unhook(const Request& req, Response& res) {
         return;
     }
 
+    std::unique_lock<std::mutex> config_lk(g_program_mutex);
     std::string p = hook_path(pkg);
     json desired = {
         {"package", pkg},
@@ -2820,7 +2841,6 @@ static void handle_unhook(const Request& req, Response& res) {
     }
 
     {
-        std::lock_guard<std::mutex> lk(g_program_mutex);
         desired = compose_hook_config_with_runtime_programs(
             pkg,
             desired);
@@ -2839,10 +2859,11 @@ static void handle_unhook(const Request& req, Response& res) {
 
     // 手工 Hook 被移除后，仍向在线 Tracer 下发包含 Program targets 的完整期望状态。
     int hot = hot_reload(pkg, desired.dump());
+    config_lk.unlock();
     std::string note;
     if (hot > 0)
         note = "手工 Hook 已移除，并已向 " + std::to_string(hot) +
-               " 个运行中进程同步；已启用 Runtime Program 保持生效";
+               " 个 Runtime 连接同步；native 停用保留透传跳板；已启用 Runtime Program 保持生效";
     else
         note = "手工 Hook 已移除；Runtime Program 记录保持不变";
 
@@ -2851,6 +2872,7 @@ static void handle_unhook(const Request& req, Response& res) {
         {"package", pkg},
         {"removed", config_existed},
         {"hot_unhooked", hot},
+        {"runtime_effect_confirmed", false},
         {"note", note}
     };
     if (!removed_id.empty())

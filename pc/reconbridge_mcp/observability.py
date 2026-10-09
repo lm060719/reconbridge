@@ -26,6 +26,12 @@ def safe_error(exc: Exception) -> str:
     return message[:600]
 
 
+def is_native_runtime(row: dict) -> bool:
+    runtime = row.get("runtime") or {}
+    return (runtime.get("kind") == "native" or row.get("kind") == "native"
+            or not (row.get("live_reconcile") or row.get("runtime_command")))
+
+
 def event_integrity(data: dict, since_seq: int = 0, stream_id: str = "") -> dict:
     supported = all(k in data for k in ("stream_id", "truncated", "earliest_seq", "cursor_reset"))
     reset = bool(data.get("cursor_reset")) or bool(stream_id and data.get("stream_id") != stream_id)
@@ -92,8 +98,8 @@ def diagnose_target(package: str) -> dict:
         add("desired_hooks", "unknown", safe_error(exc))
     try:
         rows = client.get_json("/runtime_status", {"package": package}).get("processes", [])
-        java_rows = [r for r in rows if r.get("live_reconcile") or r.get("runtime_command")]
-        native_rows = [r for r in rows if not (r.get("live_reconcile") or r.get("runtime_command"))]
+        java_rows = [r for r in rows if not is_native_runtime(r)]
+        native_rows = [r for r in rows if is_native_runtime(r)]
         if wants_native and not native_rows:
             add("native_runtime", "warning", {"connected_processes": 0},
                 "尚无 native Runtime 回报；确认目标进程启动、Zygisk 与模块启用情况。")
@@ -101,21 +107,23 @@ def diagnose_target(package: str) -> dict:
             "无连接可能是进程未启动、尚无 Hook 配置、Tracer 未启用或作用域未勾选；不能仅凭无连接确定原因。")
         for row in rows:
             runtime = row.get("runtime") or {}
-            if not (row.get("live_reconcile") or row.get("runtime_command")):
+            if is_native_runtime(row):
                 hooks = runtime.get("hooks", [])
                 installed = {h.get("id") for h in hooks if h.get("status") == "installed"}
                 unresolved = [h for h in hooks if h.get("status") != "installed"]
                 failed_jni = [h for h in runtime.get("jni_observers", []) if h.get("status") != "installed"]
                 engine_failed = runtime.get("engine", {}).get("status") == "failed"
                 config_failed = runtime.get("configuration", {}).get("status") in {"failed", "not_applied"}
+                jni_restart = runtime.get("configuration", {}).get("jni_restart_required", False)
                 missing = sorted(native_ids - installed)
-                supported = runtime.get("native_status_version") == 1
+                supported = runtime.get("native_status_version") in {1, 2}
                 state = "error" if engine_failed or config_failed else (
-                    "warning" if unresolved or failed_jni or missing or not row.get("connected", False)
+                    "warning" if unresolved or failed_jni or missing or jni_restart or not row.get("connected", False)
                     else "ok" if supported else "unknown")
                 add("native_runtime", state, {**row, "installed_ids": sorted(installed - {None}),
                     "missing_ids": missing, "unresolved_hooks": unresolved, "status_supported": supported},
-                    "状态记录本次进程启动时的安装结果；尚未跟踪库卸载。配置变更需要重启进程，旧模块状态可能未知。")
+                    "live_reconcile=true 支持 native 运行中增删替换；删除为透传停用，已有调用可按旧配置完成。"
+                    "JNI 配置变更仍需重启，库卸载尚未跟踪；旧模块可能需重启生效。")
                 continue
             installed = {h.get("id") for h in runtime.get("hooks", [])}
             pending = runtime.get("pending_hooks", [])

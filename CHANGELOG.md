@@ -57,7 +57,7 @@
 
 ### 后续工作
 
-native Hook 实时生命周期与浮点支持；UI 采集/回放；异步关联；报告/故障包；
+native Hook 物理撤钩/回收与浮点支持；UI 采集/回放；异步关联；报告/故障包；
 JNI 静态导出与注销/卸载跟踪；apkanalyzer/UI Automator/Perfetto 接入。
 
 ## 2026-10-09：后续 native Hook 安装状态与错误反馈
@@ -73,3 +73,16 @@ JNI 静态导出与注销/卸载跟踪；apkanalyzer/UI Automator/Perfetto 接�
 - 更新双架构设备二进制、文档及 CI 宿主测试。
 - 本地 Python 回归 189 项通过，新增 C++ 状态并发/异步顺序回归通过；详见 [后续验证记录](docs/validation/2026-10-09/native-status/README.md)。
 - 仍未执行真机测试；native 实时卸载/替换、库卸载跟踪及浮点 ABI 支持留待后续。
+
+## 2026-10-09：Native 运行中新增、停用与替换
+
+- Native 连接声明 H(kind=native)，接收 R 完整配置并回报 v2 实际状态。
+- 配置解析、唯一性和容量校验成功后原子切换；无效更新保留上一版本。
+- 同一点复用跳板；代理对一次调用持有固定配置版本，事件附 native_config_revision。
+- 移除采用透传停用，保留跳板和在途调用引用；不声明物理撤钩或槽位回收已完成。
+- Dobby 安装改为单线程；稳定槽位不重用，停用/重新启用不重复消耗容量。
+- daemon 握手补发最新配置，配置合并、写入和下发串行化；回复区分投递成功与实际生效。
+- PC 正确区分支持实时更新的 native 与 Java 连接，并提示 JNI 变更仍需重启。
+- 增加实际代理分派并发测试和 daemon socketpair 集成测试，更新双架构构建及工具文档。
+- 本地 Python 193 项通过，C++ 实时配置/代理分派测试通过；完整记录见 [本批验证](docs/validation/2026-10-09/native-live/README.md)。
+- 真机、Native 物理撤钩、库卸载和浮点支持仍未完成。

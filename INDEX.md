@@ -232,3 +232,6 @@ Python 包,入口 `python -m reconbridge_mcp`(stdio MCP)。
 - **改 native hook 行为** → [`m3/zygisk/module.cpp`](m3/zygisk/module.cpp) + [`src/dynamic.cpp`](src/dynamic.cpp)。
 - **改 Java trace / 实时篡改** → `m5/tracer/app/src/main/java/com/reconbridge/tracer/`。
 - **发版** → `build.ps1` → `build_exe.ps1` → `pack.ps1`,成品进 `dist/` 与 GitHub Release。
+## Native 实时配置补充
+
+- [运行中新增、停用、替换及能力边界](pc/NATIVE_LIVE.md)

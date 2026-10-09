@@ -166,3 +166,30 @@ def test_native_diagnostic_does_not_call_legacy_or_absent_runtime_healthy(monkey
     monkeypatch.setattr(obs.client, "get_recent", lambda **kw: snapshot())
     check = next(c for c in obs.diagnose_target("com.example.app")["checks"] if c["check"] == "native_runtime")
     assert check["status"] == expected
+
+
+@pytest.mark.parametrize("row", [
+    {"kind": "native", "live_reconcile": True, "runtime": None},
+    {"live_reconcile": True, "runtime": {"kind": "native", "native_status_version": 2}},
+    {"kind": "native", "live_reconcile": True, "runtime_command": False},
+])
+def test_live_native_connection_is_not_misclassified_as_java(row):
+    assert obs.is_native_runtime(row)
+    assert not obs.is_native_runtime({"live_reconcile": True, "runtime": {"hooks": []}})
+
+
+def test_v2_diagnostic_ignores_retained_disabled_hooks(monkeypatch):
+    monkeypatch.setattr(obs.external, "toolchain_status", lambda: {})
+    responses = {"/health": {"status": "ok"}, "/packages": {"packages": []}, "/hooks": {"hooks": []},
+        "/runtime_status": {"processes": [{"kind": "native", "connected": True, "live_reconcile": True,
+            "runtime": {"kind": "native", "native_status_version": 2, "hooks": [],
+                        "retained_hooks": [{"id": "removed", "status": "disabled"}]}}]}}
+    monkeypatch.setattr(obs.client, "get_json", lambda path, params=None: responses[path])
+    monkeypatch.setattr(obs.client, "get_recent", lambda **kw: snapshot())
+    checks = obs.diagnose_target("com.example.app")["checks"]
+    native = next(c for c in checks if c["check"] == "native_runtime")
+    assert native["status"] == "ok" and native["detail"]["installed_ids"] == []
+    assert not any(c["check"] == "java_hooks" for c in checks)
+    responses["/runtime_status"]["processes"][0]["runtime"]["configuration"] = {"jni_restart_required": True}
+    native = next(c for c in obs.diagnose_target("com.example.app")["checks"] if c["check"] == "native_runtime")
+    assert native["status"] == "warning"

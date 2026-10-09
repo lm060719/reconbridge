@@ -100,6 +100,10 @@ jobs:
           /tmp/jni-observer-test
           g++ -std=c++17 -pthread tests/native_status_test.cpp -o /tmp/native-status-test
           /tmp/native-status-test
+          g++ -std=c++17 -pthread tests/native_live_test.cpp -o /tmp/native-live-test
+          /tmp/native-live-test
+          g++ -std=c++17 -pthread -Isrc tests/native_ipc_test.cpp -o /tmp/native-ipc-test
+          /tmp/native-ipc-test
 
   native:
     runs-on: ubuntu-24.04

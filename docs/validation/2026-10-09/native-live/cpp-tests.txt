@@ -1,0 +1,4 @@
+Command: MSVC /std:c++17 /EHsc /utf-8 tests/native_live_test.cpp; execute compiled test
+native_live_test.cpp
+Native live configuration/dispatch tests passed
+Exit code: 0

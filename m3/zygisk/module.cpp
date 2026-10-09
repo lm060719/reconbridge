@@ -40,6 +40,7 @@
 
 #include "third_party/json.hpp"
 #include "native_status.h"
+#include "native_live.h"
 #if defined(__aarch64__)
 #include "third_party/shadowhook.h"
 #elif defined(__x86_64__)
@@ -121,45 +122,20 @@ static bool resolve_dobby(void* h) {
 // ---------------------------------------------------------------------------
 // 配置结构
 // ---------------------------------------------------------------------------
-enum ArgType { T_INT, T_PTR, T_STR, T_BYTES };
-enum ActionType { ACT_OBSERVE, ACT_REPLACE_RET, ACT_REPLACE_ARG };
-
-struct ArgSpec {
-    int index = 0;
-    ArgType type = T_INT;
-    int len = -1;       // bytes 固定长度
-    int len_from = -1;  // bytes 长度取自第 N 个参数
-    int max = 256;      // string 最长
-};
-
-struct Target {
-    std::string id, lib, symbol;
-    bool has_offset = false;
-    uint64_t offset = 0;
-    std::vector<ArgSpec> args;
-    bool cap_ret = false;
-    ArgType ret_type = T_INT;
-    bool backtrace = false;
-    // dump：命中时把 [x_base_arg, +x_size_arg) 内存回传落盘（用于内存 dex dump 等）
-    bool has_dump = false;
-    int dump_base_arg = -1;
-    int dump_size_arg = -1;
-    long dump_size_fixed = -1;  // 固定长度（与 size_arg 二选一）
-    int dump_max = 32 * 1024 * 1024;  // 单次上限 32MB
-    std::string dump_ext = "bin";
-    ActionType action = ACT_OBSERVE;
-    long ret_value = 0;
-    std::vector<std::pair<int, long>> arg_overrides;
-    // 运行时
+struct Target : NativeSpec {
     void* orig = nullptr;
     void* stub = nullptr;
     size_t status_key = 0;
+    std::atomic<int> poll_attempts{0};
 };
 
 static const int MAX_HOOKS = 64;
 static Target g_slots[MAX_HOOKS];
 static std::atomic<int> g_nslots{0};
 static NativeHookStatus g_native_status;
+static NativeLiveRegistry g_live;
+static std::atomic<bool> g_control_connected{false};
+static json g_initial_jni_config = json::array();
 static std::atomic<bool> g_status_ready{false};
 static std::mutex g_status_publish_mutex;
 
@@ -252,7 +228,8 @@ static bool write_full(int fd, const void* buf, size_t n) {
     const char* p = (const char*)buf;
     size_t left = n;
     while (left) {
-        ssize_t w = write(fd, p, left);
+        ssize_t w = send(fd, p, left, MSG_NOSIGNAL);
+        if (w < 0 && errno == EINTR) continue;
         if (w <= 0) return false;
         p += w;
         left -= w;
@@ -264,6 +241,7 @@ static bool read_full(int fd, void* buf, size_t n) {
     size_t left = n;
     while (left) {
         ssize_t r = read(fd, p, left);
+        if (r < 0 && errno == EINTR) continue;
         if (r <= 0) return false;
         p += r;
         left -= r;
@@ -277,7 +255,8 @@ static void send_framed(char type, const void* data, uint32_t len) {
     if (g_evt_fd < 0) return;
     if (!write_full(g_evt_fd, &type, 1) || !write_full(g_evt_fd, &len, 4) ||
         (len && !write_full(g_evt_fd, data, len))) {
-        g_evt_fd = -1;  // 断开则不再发
+        shutdown(g_evt_fd, SHUT_RDWR);  // Wake control reader; it owns close.
+        g_evt_fd = -1;
     }
 }
 static void send_event(const std::string& line) {
@@ -288,6 +267,37 @@ static void publish_native_status() {
     if (!g_status_ready.load()) return;
     std::lock_guard<std::mutex> lock(g_status_publish_mutex);
     json status = g_native_status.snapshot();
+    auto plan = g_live.snapshot();
+    json active = json::array(), retained = json::array();
+    for (size_t i = 0; i < status["hooks"].size(); ++i) {
+        auto row = status["hooks"][i];
+        row["slot"] = i;
+        const auto& spec = plan->active[i];
+        if (spec) {
+            row["id"] = spec->id;
+            row["config_index"] = spec->config_index;
+            row["requested"] = spec->requested;
+            row["active"] = true;
+            active.push_back(std::move(row));
+        } else {
+            row["installation_status"] = row["status"];
+            row["status"] = "disabled";
+            row["active"] = false;
+            row["removal_mode"] = "passthrough";
+            retained.push_back(std::move(row));
+        }
+    }
+    status["hooks"] = std::move(active);
+    status["retained_hooks"] = std::move(retained);
+    status["native_status_version"] = 2;
+    status["config_revision"] = plan->revision;
+    status["live_reconcile"] = g_control_connected.load();
+    status["live_disable"] = g_control_connected.load();
+    status["physical_unhook"] = false;
+    status["removal_mode"] = "passthrough";
+    status["installation_scope"] = "connected_process";
+    status["slot_capacity"] = MAX_HOOKS;
+    status["slots_used"] = status["hooks"].size() + status["retained_hooks"].size();
     status["process"] = g_package;
     status["pid"] = getpid();
     const auto payload = status.dump();
@@ -319,14 +329,14 @@ static void send_dump(const std::string& name, const std::string& data) {
 // ---------------------------------------------------------------------------
 // 命中处理：构造事件 JSON
 // ---------------------------------------------------------------------------
-static void build_and_send(int idx, const long a[8], long ret) {
-    Target& t = g_slots[idx];
+static void build_and_send(const NativeSpec& t, uint64_t revision, const long a[8], long ret) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     long long ms = (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 
     std::string o = "{";
     o += "\"ts\":" + std::to_string(ms);
+    o += ",\"native_config_revision\":" + std::to_string(revision);
     o += ",\"package\":\"";
     json_esc(o, g_package);
     o += "\",\"hook_id\":\"";
@@ -457,20 +467,14 @@ static void build_and_send(int idx, const long a[8], long ret) {
 typedef long (*fn8)(long, long, long, long, long, long, long, long);
 
 static long proxy_common(int idx, long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {
-    Target& t = g_slots[idx];
-    long a[8] = {a0, a1, a2, a3, a4, a5, a6, a7};
-    if (t.action == ACT_REPLACE_ARG)
-        for (auto& ov : t.arg_overrides)
-            if (ov.first >= 0 && ov.first < 8) a[ov.first] = ov.second;
-
-    long ret = 0;
-    if (t.orig)
-        ret = ((fn8)t.orig)(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
-
-    build_and_send(idx, a, ret);
-
-    if (t.action == ACT_REPLACE_RET) return t.ret_value;
-    return ret;
+    return invoke_native(g_live, idx, {a0, a1, a2, a3, a4, a5, a6, a7},
+        [idx](const std::array<long, 8>& args) {
+            auto original = reinterpret_cast<fn8>(g_slots[idx].orig);
+            return original ? original(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]) : 0;
+        },
+        [](const NativeSpec& spec, uint64_t revision, const std::array<long, 8>& args, long result) {
+            build_and_send(spec, revision, args.data(), result);
+        });
 }
 
 #define PROXY(i)                                                                                    \
@@ -559,24 +563,20 @@ static void on_symbol_hooked(int code, const char*, const char*, void* address,
         {{"code", code}, {"address", (uintptr_t)address},
          {"message", sh_to_errmsg ? sh_to_errmsg(code) : "ShadowHook callback"}});
 }
-#endif
 
 static void on_dl_post(struct dl_phdr_info* info, size_t, void*) {
     if (!info->dlpi_name) return;
     std::string bn = base_name(info->dlpi_name);
     for (int i = 0; i < g_nslots.load(); i++) {
         Target& t = g_slots[i];
-        if (t.has_offset && g_native_status.pending(t.status_key) && t.lib == bn)
+        if (t.has_offset && g_live.snapshot()->active[i] && g_native_status.pending(t.status_key) && t.lib == bn)
             apply_offset_hook(i, (uintptr_t)info->dlpi_addr);
     }
 }
 
-#if defined(__x86_64__)
-static int dl_iter_trampoline(struct dl_phdr_info* info, size_t size, void* data) {
-    on_dl_post(info, size, data);
-    return 0;
-}
+#endif
 
+#if defined(__x86_64__)
 static void apply_symbol_hook(int idx) {
     Target& t = g_slots[idx];
     if (!g_native_status.pending(t.status_key)) return;
@@ -588,28 +588,25 @@ static void apply_symbol_hook(int idx) {
         {{"address", (uintptr_t)addr}, {"code", code}, {"message", code == 0 ? "installed" : "DobbyHook failed"}});
 }
 
-static std::vector<int> g_pending_sym_idx;
-static std::vector<int> g_pending_offset_idx;
-
-// Called after all slots are published. Only this thread mutates pending lists.
+// One process-lifetime poller. Reconciles only publish new immutable slots;
+// the poller never iterates a vector that the control reader can mutate.
 static void start_pending_poll() {
-    if (g_pending_sym_idx.empty() && g_pending_offset_idx.empty()) return;
     std::thread([]() {
-        for (int tick = 0; tick < 200; tick++) {
+        while (g_control_connected.load()) {
             usleep(150 * 1000);
-            for (int idx : g_pending_sym_idx) apply_symbol_hook(idx);
-            if (!g_pending_offset_idx.empty()) dl_iterate_phdr(dl_iter_trampoline, nullptr);
-            auto done = [](int i) { return !g_native_status.pending(g_slots[i].status_key); };
-            g_pending_sym_idx.erase(std::remove_if(g_pending_sym_idx.begin(), g_pending_sym_idx.end(), done),
-                                    g_pending_sym_idx.end());
-            g_pending_offset_idx.erase(std::remove_if(g_pending_offset_idx.begin(), g_pending_offset_idx.end(), done),
-                                       g_pending_offset_idx.end());
-            if (g_pending_sym_idx.empty() && g_pending_offset_idx.empty()) return;
+            auto plan = g_live.snapshot();
+            for (int idx = 0; idx < g_nslots.load(); ++idx) {
+                auto& t = g_slots[idx];
+                if (!plan->active[idx] || !g_native_status.pending(t.status_key)) continue;
+                if (t.has_offset) {
+                    const uintptr_t base = find_lib_base(t.lib);
+                    if (base) apply_offset_hook(idx, base);
+                } else apply_symbol_hook(idx);
+                if (t.poll_attempts.fetch_add(1) + 1 >= 200 && g_native_status.pending(t.status_key))
+                    native_result(t.status_key, "timeout",
+                        {{"reason", "library_or_symbol_not_resolved"}, {"poll_attempts", 200}, {"retry_interval_ms", 150}});
+            }
         }
-        for (const auto& list : {g_pending_sym_idx, g_pending_offset_idx})
-            for (int idx : list)
-                native_result(g_slots[idx].status_key, "timeout",
-                    {{"reason", "library_or_symbol_not_resolved"}, {"poll_attempts", 200}, {"retry_interval_ms", 150}});
     }).detach();
 }
 #endif
@@ -617,173 +614,106 @@ static void start_pending_poll() {
 // ---------------------------------------------------------------------------
 // 解析配置并注入
 // ---------------------------------------------------------------------------
-static ArgType parse_type(const std::string& s) {
-    if (s == "ptr") return T_PTR;
-    if (s == "string") return T_STR;
-    if (s == "bytes") return T_BYTES;
-    if (s == "int") return T_INT;
-    throw std::invalid_argument("unsupported native capture type: " + s);
-}
-
 #include "jni_observer.h"
 
-static void apply_hooks(const std::string& cfg_text, JNIEnv* env) {
-    json cfg;
-    try {
-        cfg = json::parse(cfg_text);
-        if (!cfg.is_object() || !cfg.contains("targets") || !cfg["targets"].is_array())
-            throw std::invalid_argument("targets must be an array");
-    } catch (const std::exception& e) {
-        g_native_status.configuration({{"status", "failed"}, {"error", e.what()}});
-        g_status_ready = true;
-        publish_native_status();
-        return;
-    }
-
-    json jni_status = json::array();
-    size_t config_index = 0;
-    for (auto& jt : cfg["targets"]) {
-        const size_t ordinal = config_index++;
-        const std::string kind = jt.is_object() && jt.contains("kind") && jt["kind"].is_string()
-            ? jt["kind"].get<std::string>() : "native";
-        if (kind == "jni") {
-            try {
-                jni_status.push_back(install_jni_observer(env, jt.value("id", "__rb_jni")));
-            } catch (const std::exception& e) {
-                jni_status.push_back({{"status", "failed"}, {"error", e.what()}, {"config_index", ordinal}});
-            }
-            continue;
-        }
-        if (kind != "native") continue;
-        json metadata = {{"config_index", ordinal}, {"id", "h" + std::to_string(ordinal)}};
-        for (const auto* field : {"id", "lib", "symbol"})
-            if (jt.is_object() && jt.contains(field) && jt[field].is_string()) metadata[field] = jt[field];
-        if (jt.is_object() && jt.contains("offset")) metadata["offset"] = jt["offset"];
-        const auto key = g_native_status.add(metadata);
-        if (g_nslots.load() >= MAX_HOOKS) {
-            native_result(key, "rejected", {{"reason", "capacity_exceeded"}, {"limit", MAX_HOOKS}});
-            continue;
-        }
-        int idx = g_nslots.load();
-        Target& t = g_slots[idx];
-        t = Target{};
-        t.status_key = key;
-        try {
-            if (!jt.is_object()) throw std::invalid_argument("target must be an object");
-            if (jt.contains("kind") && !jt["kind"].is_string())
-                throw std::invalid_argument("kind must be a string");
-            t.id = jt.value("id", metadata["id"].get<std::string>());
-            t.lib = jt.value("lib", "");
-            t.symbol = jt.value("symbol", "");
-            t.has_offset = jt.contains("offset");
-            if (t.lib.empty() || base_name(t.lib) != t.lib)
-                throw std::invalid_argument("lib must be a nonempty basename");
-            if (t.has_offset == !t.symbol.empty())
-                throw std::invalid_argument("specify exactly one of symbol or offset");
-            if (t.has_offset) {
-                if (jt["offset"].is_string()) {
-                    const auto value = jt["offset"].get<std::string>();
-                    char* tail = nullptr;
-                    errno = 0;
-                    t.offset = strtoull(value.c_str(), &tail, value.rfind("0x", 0) == 0 ? 16 : 10);
-                    if (value.empty() || value[0] == '-' || value[0] == '+' ||
-                        (value[0] < '0' || value[0] > '9') || errno || tail != value.c_str() + value.size())
-                        throw std::invalid_argument("invalid offset");
-                } else {
-                    if (!jt["offset"].is_number_integer() || jt["offset"] < 0)
-                        throw std::invalid_argument("offset must be a nonnegative integer");
-                    t.offset = jt["offset"].get<uint64_t>();
-                }
-            }
-            // capture
-            if (jt.contains("capture")) {
-                auto& cap = jt["capture"];
-                if (cap.contains("args") && cap["args"].is_array()) {
-                    for (auto& ja : cap["args"]) {
-                        ArgSpec s;
-                        s.index = ja.value("index", 0);
-                        s.type = parse_type(ja.value("type", std::string("int")));
-                        s.len = ja.value("len", -1);
-                        s.len_from = ja.value("len_from", -1);
-                        s.max = ja.value("max", 256);
-                        t.args.push_back(s);
-                    }
-                }
-                if (cap.contains("ret")) {
-                    t.cap_ret = cap["ret"].value("capture", false);
-                    t.ret_type = parse_type(cap["ret"].value("type", std::string("int")));
-                }
-                t.backtrace = cap.value("backtrace", false);
-                if (cap.contains("dump")) {
-                    auto& dp = cap["dump"];
-                    t.has_dump = true;
-                    t.dump_base_arg = dp.value("base_arg", -1);
-                    t.dump_size_arg = dp.value("size_arg", -1);
-                    t.dump_size_fixed = dp.value("size", (long)-1);
-                    t.dump_max = dp.value("max", 32 * 1024 * 1024);
-                    t.dump_ext = dp.value("ext", std::string("bin"));
-                }
-            }
-            // action
-            if (jt.contains("action")) {
-                auto& ac = jt["action"];
-                std::string at = ac.value("type", std::string("observe"));
-                t.action = (at == "replace_ret") ? ACT_REPLACE_RET : (at == "replace_arg") ? ACT_REPLACE_ARG : ACT_OBSERVE;
-                if (ac.contains("ret_value")) t.ret_value = ac["ret_value"].get<long>();
-                if (ac.contains("arg_overrides") && ac["arg_overrides"].is_array())
-                    for (auto& ov : ac["arg_overrides"])
-                        t.arg_overrides.push_back({ov.value("index", 0), (long)ov.value("value", 0)});
-            }
-
-        } catch (const std::exception& e) {
-            native_result(key, "rejected", {{"reason", "invalid_config"}, {"message", e.what()}});
-            continue;
-        }
-        native_result(key, "pending", {{"reason", "library_or_symbol_not_resolved"}});
-        ++g_nslots;  // Publish only fully parsed slots to loader callbacks.
+static void install_slot(size_t idx) {
+    auto& t = g_slots[idx];
+    const auto key = t.status_key;
 #if defined(__aarch64__)
-        if (!t.symbol.empty()) {
-            g_native_status.claim(key);
-            if (sh_hook_sym_callback) {
-                t.stub = sh_hook_sym_callback(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig,
-                                              on_symbol_hooked, &t);
-            } else {
-                t.stub = sh_hook_sym_name(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig);
-            }
-            const int code = sh_get_errno ? sh_get_errno() : -1;
-            if (g_native_status.symbol_result(key, t.stub != nullptr, code, SHADOWHOOK_ERRNO_PENDING,
-                    sh_hook_sym_callback != nullptr, sh_to_errmsg ? sh_to_errmsg(code) : "unknown ShadowHook result"))
-                publish_native_status();
-        } else {
-            // Register before scanning: avoid losing a load between the scan and registration.
-            int registration = 0;
-            if (!g_dl_cb_registered) {
-                registration = sh_reg_dl_init ? sh_reg_dl_init(nullptr, on_dl_post, nullptr) : -1;
-                g_dl_cb_registered = registration == 0;
-            }
-            const uintptr_t base = find_lib_base(t.lib);
-            if (base) apply_offset_hook(idx, base);
-            else if (!g_dl_cb_registered)
-                native_result(key, "failed", {{"reason", "loader_callback_unavailable"}, {"code", registration}});
+    if (!t.symbol.empty()) {
+        if (!g_native_status.claim(key)) return;
+        if (sh_hook_sym_callback) {
+            t.stub = sh_hook_sym_callback(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig,
+                                          on_symbol_hooked, &t);
+        } else t.stub = sh_hook_sym_name(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig);
+        const int code = sh_get_errno();
+        if (g_native_status.symbol_result(key, t.stub != nullptr, code, SHADOWHOOK_ERRNO_PENDING,
+                sh_hook_sym_callback != nullptr, sh_to_errmsg ? sh_to_errmsg(code) : "unknown ShadowHook result"))
+            publish_native_status();
+    } else {
+        int registration = 0;
+        if (!g_dl_cb_registered) {
+            registration = sh_reg_dl_init ? sh_reg_dl_init(nullptr, on_dl_post, nullptr) : -1;
+            g_dl_cb_registered = registration == 0;
         }
-#elif defined(__x86_64__)
-        if (!t.symbol.empty()) {
-            apply_symbol_hook(idx);
-            if (g_native_status.pending(key)) g_pending_sym_idx.push_back(idx);
-        } else {
-            const uintptr_t base = find_lib_base(t.lib);
-            if (base) apply_offset_hook(idx, base);
-            if (g_native_status.pending(key)) g_pending_offset_idx.push_back(idx);
-        }
-#endif
+        const uintptr_t base = find_lib_base(t.lib);
+        if (base) apply_offset_hook(idx, base);
+        else if (!g_dl_cb_registered)
+            native_result(key, "failed", {{"reason", "loader_callback_unavailable"}, {"code", registration}});
     }
-    g_native_status.jni(std::move(jni_status));
-    g_native_status.configuration({{"status", "parsed"}, {"target_count", config_index}, {"native_slots", g_nslots.load()}});
+#elif defined(__x86_64__)
+    // All Dobby installation calls run on the single poller. Its interceptor
+    // table is shared and must not be mutated concurrently by reader/poller.
+    (void)t;
+    (void)key;
+#endif
+}
+
+static void apply_hooks(const std::string& cfg_text, JNIEnv* env = nullptr) {
+    try {
+        const json cfg = json::parse(cfg_text);
+        auto change = g_live.reconcile(cfg, [](size_t idx, const NativeSpec& spec) {
+            auto& t = g_slots[idx];
+            static_cast<NativeSpec&>(t) = spec;
+            t.status_key = g_native_status.add({{"id", spec.id}, {"lib", spec.lib},
+                {"symbol", spec.symbol}, {"offset", spec.has_offset ? json(spec.offset) : json(nullptr)}});
+            g_nslots.store(static_cast<int>(idx + 1));
+        });
+        json jni_config = json::array();
+        for (const auto& target : cfg["targets"])
+            if (target.value("kind", std::string("native")) == "jni") jni_config.push_back(target);
+        if (env) {
+            g_initial_jni_config = jni_config;
+            json observers = json::array();
+            for (const auto& target : jni_config) {
+                try { observers.push_back(install_jni_observer(env, target.value("id", "__rb_jni"))); }
+                catch (const std::exception& error) { observers.push_back({{"status", "failed"}, {"error", error.what()}}); }
+            }
+            g_native_status.jni(std::move(observers));
+        }
+        for (const auto& added : change.added) install_slot(added.slot);
+        // Re-enable retained offset slots whose library loaded while disabled.
+#if defined(__aarch64__)
+        for (int i = 0; i < g_nslots.load(); ++i)
+            if (change.plan->active[i] && g_slots[i].has_offset && g_native_status.pending(g_slots[i].status_key)) {
+                const uintptr_t base = find_lib_base(g_slots[i].lib);
+                if (base) apply_offset_hook(i, base);
+            }
+#endif
+        g_native_status.configuration({{"status", "applied"}, {"config_revision", change.plan->revision},
+            {"changed", change.changed}, {"native_targets", change.plan->desired.size()},
+            {"jni_restart_required", jni_config != g_initial_jni_config},
+            {"semantics", "future_invocations; in-flight calls retain prior config"}});
+    } catch (const std::exception& error) {
+        g_native_status.configuration({{"status", "failed"}, {"error", error.what()},
+            {"retained_previous_config", true}, {"config_revision", g_live.snapshot()->revision}});
+    }
     g_status_ready = true;
     publish_native_status();
+}
+
+static void start_native_control(int fd) {
+    g_control_connected = true;
+    std::thread([fd]() {
+        for (;;) {
+            char type;
+            uint32_t size;
+            if (!read_full(fd, &type, 1) || !read_full(fd, &size, 4) || size > (16u << 20)) break;
+            std::string payload(size, 0);
+            if (size && !read_full(fd, &payload[0], size)) break;
+            if (type == 'R') apply_hooks(payload);
+        }
+        g_control_connected = false;
+        std::lock_guard<std::mutex> lock(g_send_mtx);
+        if (g_evt_fd == fd) g_evt_fd = -1;
+        close(fd);
+    }).detach();
+    const std::string hello = R"({"kind":"native","protocol":1,"removal_mode":"passthrough"})";
+    send_framed('H', hello.data(), static_cast<uint32_t>(hello.size()));
 #if defined(__x86_64__)
     start_pending_poll();
 #endif
+    publish_native_status();
 }
 
 // ---------------------------------------------------------------------------
@@ -876,6 +806,7 @@ public:
 #endif
         LOGI("为 %s 注入 hook（配置 %u 字节）", g_package.c_str(), clen);
         apply_hooks(cfg, env);
+        start_native_control(fd);
         // 有 hook：不 unload，保持代理常驻
     }
 

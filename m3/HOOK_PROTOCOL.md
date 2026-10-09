@@ -96,6 +96,11 @@ hook 命中实时推流。每条事件：
 > 说明：M1 守护进程用 cpp-httplib（仅 HTTP）。SSE 走同一 HTTP 端口；WebSocket 用**独立端口 = HTTP 端口+1** 的极简 WS 服务实现，二选一即可，PC 侧推荐 SSE（更简单）。
 
 ## 内部数据流（实现细节）
+
+> 当前版本的 native 层直接连接 daemon 的注入 IPC，接收配置和回传事件。
+> 支持 H(kind=native) / R 完整配置 / S 状态的版本可运行中新增、停用和替换；
+> 停用保留透传跳板，物理撤钩仍未实现。用法和限制见 [Native 实时配置](../pc/NATIVE_LIVE.md)。
+> 下图为早期 companion 方案，保留作历史背景，不代表当前部署链路。
 ```
 POST /hook ─► 守护进程写 /data/adb/reconbridge/hooks/<pkg>.json
                                     │ (可选 am force-stop <pkg>)
