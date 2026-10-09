@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "list_scenarios", "diff_scenarios", "recent_events", "trace_java",
     "patch_java", "dump_dex", "list_dumps", "list_artifacts",
     "toolchain_status",
+    "event_stream_status", "configure_jni_capture", "inspect_jni_bindings",
 }
 
 

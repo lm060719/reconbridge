@@ -67,6 +67,8 @@ Python 包,入口 `python -m reconbridge_mcp`(stdio MCP)。
 ### 入口 & 基础设施
 | 文件 | 职责 |
 |---|---|
+| [`observability.py`](pc/reconbridge_mcp/observability.py) | 统一诊断、事件完整性判定与会话 JSONL 采集。 |
+| [`jni.py`](pc/reconbridge_mcp/jni.py) | 显式配置 native JNI 注册观察器与读取映射历史。 |
 | [`server.py`](pc/reconbridge_mcp/server.py) | **MCP 工具总入口**(~187 KB):把 M1 静态接口 + 本地工具链 + 各分析器注册为 Claude Code 可调用工具。 |
 | [`__main__.py`](pc/reconbridge_mcp/__main__.py) / [`__init__.py`](pc/reconbridge_mcp/__init__.py) | 包入口。 |
 | [`settings.py`](pc/reconbridge_mcp/settings.py) | 运行配置,全部走环境变量。 |
@@ -123,6 +125,7 @@ Python 包,入口 `python -m reconbridge_mcp`(stdio MCP)。
 |---|---|
 | [`daemon.cpp`](src/daemon.cpp) | **M1 静态传输层守护进程**:KernelSU root 下提供局域网 HTTP 原子能力(拉包/读文件/列 so/procfs/白名单 shell)。 |
 | [`dynamic.cpp`](src/dynamic.cpp) + [`dynamic.h`](src/dynamic.h) | **M3 动态子系统**:`/hook` `/unhook` `/hooks` + SSE/WS 事件推流,与 M1 解耦。 |
+| [`event_stream.h`](src/event_stream.h) | 带序号、重启标识、丢弃统计与原子快照的事件广播器。 |
 | [`mobile_mcp.cpp`](src/mobile_mcp.cpp) + [`mobile_mcp.h`](src/mobile_mcp.h) | 手机侧 mobile-mcp 能力。 |
 | [`third_party/httplib.h`](src/third_party/httplib.h) · [`json.hpp`](src/third_party/json.hpp) | 第三方库(cpp-httplib / nlohmann-json)。 |
 
@@ -152,6 +155,7 @@ Python 包,入口 `python -m reconbridge_mcp`(stdio MCP)。
 | 路径 | 说明 |
 |---|---|
 | [`zygisk/module.cpp`](m3/zygisk/module.cpp) | **Zygisk 注入层 + 数据驱动 ShadowHook 执行器**。 |
+| [`zygisk/jni_observer.h`](m3/zygisk/jni_observer.h) | 观察成功 RegisterNatives 调用，报告 Java 签名到模块地址/偏移的映射历史。 |
 | [`zygisk/third_party/`](m3/zygisk/third_party/) | dobby.h / shadowhook.h / zygisk.hpp / json.hpp。 |
 | [`prebuilt/`](m3/prebuilt/) | libshadowhook / libdobby 预编译 .so。 |
 | [`build_dobby_x86_64.ps1`](m3/build_dobby_x86_64.ps1) + [`dobby-android-build-fix.patch`](m3/dobby-android-build-fix.patch) | Dobby 构建脚本与补丁。 |
@@ -195,6 +199,10 @@ Python 包,入口 `python -m reconbridge_mcp`(stdio MCP)。
 ---
 
 ## 10. 构建 / 安装 / 打包脚本
+
+跨平台构建与验证入口：[`scripts/build_native.py`](scripts/build_native.py) 编译两种 ABI，
+[`scripts/package_module.py`](scripts/package_module.py) 校验清单并打包；流程见
+[`BUILD_VALIDATION.md`](BUILD_VALIDATION.md)。
 
 | 脚本 | 用途 |
 |---|---|

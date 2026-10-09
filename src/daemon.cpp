@@ -574,7 +574,8 @@ static void register_routes(httplib::Server& svr) {
 
     svr.Get("/health", [](const Request&, Response& res) {
         json_reply(res, 200, {{"status", "ok"}, {"name", kName}, {"version", kVersion},
-                              {"pid", getpid()}, {"uptime_sec", (long)(time(nullptr) - g_start_time)}});
+                              {"pid", getpid()}, {"uptime_sec", (long)(time(nullptr) - g_start_time)},
+                              {"capabilities", {{"event_integrity", 1}, {"jni_observer", 1}}}});
     });
     svr.Get("/packages", handle_packages);
     svr.Get("/apk", handle_apk);

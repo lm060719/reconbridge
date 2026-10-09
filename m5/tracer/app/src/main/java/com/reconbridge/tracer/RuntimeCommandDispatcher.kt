@@ -334,6 +334,8 @@ internal class RuntimeCommandDispatcher(
         return JSONObject().apply {
             put("activity_class", activity.javaClass.name)
             put("executed", actions.length())
+            put("action_errors", toJsonSafe(ctx.actionErrors))
+            put("actions_ok", ctx.actionErrors.isEmpty())
             put("main_thread", activity is Activity)
             put("registers", registers)
         }

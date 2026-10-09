@@ -4,7 +4,13 @@
 
 把 M1 的手机静态接口 + PC 本地反编译工具链，封装成 Claude Code 可直接调用的 MCP 工具。
 
-## 能力总览（共 25 个工具）
+## 能力总览
+
+完整的 PC/手机工具清单由注册信息生成，见 [TOOL_CATALOG.md](TOOL_CATALOG.md)。诊断、事件完整性和 JNI 映射见 [OBSERVABILITY.md](OBSERVABILITY.md)。
+
+Linux/macOS 工具启动、默认路径、资源限制差异及三平台 CI 见 [构建与验证](../BUILD_VALIDATION.md)。
+
+新增操作采集、多次示范、结果验证、执行限制和模块草稿能力，完整流程见 [`ACTION_LEARNING.md`](ACTION_LEARNING.md)。
 
 > 下表列 M2 的 12 个原子 / 反编译能力；另有 M3/M5 的动态 hook、Java trace、场景捕获、落盘等，完整清单见仓库根 [`AGENTS_QUICKSTART.md`](../AGENTS_QUICKSTART.md)。
 

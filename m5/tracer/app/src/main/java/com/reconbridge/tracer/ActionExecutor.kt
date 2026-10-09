@@ -73,6 +73,7 @@ internal class ActionContext(
     val runtimeEvent: RuntimeEvent? = null,
     val contextRuntime: RuntimeContextProvider? = null,
 ) {
+    val actionErrors = mutableListOf<Map<String, Any?>>()
     private var fallbackThis: Any? = null
     private var fallbackArgs: Array<Any?>? = null
     private var fallbackResult: Any? = null
@@ -242,9 +243,10 @@ internal object ActionExecutor {
         runPipeline(ctx, actions)
     }
 
-    private fun runPipeline(ctx: ActionContext, steps: JSONArray) {
+    private fun runPipeline(ctx: ActionContext, steps: JSONArray, strict: Boolean = false, deadline: Long = Long.MAX_VALUE) {
         for (i in 0 until steps.length()) {
-            val step = steps.optJSONObject(i) ?: continue
+            if (strict) check(System.nanoTime() <= deadline) { "action deadline exceeded before step $i" }
+            val step = steps.optJSONObject(i) ?: if (strict) throw IllegalArgumentException("step $i must be an object") else continue
             // 缺口 2: 单 Step 条件检查
             val stepCond = step.opt("condition") ?: step.opt("if")
             if (stepCond != null && !evaluateCondition(ctx, stepCond)) {
@@ -253,7 +255,9 @@ internal object ActionExecutor {
             try {
                 executeStep(ctx, step)
             } catch (t: Throwable) {
+                ctx.actionErrors.add(mapOf("step" to i, "action" to step.optString("action"), "error" to t.toString()))
                 logE("[${ctx.pkg}] 执行 Step $i (${step.optString("action")}) 失败: $t", t)
+                if (strict) throw t
             }
         }
     }
@@ -261,6 +265,8 @@ internal object ActionExecutor {
     private fun executeStep(ctx: ActionContext, step: JSONObject) {
         val type = step.optString("action")
         when (type) {
+            "run_guarded" -> GuardedActions.execute(ctx, step) { steps, deadline -> runPipeline(ctx, steps, true, deadline) }
+            "complete_guarded" -> GuardedActions.complete(ctx, step)
             "call_method", "invoke" -> stepCallMethod(ctx, step)
             "set_field" -> stepSetField(ctx, step)
             "mutate", "set_path", "mutate_path" -> stepMutatePath(ctx, step)
@@ -277,7 +283,7 @@ internal object ActionExecutor {
             "increment_state", "inc_state" -> stepIncrementState(ctx, step)
             "append_state" -> stepAppendState(ctx, step)
             "emit_event" -> stepEmitEvent(ctx, step)
-            else -> logW("[${ctx.pkg}] 未知 action 类型: $type")
+            else -> throw IllegalArgumentException("未知 action 类型: $type")
         }
     }
 
@@ -498,7 +504,16 @@ internal object ActionExecutor {
         val targetExpr = step.optString("target", "this")
         val targetObj = resolveTarget(ctx, targetExpr)
         val methodName = step.optString("method")
-        if (methodName.isEmpty()) return
+        require(methodName.isNotEmpty()) { "call_method.method is required" }
+        if (step.has("expected_class")) {
+            val expected = ctx.classLoader.loadClass(step.getString("expected_class"))
+            val actual = when (targetObj) {
+                is TargetClass -> targetObj.clazz
+                is TargetInstance -> targetObj.instance?.javaClass
+                else -> targetObj?.javaClass
+            }
+            require(actual != null && expected.isAssignableFrom(actual)) { "receiver does not match observed method class" }
+        }
 
         val argsArr = step.optJSONArray("args")
         val paramsArr = step.optJSONArray("params")
@@ -524,7 +539,16 @@ internal object ActionExecutor {
 
         method.isAccessible = true
         val invTarget = if (Modifier.isStatic(method.modifiers)) null else (targetObj as? TargetInstance)?.instance ?: targetObj
-        val ret = method.invoke(invTarget, *argValues.toArray())
+        val coercedArgs = argValues.mapIndexed { i, value ->
+            val type = method.parameterTypes.getOrNull(i)
+            val boxed = mapOf("java.lang.Long" to "long", "java.lang.Integer" to "int",
+                "java.lang.Boolean" to "boolean", "java.lang.Double" to "double",
+                "java.lang.Float" to "float", "java.lang.Byte" to "byte", "java.lang.Short" to "short")
+            if (type?.isPrimitive == true) coerce(value, type.name)
+            else if (boxed.containsKey(type?.name)) coerce(value, boxed[type?.name]!!)
+            else value
+        }.toTypedArray()
+        val ret = method.invoke(invTarget, *coercedArgs)
 
         val saveTo = step.optString("save_to")
         if (saveTo.isNotEmpty()) {
@@ -1281,9 +1305,11 @@ internal object ActionExecutor {
         }
     }
 
+    fun resolveActionValue(ctx: ActionContext, value: Any?): Any? = resolveValueItem(ctx, value)
+
     private fun isValueDescriptor(value: JSONObject): Boolean
     {
-        if (value.has("path") || value.has("var")) {
+        if (value.has("path") || value.has("var") || value.has("literal")) {
             return true
         }
         if (!value.has("value")) {
@@ -1335,6 +1361,10 @@ internal object ActionExecutor {
     }
 
     private fun resolveValue(ctx: ActionContext, r: JSONObject): Any? {
+        if (r.has("literal")) {
+            val value = r.opt("literal")
+            return coerce(if (value === JSONObject.NULL) null else value, r.optString("type", ""))
+        }
         if (r.has("var")) {
             return ctx.registers[r.optString("var")]
         }

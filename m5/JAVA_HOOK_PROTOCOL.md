@@ -1274,6 +1274,16 @@ ClassLoaderRegistry 对 loader 实例使用**弱引用**。运行时状态保存
 - 极少数完全绕过标准 `BaseDexClassLoader` / `ClassLoader.loadClass` 语义的自定义 native loader 仍可能观察不到。
 - 首次让 Tracer 进入目标进程的限制仍然存在：如果目标进程启动时完全没有 M5 配置，Tracer 不会建立长期控制通道。第一次下发到一个已运行且从未连接过的进程，仍建议 `restart:true`。
 
+## Guarded Action（Tracer 1.1.0）
+
+`run_guarded` 支持 `task_id/run_id/dedup_key/actions`、`max_runs`（1–1000）、`min_interval_ms`（0–3600000）、`timeout_ms`（200–10000）、可选的 `expected_version_code/input_schema/dispatch_main_thread`。参数字面值用 `{"literal":"${looks_like_a_template}"}`，动态参数用 `{"path":"event.inputs.item_id"}`。
+
+状态依次为 `in_progress → awaiting_verification → verified`。错误、超时或验证失败进入 `uncertain`；重复业务键、次数超限、间隔不足、前次未完成均返回 `blocked`。结果位于寄存器 `$guard_result`；运行时可查 process scope 的 `action_guard.<task_id>`。Android 使用应用私有 SharedPreferences 保存记录，Runtime State 提供状态镜像；不会在程序 disable/rollback 时自动删除历史。
+
+`complete_guarded` 使用同一 `task_id/run_id` 和布尔 `verified` 完成等待中的任务。超时只能在步骤间阻止继续执行，不能撤销已发生的 Java/网络副作用。设备重启前留下的未完成记录继续阻止提交。Guard 内异常会停止剩余步骤。
+
+Activity Action 的 Ack 另含 `actions_ok` 与 `action_errors`，Java trace 抛异常时含 `threw:true/error`。业务是否成功还需独立条件验证，不能仅凭 Ack。
+
 ## 语义与限制
 
 - **trace（观测）+ 实时篡改（action）** 均支持。篡改在 Xposed before（改参数/skip）/after（改返回值）阶段生效。

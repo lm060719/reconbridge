@@ -42,6 +42,8 @@ KNOWN_PERMISSIONS = {
 }
 
 _ACTION_PERMISSIONS = {
+    "run_guarded": {"state.write"},
+    "complete_guarded": {"state.write"},
     "set_state": {"state.write"},
     "remove_state": {"state.write"},
     "clear_state": {"state.write"},

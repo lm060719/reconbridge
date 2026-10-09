@@ -219,7 +219,7 @@ class ReconClient:
                         total += len(chunk)
         return total
 
-    def get_recent(self, limit: int = 200, since_seq: int = 0) -> dict:
+    def get_recent(self, limit: int = 200, since_seq: int = 0, stream_id: str = "") -> dict:
         """取守护进程环形缓冲里最近的事件（事后采集，P0-1）。
 
         返回 {latest_seq, count, events}。latest_seq 可作下次 since_seq 游标，
@@ -228,6 +228,8 @@ class ReconClient:
         params: dict[str, str] = {"limit": str(limit)}
         if since_seq:
             params["since_seq"] = str(since_seq)
+        if stream_id:
+            params["stream_id"] = stream_id
         return self.get_json("/recent", params)
 
     def collect_sse(self, seconds: float = 10.0, max_events: int = 200,

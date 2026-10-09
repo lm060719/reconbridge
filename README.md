@@ -10,6 +10,7 @@
 
 > 进度：**M1 / M2 / M3 / M4 / M5 均已完成并真机验证**（Xiaomi SM8750 / Android 16 / KernelSU + ZygiskNext + LSPosed）。
 > - **M5**：通用 Java trace + 实时篡改与 Action Pipeline（LSPosed 模块，`trace_java` / `patch_java`）—— 见 [`m5/README.md`](m5/README.md)、[`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md)。
+> - **动作学习**：操作与方法关联、多次示范参数对比、独立结果验证、持久执行限制与模块草稿；PC MCP 新增 10 个工具，需 Tracer 1.1.0。见 [`pc/ACTION_LEARNING.md`](pc/ACTION_LEARNING.md)。
 
 ---
 
@@ -85,7 +86,7 @@ cd reconbridge
 ./install.sh                  # 默认 both；只装 Codex：./install.sh adb codex
 ```
 
-装完**重启对应客户端**：Claude Code 里 `claude mcp list` / `/mcp` 能看到 `reconbridge`（25 个工具），Codex 的 `~/.codex/config.toml` 里有 `[mcp_servers.reconbridge]`；两端都会随装一个 `reconbridge` skill（`~/.claude/skills/` 或 `~/.codex/skills/`，逆向类任务时新会话自动加载工作流与踩坑清单）。
+装完**重启对应客户端**：Claude Code 里 `claude mcp list` / `/mcp` 能看到 `reconbridge`（工具数量与两端支持范围见 [自动生成清单](pc/TOOL_CATALOG.md)），Codex 的 `~/.codex/config.toml` 里有 `[mcp_servers.reconbridge]`；两端都会随装一个 `reconbridge` skill（`~/.claude/skills/` 或 `~/.codex/skills/`，逆向类任务时新会话自动加载工作流与踩坑清单）。
 > 脚本直接写 `~/.claude.json` / `~/.codex/config.toml`（用户级作用域），比客户端自带的 `add` 命令更稳（后者在 Windows / 非 ASCII 路径下对引号/编码处理有坑）；写 TOML 时只增删 `reconbridge` 表块，用户其它配置与注释原样保留。如只想在本仓库目录内启用 Claude，见 [`.mcp.json.example`](.mcp.json.example)。自己构建 exe：`./build_exe.ps1`（产出 `dist/reconbridge-mcp-win64.zip`）。
 
 ### 设备端（刷入 KernelSU 模块）
@@ -99,6 +100,10 @@ cd reconbridge
 
 在 KernelSU Manager → 模块 → 从本地安装 `dist/ReconBridge-M5.8.zip` → 重启。
 > 仓库已内置预编译产物（`module/bin`、`module/zygisk`、`module/system/lib64`），若不想自己编译，直接 `./pack.ps1` 打包即可，或用 [Releases](../../releases) 里的 zip。
+
+跨平台从源码构建及校验：`python scripts/build_native.py --ndk <NDK目录>` →
+`python scripts/package_module.py --output dist/ReconBridge-verified.zip`。
+此流程仅打包新编译的双架构产物；CI 和平台支持细节见 [BUILD_VALIDATION.md](BUILD_VALIDATION.md)。
 
 装好后对 Claude Code 说一句「连一下手机看状态」即可开始。详见下方各里程碑文档。
 
@@ -126,7 +131,7 @@ URL：http://127.0.0.1:8790/mcp
   X-Token: <WebUI 中显示的完整 token>
 ```
 
-也支持 `Authorization: Bearer <token>`。手机 MCP 可在 PC 端口关闭时单独运行，提供与 PC MCP 相同的 25 个工具名称和输入契约；设备、文件、进程、shell、hook、事件、场景、Java trace/patch、dump 与产物工具均直接在手机执行。
+也支持 `Authorization: Bearer <token>`。手机 MCP 可在 PC 端口关闭时单独运行，提供 PC MCP 的设备侧工具子集（见 [工具清单](pc/TOOL_CATALOG.md)）；设备、文件、进程、shell、hook、事件、场景、Java trace/patch、dump 与产物工具均直接在手机执行。
 
 `decompile_apk`、`dexkit_search`、`ghidra_analyze`、`hermes_decompile` 需要额外的 ReconBridge Mobile Toolpack，标准模块包目前不内置这些大型静态分析后端。未安装时工具会返回明确的 `ok: false` 和预期执行器路径，可用 `toolchain_status` 检查；PC MCP 的本地 jadx/androguard/Ghidra/Hermes 不受影响。
 

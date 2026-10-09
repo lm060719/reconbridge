@@ -4,7 +4,9 @@
 
 Wraps M1's device static endpoints + the PC-side local decompilation toolchain into MCP tools that Claude Code can call directly.
 
-## Capability Overview (25 tools total)
+## Capability Overview
+
+See the generated [PC/mobile tool inventory](TOOL_CATALOG.md). Diagnostics, event integrity and JNI observation are documented in [OBSERVABILITY.md](OBSERVABILITY.md) (Chinese).
 
 > The table below lists M2's 12 atomic / decompilation capabilities; there are also M3/M5 dynamic hooks, Java trace, scenario capture, on-disk artifacts, etc. For the complete list see the repo root [`AGENTS_QUICKSTART.md`](../AGENTS_QUICKSTART.md).
 

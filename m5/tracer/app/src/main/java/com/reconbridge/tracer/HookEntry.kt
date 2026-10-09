@@ -732,6 +732,10 @@ private class TraceCallback(
             o.put("pid", Process.myPid())
             o.put("tid", Process.myTid())
             o.put("phase", phase)
+            if (withRet && param.hasThrowable()) {
+                o.put("threw", true)
+                o.put("error", param.throwable?.toString())
+            }
             val member: Member? = param.method
             o.put("class", member?.declaringClass?.name ?: declClass)
             o.put("method", member?.name ?: "")
@@ -756,6 +760,8 @@ private class TraceCallback(
                     arr.put(JSONObject().apply {
                         put("index", idx)
                         put("render", rend)
+                        val raw = if (idx in args.indices) args[idx] else null
+                        put("truncated", raw is CharSequence && raw.length > max)
                         put("value", if (idx in args.indices) render(args[idx], rend, max) else JSONObject.NULL)
                     })
                 }
@@ -766,6 +772,8 @@ private class TraceCallback(
                     arr.put(JSONObject().apply {
                         put("index", k)
                         put("render", "tostring")
+                        val raw = args[k]
+                        put("truncated", raw is CharSequence && raw.length > 1024)
                         put("value", render(args[k], "tostring", 1024))
                     })
                 }

@@ -6,13 +6,16 @@ plugins {
 android {
     namespace = "com.reconbridge.tracer"
     compileSdk = 34
+    buildFeatures {
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId = "com.reconbridge.tracer"
         minSdk = 27
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.1.0"
     }
 
     sourceSets {

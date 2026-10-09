@@ -1,5 +1,10 @@
 # ReconBridge —— Agent 快速上手（一页纸）
 
+> 工具支持范围以 [自动生成清单](pc/TOOL_CATALOG.md) 为准。连通但没有命中时用
+> `diagnose_target(package)`；需要完整性证明的采集用 `event_stream_status` 记录起始游标/stream_id，
+> 或 `capture_event_window(session_id)` 落盘。JNI 注册观察用 `configure_jni_capture` → 重启并打开目标 →
+> `inspect_jni_bindings`；关闭后需进程退出才能卸载。详见 [诊断与观测](pc/OBSERVABILITY.md)。
+
 > 给**新会话的 AI agent** 看的：读完这一篇就能驱动整套 ReconBridge。
 > 面向 LSPosed / native 逆向与模块开发的**侦察 + 篡改**工具链。
 > ⚠️ 仅限**已获授权**的安全研究 / CTF / 逆向学习 / 防御性研究；分析对象须为你自有或明确授权的设备与应用。
@@ -84,6 +89,12 @@
 | `close_investigation(session_id, cleanup_hooks=True)` | 结束会话并默认清理目标 Hook |
 
 > **Agent 决策规则**：能用高层工具完成，就不要拆成多个原子调用。原子工具用于 native、高级 patch、协议调试和高层入口尚未覆盖的特殊场景。
+
+### 动作学习入口（PC MCP）
+
+`begin_action_capture` → 用户手动示范 → `finish_action_capture`；至少两份示范用 `compare_action_demonstrations` 区分固定/动态参数，再 `create_action_plan` 绑定动态输入和独立成功条件。`execute_action_plan` 默认只预览；`dry_run=False` 才单次提交并验证。最近一次执行验证通过的精确计划才能 `install_action_plan`，`use_installed=True` 可从已装 Program 执行并验证。
+
+其它入口：`list_action_captures`、`inspect_action_plan`、`check_action_compatibility`、`export_action_plan`。有歧义、丢失事件、对象参数无实时来源或版本不匹配时不执行；失败/结果不确定不自动重试。完整契约与示例见 [`pc/ACTION_LEARNING.md`](pc/ACTION_LEARNING.md)。
 
 ### 3.1 设备原子能力（M1，7 个）
 | 工具 | 签名 | 用途 |

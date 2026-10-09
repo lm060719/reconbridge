@@ -33,16 +33,34 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _default_native_tools_dir() -> Path:
+    if os.name == "nt":
+        return Path((INSTALL_ROOT.drive or PROJECT_ROOT.drive) + "/ReconBridgeTools")
+    return Path.home() / ".local" / "share" / "ReconBridge" / "tools"
+
+
+def _default_adb() -> str:
+    found = shutil.which("adb")
+    if found:
+        return found
+    sdk = _env("ANDROID_HOME") or _env("ANDROID_SDK_ROOT")
+    if not sdk:
+        if os.name == "nt":
+            sdk = str(Path(os.environ.get("LOCALAPPDATA", "")) / "Android/Sdk")
+        elif sys.platform == "darwin":
+            sdk = str(Path.home() / "Library/Android/sdk")
+        else:
+            sdk = str(Path.home() / "Android/Sdk")
+    return str(Path(sdk) / "platform-tools" / ("adb.exe" if os.name == "nt" else "adb"))
+
+
 class Settings:
     # 传输方式：adb（USB，经 adb forward 到设备 127.0.0.1，推荐）| wifi（局域网直连）
     transport: str = _env("RECONBRIDGE_TRANSPORT", "adb").lower()
 
     # adb 相关
     serial: str = _env("RECONBRIDGE_SERIAL", "")  # 多设备时指定；为空用唯一设备
-    adb: str = _env("RECONBRIDGE_ADB", "") or (
-        shutil.which("adb")
-        or str(Path(os.environ.get("LOCALAPPDATA", "")) / "Android/Sdk/platform-tools/adb.exe")
-    )
+    adb: str = _env("RECONBRIDGE_ADB", "") or _default_adb()
 
     # 连接参数
     port: int = int(_env("RECONBRIDGE_PORT", "8787") or "8787")
@@ -69,7 +87,7 @@ class Settings:
     # 的安装路径下会崩。项目本身在含中文的“逆向模块”目录下，故这类工具放到同盘 ASCII 目录。
     native_tools_dir: Path = Path(
         _env("RECONBRIDGE_NATIVE_TOOLS", "")
-        or ((INSTALL_ROOT.drive or PROJECT_ROOT.drive) + "/ReconBridgeTools")
+        or _default_native_tools_dir()
     )
 
     # 重型本地分析任务资源预算。默认每个任务最多 4 GiB，同时只跑 1 个，

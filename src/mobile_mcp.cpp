@@ -542,7 +542,15 @@ static const json& tools() {
         tool("diff_scenarios", "比较两个场景的方法和参数差异。",
              schema({{"a", prop("string")}, {"b", prop("string")}}, {"a", "b"})),
         tool("recent_events", "从设备事件环形缓冲补捞最近命中。",
-             schema({{"limit", prop("integer", 50)}, {"since_seq", prop("integer", 0)}})),
+             schema({{"limit", prop("integer", 50)}, {"since_seq", prop("integer", 0)}, {"stream_id", prop("string", "")}})),
+        tool("event_stream_status", "检查 daemon 缓冲丢失、重启与订阅队列丢弃；不证明上游完整性。",
+             schema({{"since_seq", prop("integer", 0)}, {"stream_id", prop("string", "")}})),
+        tool("configure_jni_capture", "配置下一次启动时观察 RegisterNatives；关闭需退出进程，启用 restart 会 force-stop。",
+             schema({{"package", prop("string")}, {"enable", prop("boolean", true)},
+                     {"restart", prop("boolean", false)}}, {"package"})),
+        tool("inspect_jni_bindings", "读取已观察到的 JNI 注册历史及 so 偏移；不代表当前全部有效绑定。",
+             schema({{"package", prop("string")}, {"class_filter", prop("string", "")},
+                     {"limit", prop("integer", 500)}}, {"package"})),
         tool("trace_java", "下发 Java 方法 trace 并采集命中。",
              schema({{"package", prop("string")}, {"class_name", prop("string")}, {"method", prop("string")},
                      {"params", nullable("array")}, {"args_render", prop("string", "tostring")},
@@ -605,9 +613,10 @@ static json http_post(const std::string& path, const json& body) {
     return json::parse(r->body);
 }
 
-static json recent_events(int limit, uint64_t since, bool fold = true) {
+static json recent_events(int limit, uint64_t since, bool fold = true, const std::string& stream_id = "") {
     Params p = {{"limit", std::to_string(std::max(0, limit))}};
     if (since) p.emplace("since_seq", std::to_string(since));
+    if (!stream_id.empty()) p.emplace("stream_id", stream_id);
     json data = http_get("/recent", p);
     if (fold) {
         json events = json::array();
@@ -1022,7 +1031,41 @@ static json invoke_tool(const std::string& name, const json& a) {
         return http_post("/unhook", body);
     }
     if (name == "collect_events") return collect_events(a);
-    if (name == "recent_events") return recent_events(a.value("limit", 50), a.value("since_seq", static_cast<uint64_t>(0)));
+    if (name == "recent_events") return recent_events(a.value("limit", 50), a.value("since_seq", static_cast<uint64_t>(0)), true, a.value("stream_id", ""));
+    if (name == "event_stream_status") {
+        if (a.value("since_seq", int64_t(0)) < 0) throw std::runtime_error("since_seq must be nonnegative");
+        auto data = recent_events(0, a.value("since_seq", uint64_t(0)), false, a.value("stream_id", ""));
+        data["integrity"] = {{"supported", true}, {"complete", !data.value("truncated", true)},
+            {"cursor_reset", data.value("cursor_reset", false)}, {"truncated", data.value("truncated", true)},
+            {"lost_before_cursor", data.value("lost_before_cursor", uint64_t(0))},
+            {"limit_truncated", data.value("limit_truncated", false)},
+            {"scope", "daemon_ingress"}, {"upstream_loss", "unknown"}};
+        return data;
+    }
+    if (name == "inspect_jni_bindings") {
+        const auto package = a.value("package", "");
+        if (!valid_package(package)) throw std::runtime_error("invalid package");
+        const int limit = a.value("limit", 500);
+        if (limit < 1 || limit > 4096) throw std::runtime_error("limit must be 1..4096");
+        return http_get("/jni/bindings", {{"package", package}, {"class_filter", a.value("class_filter", "")},
+            {"limit", std::to_string(limit)}});
+    }
+    if (name == "configure_jni_capture") {
+        const auto package = a.value("package", "");
+        if (!valid_package(package)) throw std::runtime_error("invalid package");
+        const bool enable = a.value("enable", true), restart = a.value("restart", false);
+        if (!enable && restart) throw std::runtime_error("disable removes configuration; restart the app manually to unload the observer");
+        auto result = enable ? http_post("/hook", {{"package", package}, {"mode", "append"}, {"restart", restart},
+            {"targets", json::array({{{"id", "__rb_jni"}, {"kind", "jni"}}})}}) :
+            http_post("/unhook", {{"package", package}, {"id", "__rb_jni"}});
+        result["hook_id"] = "__rb_jni";
+        result["configured"] = result.value("ok", false) ? json(enable) : json(nullptr);
+        result["runtime_effect_confirmed"] = false;
+        result["requires_process_start"] = enable;
+        result["requires_process_exit"] = !enable;
+        result["next_step"] = "launch/restart target, then inspect_jni_bindings; check runtime_status.jni_observers";
+        return result;
+    }
     if (name == "capture_scenario") {
         uint64_t cursor = recent_events(0, 0, false).value("latest_seq", static_cast<uint64_t>(0));
         json opts = a; opts["include_recent"] = true; opts["since_seq"] = cursor;

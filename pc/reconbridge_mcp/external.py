@@ -20,6 +20,21 @@ from .settings import FROZEN, settings
 
 COMSPEC = os.environ.get("COMSPEC", "cmd.exe")
 
+
+def _tool_command(executable: Path, *args: str) -> list[str] | str:
+    """Execute POSIX scripts/native programs directly; quote Windows batch arguments.
+
+    cmd.exe needs an extra pair of outer quotes when both script and arguments have
+    spaces. Do not pass a list here: subprocess would escape those quotes for CRT,
+    while cmd.exe uses a different grammar.
+    """
+    argv = [str(executable), *(str(arg) for arg in args)]
+    if os.name == "nt" and executable.suffix.lower() in {".bat", ".cmd"}:
+        if any(any(char in arg for char in '\"%\r\n\x00') for arg in argv):
+            raise ValueError('Windows batch tool paths/arguments cannot contain quotes, %, or line breaks')
+        return f'"{COMSPEC}" /d /v:off /s /c "' + " ".join(f'"{arg}"' for arg in argv) + '"'
+    return argv
+
 # androguard 用 loguru 输出海量 DEBUG 日志；全局静默，避免噪声（stdio MCP 尤其要保持干净）
 try:
     from loguru import logger as _loguru
@@ -63,6 +78,8 @@ def _find_jdk21() -> Optional[Path]:
             + glob.glob(str(settings.tools_dir / "jdk-21*")))
     for h in hits:
         jhome = Path(h)
+        if (jhome / "Contents/Home/bin").is_dir():
+            return jhome / "Contents/Home"
         # 解压后可能多套一层
         if (jhome / "bin").exists():
             return jhome
@@ -87,6 +104,8 @@ def toolchain_status() -> dict:
         "ghidra_headless": str(ghidra) if ghidra else None,
         "ghidra_jdk21": str(jdk) if jdk else None,
         "system_java": shutil.which("java"),
+        "adb": settings.adb if Path(settings.adb).is_file() else shutil.which(settings.adb),
+        "hermes_hbctool": shutil.which("hbctool"),
         "resource_limits": {
             "max_parallel": settings.heavy_max_parallel,
             "log_tail_kb": settings.process_log_tail_kb,
@@ -116,10 +135,11 @@ def decompile_apk(apk_path: str, output_dir: str = "", no_res: bool = True) -> d
     out = Path(output_dir) if output_dir else apk.parent / (apk.stem + "-jadx")
     out.mkdir(parents=True, exist_ok=True)
 
-    cmd = [COMSPEC, "/c", str(jadx), "-d", str(out)]
+    args = ["-d", str(out)]
     if no_res:
-        cmd.append("--no-res")  # 跳过资源，只出 Java 源码，快
-    cmd.append(str(apk))
+        args.append("--no-res")  # 跳过资源，只出 Java 源码，快
+    args.append(str(apk))
+    cmd = _tool_command(jadx, *args)
     env = java_memory_env(os.environ.copy(), settings.jadx_memory_mb)
     p = run_limited(
         cmd,
@@ -361,12 +381,12 @@ def ghidra_analyze(so_path: str, options: dict) -> dict:
     decompile = options.get("decompile", []) or []
     env["RECON_DECOMPILE"] = ",".join(str(x) for x in decompile)
 
-    cmd = [
-        COMSPEC, "/c", str(hs), str(proj_dir), f"recon_{so.stem}",
+    cmd = _tool_command(
+        hs, str(proj_dir), f"recon_{so.stem}",
         "-import", str(import_target), "-overwrite",
         "-scriptPath", str(script_dir),
         "-postScript", _GHIDRA_SCRIPT,
-    ]
+    )
     env = java_memory_env(env, settings.ghidra_memory_mb)
     p = run_limited(
         cmd,

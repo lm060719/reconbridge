@@ -81,7 +81,7 @@ cd reconbridge
 ./install.sh                  # default both; Codex only: ./install.sh adb codex
 ```
 
-After install, **restart the corresponding client**: in Claude Code, `claude mcp list` / `/mcp` will show `reconbridge` (25 tools); in Codex, `~/.codex/config.toml` will contain `[mcp_servers.reconbridge]`. Both get a `reconbridge` skill (in `~/.claude/skills/` or `~/.codex/skills/`, auto-loaded into new sessions for reverse-engineering tasks along with its workflow and pitfall checklist).
+After install, **restart the corresponding client**: in Claude Code, `claude mcp list` / `/mcp` will show `reconbridge` (see the [generated tool inventory](pc/TOOL_CATALOG.md)); in Codex, `~/.codex/config.toml` will contain `[mcp_servers.reconbridge]`. Both get a `reconbridge` skill (in `~/.claude/skills/` or `~/.codex/skills/`, auto-loaded into new sessions for reverse-engineering tasks along with its workflow and pitfall checklist).
 > The script writes `~/.claude.json` / `~/.codex/config.toml` directly (user-level scope), which is more robust than the client's built-in `add` command (the latter has quoting/encoding issues on Windows / non-ASCII paths). When writing TOML it only adds/removes the `reconbridge` table block; the rest of your config and comments are preserved verbatim. To enable Claude only within this repo directory, see [`.mcp.json.example`](.mcp.json.example). To build the exe yourself: `./build_exe.ps1` (produces `dist/reconbridge-mcp-win64.zip`).
 
 ### Device side (flash the KernelSU module)
@@ -122,7 +122,7 @@ Custom Headers:
   X-Token: <complete token shown in the WebUI>
 ```
 
-`Authorization: Bearer <token>` is also accepted. The phone MCP can run while the PC listener is disabled and exposes the same 25 tool names and input contracts as the PC MCP. Device, file, process, shell, hook, event, scenario, Java trace/patch, dump, and artifact tools execute directly on the phone.
+`Authorization: Bearer <token>` is also accepted. The phone MCP can run while the PC listener is disabled and exposes the device-side subset of PC tools (see the [tool inventory](pc/TOOL_CATALOG.md)). Device, file, process, shell, hook, event, scenario, Java trace/patch, dump, and artifact tools execute directly on the phone.
 
 `decompile_apk`, `dexkit_search`, `ghidra_analyze`, and `hermes_decompile` require the optional ReconBridge Mobile Toolpack; the standard module does not currently bundle these large static-analysis backends. Without it, each tool returns an explicit `ok: false` result and its expected executable path. Check `toolchain_status` for availability. The PC MCP's local jadx/androguard/Ghidra/Hermes setup is unaffected.
 

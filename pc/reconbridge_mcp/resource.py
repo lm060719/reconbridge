@@ -4,7 +4,8 @@
 - 全局限制重型任务并发数；
 - stdout/stderr 流式写临时日志，只把尾部读回内存；
 - Windows 用 Job Object 限制整个子进程树的提交内存；
-- POSIX 用 RLIMIT_AS 限制进程及其后代的虚拟地址空间。
+- Linux 用 RLIMIT_AS 限制进程及其后代的虚拟地址空间；
+- macOS 保留超时/日志/并发治理及 JVM 堆上限，但不声称施加进程硬内存上限。
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -153,7 +155,7 @@ def _close_windows_handle(handle) -> None:
 
 
 def run_limited(
-    cmd: Sequence[str],
+    cmd: Sequence[str] | str,
     *,
     timeout: float,
     memory_mb: int,
@@ -185,10 +187,13 @@ def run_limited(
                 if os.name == "nt":
                     kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 else:
-                    kwargs["preexec_fn"] = _posix_preexec(memory_bytes)
+                    # Darwin's VM reservations cannot be bounded with RLIMIT_AS in
+                    # the same way as Linux. Report unsupported hard memory limits.
+                    if sys.platform != "darwin":
+                        kwargs["preexec_fn"] = _posix_preexec(memory_bytes)
                     kwargs["start_new_session"] = True
 
-                proc = subprocess.Popen(list(cmd), **kwargs)
+                proc = subprocess.Popen(cmd if isinstance(cmd, str) else list(cmd), **kwargs)
 
                 if os.name == "nt":
                     job = _create_windows_job(memory_bytes)
@@ -197,7 +202,7 @@ def run_limited(
                         _close_windows_handle(job)
                         job = None
                 else:
-                    enforced = True
+                    enforced = sys.platform != "darwin"
 
                 try:
                     proc.wait(timeout=timeout)

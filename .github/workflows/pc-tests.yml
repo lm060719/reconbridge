@@ -1,4 +1,4 @@
-name: PC MCP Tests
+name: Tests and Native Builds
 
 on:
   push:
@@ -11,7 +11,11 @@ on:
 
 jobs:
   pytest:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     defaults:
       run:
@@ -39,7 +43,10 @@ jobs:
         env:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: utf-8
-        run: pytest -q
+        run: |
+          pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python ../scripts/generate_tool_catalog.py --check
 
   tracer:
     runs-on: ubuntu-latest
@@ -84,4 +91,65 @@ jobs:
         run: |
           g++ -std=c++17 -pthread -Isrc -fsyntax-only src/dynamic.cpp
           g++ -std=c++17 -pthread -Isrc -fsyntax-only src/mobile_mcp.cpp
+
+      - name: 验证事件序号、截断、重启与并发
+        run: |
+          g++ -std=c++17 -pthread -Isrc tests/event_stream_test.cpp -o /tmp/event-stream-test
+          /tmp/event-stream-test
+          g++ -std=c++17 -Isrc -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" tests/jni_observer_test.cpp -o /tmp/jni-observer-test
+          /tmp/jni-observer-test
+
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装固定版本 NDK r27c
+        shell: bash
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: 从源码编译 daemon 与 Zygisk
+        run: python scripts/build_native.py --abi "${{ matrix.abi }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.abi }}
+          path: build/native/${{ matrix.abi }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  module-package:
+    needs: [pytest, tracer, daemon-syntax, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-arm64-v8a
+          path: build/native/arm64-v8a
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-x86_64
+          path: build/native/x86_64
+      - name: 打包并核对源码指纹、ELF 架构、哈希与 ZIP 路径
+        run: |
+          python scripts/package_module.py --output dist/ReconBridge-CI.zip
+          python scripts/package_module.py --verify dist/ReconBridge-CI.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReconBridge-module-verified
+          path: dist/ReconBridge-CI.zip
+          if-no-files-found: error
+          retention-days: 14
 

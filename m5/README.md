@@ -40,6 +40,12 @@ build → 装 → 重启 → 看 logcat」的分钟级循环压成 PC 一条命�
    - Runtime Program：用 `runtime_program_install/replace/enable/disable/rollback/status` 把一组 Hook + State 初始化 + Event/Lifecycle handler 作为命名模块持久化管理；局部 target id 自动命名空间化。
    - 或手工：`post_hook({package, restart, targets:[{kind:"java",...}]})` + `collect_events(seconds)`。
 
+## 动作学习与执行保护（Tracer 1.1.0）
+
+PC MCP 新增操作采集、多次示范、动作计划、结果验证和模块草稿工作流，见 [`../pc/ACTION_LEARNING.md`](../pc/ACTION_LEARNING.md)。设备端支持 `run_guarded/complete_guarded`；会在动作前持久记录业务键、次数和状态，失败/超时/未确认结果阻止下一次提交。运行时状态中的 `guarded_actions:true` 用于确认 APK 已更新。
+
+Runtime Command 的 Activity Action 返回 `actions_ok/action_errors`，避免把吞掉的步骤异常误认为执行成功。参数支持 `literal` 描述符，业务字符串中的 `${...}` 不会被当成模板。Java trace 发生异常时返回 `threw/error`。
+
 ## 构建
 ```
 cd m5/tracer && ./gradlew.bat :app:assembleDebug

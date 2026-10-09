@@ -1,0 +1,6 @@
+Commands: MSVC /std:c++17 /EHsc /utf-8 /Isrc; compile and execute event_stream_test.cpp and jni_observer_test.cpp
+event_stream_test.cpp
+event stream tests passed
+jni_observer_test.cpp
+JNI observer tests passed
+Exit code: 0

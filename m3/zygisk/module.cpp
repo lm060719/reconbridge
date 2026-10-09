@@ -608,7 +608,9 @@ static ArgType parse_type(const std::string& s) {
     return T_INT;
 }
 
-static void apply_hooks(const std::string& cfg_text) {
+#include "jni_observer.h"
+
+static void apply_hooks(const std::string& cfg_text, JNIEnv* env) {
     json cfg;
     try {
         cfg = json::parse(cfg_text);
@@ -618,7 +620,15 @@ static void apply_hooks(const std::string& cfg_text) {
     }
     if (!cfg.contains("targets") || !cfg["targets"].is_array()) return;
 
+    json jni_status = json::array();
     for (auto& jt : cfg["targets"]) {
+        if (!jt.is_object()) continue;
+        const auto kind = jt.value("kind", std::string("native"));
+        if (kind == "jni") {
+            jni_status.push_back(install_jni_observer(env, jt.value("id", "__rb_jni")));
+            continue;
+        }
+        if (kind != "native") continue;
         if (g_nslots >= MAX_HOOKS) {
             LOGE("hook 数超过上限 %d", MAX_HOOKS);
             break;
@@ -730,6 +740,10 @@ static void apply_hooks(const std::string& cfg_text) {
         }
 #endif
     }
+    json status = {{"kind", "native"}, {"process", g_package}, {"pid", getpid()},
+        {"jni_observers", jni_status}, {"live_unhook", false}};
+    const auto payload = status.dump();
+    send_framed('S', payload.data(), static_cast<uint32_t>(payload.size()));
 }
 
 // ---------------------------------------------------------------------------
@@ -816,7 +830,7 @@ public:
 #endif
         g_evt_fd = fd;  // 保留用于回传事件
         LOGI("为 %s 注入 hook（配置 %u 字节）", g_package.c_str(), clen);
-        apply_hooks(cfg);
+        apply_hooks(cfg, env);
         // 有 hook：不 unload，保持代理常驻
     }
 

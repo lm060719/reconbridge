@@ -1,5 +1,8 @@
 # ReconBridge 动态 Hook 配置协议（M3）
 
+> 新增 `kind:"jni"` 注册观察器，以及事件 `seq/stream_id`、缓冲丢失统计和 `/jni/bindings`。
+> 接口与覆盖边界见 [诊断、事件完整性与 JNI 映射](../pc/OBSERVABILITY.md)。
+
 PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并用 ShadowHook 注入。改 hook 无需重新编译刷入。
 
 ## 约束与说明

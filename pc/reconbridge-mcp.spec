@@ -15,6 +15,7 @@ from PyInstaller.utils.hooks import (
 datas = []
 binaries = []
 hiddenimports = []
+hiddenimports += ["reconbridge_mcp.action_learning", "reconbridge_mcp.action_tools"]
 
 # mcp：可安全 collect_all（FastMCP 有动态导入，一网打尽）
 _d, _b, _h = collect_all("mcp")

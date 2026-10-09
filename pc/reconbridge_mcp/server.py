@@ -10,13 +10,13 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from mcp.server.fastmcp import FastMCP
+from .stdio import StreamSafeFastMCP
 
 from .client import ReconError, client, _fold_stack
 from .settings import settings
 from . import branch_condition, candidate, condition_probe, external, hypothesis_verify, investigation, pipeline, program_package, root_cause, runtime_lineage, runtime_path, scenario_path, writer_probe
 
-mcp = FastMCP("reconbridge")
+mcp = StreamSafeFastMCP("reconbridge")
 
 
 _PKG_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$")
@@ -5363,16 +5363,16 @@ def diff_scenarios(a: str, b: str) -> dict:
 
 
 @mcp.tool()
-def recent_events(limit: int = 50, since_seq: int = 0) -> dict:
+def recent_events(limit: int = 50, since_seq: int = 0, stream_id: str = "") -> dict:
     """取守护进程环形缓冲里**最近的命中事件**（事后采集，P0-1）——无需正连着 SSE。
 
     典型用法：post_hook 下发后先记下游标（recent_events(limit=0) 的 latest_seq），触发目标行为，
     再 recent_events(since_seq=<游标>) 补捞这期间的所有命中；或忘了开采集时直接捞最近若干条。
     返回 {latest_seq, count, events}；latest_seq 可作下次 since_seq 只取增量。
     """
-    data = client.get_recent(limit=limit, since_seq=since_seq)
+    data = client.get_recent(limit=limit, since_seq=since_seq, stream_id=stream_id)
     evts = [_fold_stack(e) for e in data.get("events", [])]
-    return {"latest_seq": data.get("latest_seq"), "count": len(evts), "events": evts}
+    return {**data, "count": len(evts), "events": evts}
 
 
 @mcp.tool()
@@ -5622,6 +5622,15 @@ def list_artifacts(package_name: str = "") -> dict:
 def toolchain_status() -> dict:
     """检查 PC 本地反编译工具链（jadx / DexKit / Ghidra / Hermes）是否就绪及其路径。"""
     return external.toolchain_status()
+
+
+from . import action_tools
+
+action_tools.register(mcp)
+from . import observability
+observability.register(mcp)
+from . import jni
+jni.register(mcp)
 
 
 def main() -> None:

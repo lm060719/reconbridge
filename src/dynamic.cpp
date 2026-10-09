@@ -1,5 +1,6 @@
 // M3 动态子系统实现：hook 配置下发 + hook 命中事件推流（SSE + 极简 WS）。
 #include "dynamic.h"
+#include "event_stream.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -79,86 +80,12 @@ static void run_detached(const std::vector<std::string>& argv) {
 // ---------------------------------------------------------------------------
 // 事件广播器：多个 SSE/WS 订阅者，各自一个带超时的阻塞队列
 // ---------------------------------------------------------------------------
-struct Subscriber {
-    std::mutex m;
-    std::condition_variable cv;
-    std::deque<std::string> q;
-    bool alive = true;
-
-    // 超时毫秒内取一条；取到返回 true
-    bool pop(std::string& out, int timeout_ms) {
-        std::unique_lock<std::mutex> lk(m);
-        if (!cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
-                         [&] { return !q.empty() || !alive; }))
-            return false;
-        if (!q.empty()) {
-            out = std::move(q.front());
-            q.pop_front();
-            return true;
-        }
-        return false;
-    }
-    void push(const std::string& line) {
-        {
-            std::lock_guard<std::mutex> lk(m);
-            if (q.size() < 10000) q.push_back(line);  // 防爆
-        }
-        cv.notify_one();
-    }
-};
-
-class Broadcaster {
-    std::mutex m_;
-    std::set<std::shared_ptr<Subscriber>> subs_;
-
-    // 环形缓冲：保留最近 N 条事件，供 GET /recent 事后采集（P0-1）——
-    // 命中即便发生在 SSE 采集开始之前，也能事后补捞，不必"掐点"连着流。
-    std::mutex ring_m_;
-    std::deque<std::pair<uint64_t, std::string>> ring_;
-    uint64_t seq_ = 0;
-    static constexpr size_t kRingMax = 400;
-
-public:
-    std::shared_ptr<Subscriber> subscribe() {
-        auto s = std::make_shared<Subscriber>();
-        std::lock_guard<std::mutex> lk(m_);
-        subs_.insert(s);
-        return s;
-    }
-    void unsubscribe(const std::shared_ptr<Subscriber>& s) {
-        std::lock_guard<std::mutex> lk(m_);
-        subs_.erase(s);
-    }
-    void broadcast(const std::string& line) {
-        {   // 先入环形缓冲（独立锁，不与订阅者分发互相阻塞）
-            std::lock_guard<std::mutex> lk(ring_m_);
-            ring_.push_back({++seq_, line});
-            while (ring_.size() > kRingMax) ring_.pop_front();
-        }
-        std::lock_guard<std::mutex> lk(m_);
-        for (auto& s : subs_) s->push(line);
-    }
-    size_t count() {
-        std::lock_guard<std::mutex> lk(m_);
-        return subs_.size();
-    }
-
-    // 取缓冲里 seq>since 的事件，最多保留最新 limit 条（limit=0 只用于取游标）。
-    std::vector<std::pair<uint64_t, std::string>> recent(uint64_t since, size_t limit) {
-        std::lock_guard<std::mutex> lk(ring_m_);
-        std::vector<std::pair<uint64_t, std::string>> out;
-        for (auto& e : ring_)
-            if (e.first > since) out.push_back(e);
-        if (out.size() > limit) out.erase(out.begin(), out.begin() + (out.size() - limit));
-        return out;
-    }
-    uint64_t latest_seq() {
-        std::lock_guard<std::mutex> lk(ring_m_);
-        return seq_;
-    }
-};
+using reconbridge::Subscriber;
+using reconbridge::Broadcaster;
 
 static Broadcaster g_broadcaster;
+// Keep registration observations separate from high-volume hook hits.
+static Broadcaster g_jni_events(4096);
 
 // ---------------------------------------------------------------------------
 // events.log 轮询 tail：把 companion 追加的事件行广播出去
@@ -642,6 +569,12 @@ static void inject_client(int fd) {
             reg_update_status(conn, payload);
         } else if (type == 'E') {
             g_broadcaster.broadcast(payload);
+            auto event = json::parse(payload, nullptr, false);
+            if (event.is_object() && event.value("type", "") == "jni_registration") {
+                event["package"] = base_pkg;
+                event["process"] = pkg;
+                g_jni_events.broadcast(event.dump(-1, ' ', false, json::error_handler_t::replace));
+            }
         } else if (type == 'D') {
             // payload = [namelen:2][name][data]
             if (payload.size() < 2) continue;
@@ -836,7 +769,9 @@ static void collect_runtime_program_permissions(
     if (node.contains("action") && node["action"].is_string()) {
         const std::string action =
             node["action"].get<std::string>();
-        if (action == "set_state" ||
+        if (action == "run_guarded" ||
+            action == "complete_guarded" ||
+            action == "set_state" ||
             action == "remove_state" ||
             action == "clear_state" ||
             action == "increment_state" ||
@@ -3102,17 +3037,31 @@ static void handle_recent(const Request& req, Response& res) {
         long l = strtol(req.get_param_value("limit").c_str(), nullptr, 10);
         if (l >= 0) limit = (size_t)l;
     }
-    auto items = g_broadcaster.recent(since, limit);
-    json arr = json::array();
-    for (auto& it : items) {
-        try {
-            arr.push_back(json::parse(it.second));  // 事件本是 JSON，尽量以对象返回
-        } catch (...) {
-            arr.push_back(it.second);               // 解析失败原样字符串
-        }
+    reply(res, 200, g_broadcaster.snapshot(since, std::min(limit, size_t(10000)),
+        req.has_param("stream_id") ? req.get_param_value("stream_id") : ""));
+}
+
+static void handle_jni_bindings(const Request& req, Response& res) {
+    const auto pkg = req.has_param("package") ? req.get_param_value("package") : "";
+    if (!valid_pkg(pkg)) { reply(res, 400, {{"error", "invalid package"}}); return; }
+    const auto filter = req.has_param("class_filter") ? req.get_param_value("class_filter") : "";
+    long limit = req.has_param("limit") ? strtol(req.get_param_value("limit").c_str(), nullptr, 10) : 500;
+    limit = std::max(1L, std::min(4096L, limit));
+    auto snapshot = g_jni_events.snapshot(0, 4096);
+    json bindings = json::array();
+    for (const auto& e : snapshot["events"]) {
+        if (e.value("package", "") == pkg && e.value("class", "").find(filter) != std::string::npos)
+            bindings.push_back(e);
     }
-    reply(res, 200, {{"latest_seq", g_broadcaster.latest_seq()},
-                     {"count", arr.size()}, {"events", arr}});
+    const size_t available = bindings.size();
+    if (available > static_cast<size_t>(limit))
+        bindings.erase(bindings.begin(), bindings.begin() + (available - limit));
+    snapshot.erase("events");
+    reply(res, 200, {{"package", pkg}, {"count", bindings.size()}, {"bindings", bindings},
+        {"available", available}, {"result_truncated", available > static_cast<size_t>(limit)},
+        {"cache", snapshot}, {"runtime_status", runtime_status_snapshot(pkg)},
+        {"current_bindings_verified", false},
+        {"coverage", "observed successful RegisterNatives calls only; excludes earlier/static registrations; addresses may be stale after unload/unregister/process exit"}});
 }
 
 // POST /dump_dex —— 便捷封装：下发一个“命中即 dump 内存区”的 hook 配置。
@@ -3198,6 +3147,8 @@ void register_routes(httplib::Server& svr) {
     svr.Post("/dump_dex", handle_dump_dex);
     svr.Get("/dumps", handle_dumps);
     svr.Get("/events", handle_events_sse);  // SSE
+    svr.Get("/event_stream/status", handle_recent);
+    svr.Get("/jni/bindings", handle_jni_bindings);
     svr.Get("/recent", handle_recent);      // 事后采集环形缓冲
 }
 

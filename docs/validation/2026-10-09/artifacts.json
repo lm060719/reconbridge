@@ -1,0 +1,84 @@
+{
+  "recorded_utc": "2026-10-09T09:46:56.723563+00:00",
+  "baseline_commit": "2703bd8",
+  "host": "Windows",
+  "python_tests": {
+    "passed": 176,
+    "device_e2e": "deferred by user"
+  },
+  "tracer_tests": {
+    "tests": 54,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "tool_catalog_check": "passed with pc/.venv/Scripts/python.exe",
+  "module_zip_verification": "passed",
+  "builds": [
+    {
+      "abi": "arm64-v8a",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "1b469863302935c711312c0f1922d6485b74b08bc83812617c3274a2afc1f2d5",
+      "files": {
+        "bin/reconbridge_daemon": {
+          "sha256": "376df441038e3ef7b48c6ba4effe27222f53496864c8319ef142206df7141f1c",
+          "bytes": 1690688
+        },
+        "zygisk/arm64-v8a.so": {
+          "sha256": "aa0969c3c937be547723ccefca4d6981d142a1232199bcc25df6ca634a776656",
+          "bytes": 478504
+        }
+      }
+    },
+    {
+      "abi": "x86_64",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "1b469863302935c711312c0f1922d6485b74b08bc83812617c3274a2afc1f2d5",
+      "files": {
+        "bin/reconbridge_daemon_x86_64": {
+          "sha256": "e60f923fa71975e2bc50a9dcc7691af7fa5131cf8b55f4d4a5940b7202380a7f",
+          "bytes": 1691800
+        },
+        "zygisk/x86_64.so": {
+          "sha256": "e917253e0ea865d9e8dd6cc5892497353d7d612d56f96a9e9c5711a983f40915",
+          "bytes": 475872
+        }
+      }
+    }
+  ],
+  "artifacts": {
+    "module/bin/reconbridge_daemon": {
+      "bytes": 1690688,
+      "sha256": "376df441038e3ef7b48c6ba4effe27222f53496864c8319ef142206df7141f1c"
+    },
+    "module/zygisk/arm64-v8a.so": {
+      "bytes": 478504,
+      "sha256": "aa0969c3c937be547723ccefca4d6981d142a1232199bcc25df6ca634a776656"
+    },
+    "module/bin/reconbridge_daemon_x86_64": {
+      "bytes": 1691800,
+      "sha256": "e60f923fa71975e2bc50a9dcc7691af7fa5131cf8b55f4d4a5940b7202380a7f"
+    },
+    "module/zygisk/x86_64.so": {
+      "bytes": 475872,
+      "sha256": "e917253e0ea865d9e8dd6cc5892497353d7d612d56f96a9e9c5711a983f40915"
+    },
+    "dist/ReconBridge-verified.zip": {
+      "bytes": 1756133,
+      "sha256": "6042c4973590f2da6ce943ffbbe465959f81c2d20cc5cee90db9efc40ea2b6c0"
+    },
+    "dist/ReconBridge-Tracer-observability-debug.apk": {
+      "bytes": 1754974,
+      "sha256": "f0094128a406d7cdf595729b816b2bff6432dadd55e92f0f36319253d3d0913e"
+    }
+  },
+  "remote_ci": "pending first push; authoritative result in GitHub Actions",
+  "notes": [
+    "Native binary sources and tracked module binaries match these manifests.",
+    "Previously untracked m5/ReconBridge-Tracer.apk is not included.",
+    "Frozen PC executable predates cross-platform fixes; current source and CI are authoritative.",
+    "Initial catalog invocation with system Python failed due to missing MCP dependency; rerun in project venv passed."
+  ]
+}
