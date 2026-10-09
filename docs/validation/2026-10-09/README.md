@@ -13,3 +13,10 @@
 
 `git log --stat` / `git show` 提供提交文件级变更记录；功能与边界见根目录 [CHANGELOG.md](../../../CHANGELOG.md)。
 本机为 Windows。工作流的 Linux/macOS 结果与真机测试结果不由本地测试推断。
+
+首次提交 `415d39434cdb7a97e5f88f92930b2ac076f3b671` 已推送到 `origin/master`。
+远端 [GitHub Actions 全部 8 个任务成功](https://github.com/lm060719/reconbridge/actions/runs/37913555340)，
+各任务步骤与结果见 [ci-run.json](ci-run.json)，网页任务页提供完整构建日志。
+本地完整副本保存于 `dist/ci-415d394-full.log`（不纳入源码）。
+
+后续 native 安装状态改进的验证单独记录于 [native-status](native-status/README.md)。

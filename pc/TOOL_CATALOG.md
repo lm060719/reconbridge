@@ -24,7 +24,7 @@ PC：**94**；手机端：**48**。接口及功能范围以各工具说明为准
 | `decompile_apk` | ✓ | ✓ | 用 jadx 反编译 apk 到 Java 源码目录，返回反编译输出目录。 |
 | `device_status` | ✓ | ✓ | 探测手机守护进程状态与连接方式，返回 /health 及当前传输配置。用于排查连不上的问题。 |
 | `dexkit_search` | ✓ | ✓ | 用 DexKit 在 apk 的 dex 里做链式查询（定位类/方法/字段）。 |
-| `diagnose_target` | ✓ | — | Diagnose connectivity, installed versions, desired/actual Java hooks and native observer. |
+| `diagnose_target` | ✓ | — | Diagnose connectivity, versions, desired/actual Java and native hook installation. |
 | `diff_call_graph_scenarios` | ✓ | — | 比较两个调用图场景，直接找共同链路、仅 A/仅 B、首次分叉和共享边耗时差。 |
 | `diff_scenarios` | ✓ | ✓ | 比对两个已捕获场景，给出**方法级差异**（P2）——直接回答"A 与 B 行为为何不同"。 |
 | `dump_dex` | ✓ | ✓ | 通用内存 dex dump（M4）：hook dex 加载入口，把内存中已解密的 dex 回传落盘。 |
@@ -68,7 +68,7 @@ PC：**94**；手机端：**48**。接口及功能范围以各工具说明为准
 | `runtime_activity_action` | ✓ | ✓ | 在当前 Activity 上直接执行现有 Action Pipeline，不创建 Java Hook。 |
 | `runtime_context_status` | ✓ | ✓ | 实时读取目标进程当前 Application/Context/Activity/Lifecycle 状态。 |
 | `runtime_event_emit` | ✓ | ✓ | 从 PC 直接向在线 M5 Runtime EventBus 发事件。 |
-| `runtime_hook_status` | ✓ | ✓ | 查看运行中 M5 Runtime 的真实状态。 |
+| `runtime_hook_status` | ✓ | ✓ | 查看目标进程 Java/Native Hook 与 M5 Runtime 的运行状态。 |
 | `runtime_program_approve` | ✓ | ✓ | 持久批准一个 Program 的 ask 权限；跨 revision 有效，deny 仍不可覆盖。 |
 | `runtime_program_disable` | ✓ | ✓ | 禁用 Runtime Program；只移除该 Program 的 targets，并执行 state_cleanup。 |
 | `runtime_program_enable` | ✓ | ✓ | 启用已安装 Runtime Program，并 live reconcile + 应用 state_init。 |

@@ -51,7 +51,7 @@ def event_stream_status(since_seq: int = 0, stream_id: str = "") -> dict:
 
 
 def diagnose_target(package: str) -> dict:
-    """Diagnose connectivity, installed versions, desired/actual Java hooks and native observer.
+    """Diagnose connectivity, versions, desired/actual Java and native hook installation.
 
     Uses normal adb/wifi connection setup. Does not restart the app or install hooks.
     A missing Runtime connection does NOT prove that LSPosed scope is disabled.
@@ -82,20 +82,40 @@ def diagnose_target(package: str) -> dict:
         desired = client.get_json("/hooks").get("hooks", [])
         desired = next((h.get("targets", []) for h in desired if h.get("package") == package), [])
         java_ids = {h["id"] for h in desired if h.get("kind") in {"java", "runtime"} and h.get("id")}
-        add("desired_hooks", "ok", {"java_ids": sorted(java_ids), "total": len(desired)})
+        native_ids = {h["id"] for h in desired if h.get("kind", "native") == "native" and h.get("id")}
+        wants_native = any(h.get("kind", "native") in {"native", "jni"} for h in desired)
+        add("desired_hooks", "ok", {"java_ids": sorted(java_ids), "native_ids": sorted(native_ids), "total": len(desired)})
     except Exception as exc:
         java_ids = set()
+        native_ids = set()
+        wants_native = False
         add("desired_hooks", "unknown", safe_error(exc))
     try:
         rows = client.get_json("/runtime_status", {"package": package}).get("processes", [])
         java_rows = [r for r in rows if r.get("live_reconcile") or r.get("runtime_command")]
+        native_rows = [r for r in rows if not (r.get("live_reconcile") or r.get("runtime_command"))]
+        if wants_native and not native_rows:
+            add("native_runtime", "warning", {"connected_processes": 0},
+                "尚无 native Runtime 回报；确认目标进程启动、Zygisk 与模块启用情况。")
         add("java_runtime", "ok" if java_rows else "warning", {"connected_processes": len(java_rows)},
             "无连接可能是进程未启动、尚无 Hook 配置、Tracer 未启用或作用域未勾选；不能仅凭无连接确定原因。")
         for row in rows:
             runtime = row.get("runtime") or {}
             if not (row.get("live_reconcile") or row.get("runtime_command")):
-                failed = [h for h in runtime.get("jni_observers", []) if h.get("status") != "installed"]
-                add("native_runtime", "warning" if failed else ("ok" if runtime else "unknown"), row)
+                hooks = runtime.get("hooks", [])
+                installed = {h.get("id") for h in hooks if h.get("status") == "installed"}
+                unresolved = [h for h in hooks if h.get("status") != "installed"]
+                failed_jni = [h for h in runtime.get("jni_observers", []) if h.get("status") != "installed"]
+                engine_failed = runtime.get("engine", {}).get("status") == "failed"
+                config_failed = runtime.get("configuration", {}).get("status") in {"failed", "not_applied"}
+                missing = sorted(native_ids - installed)
+                supported = runtime.get("native_status_version") == 1
+                state = "error" if engine_failed or config_failed else (
+                    "warning" if unresolved or failed_jni or missing or not row.get("connected", False)
+                    else "ok" if supported else "unknown")
+                add("native_runtime", state, {**row, "installed_ids": sorted(installed - {None}),
+                    "missing_ids": missing, "unresolved_hooks": unresolved, "status_supported": supported},
+                    "状态记录本次进程启动时的安装结果；尚未跟踪库卸载。配置变更需要重启进程，旧模块状态可能未知。")
                 continue
             installed = {h.get("id") for h in runtime.get("hooks", [])}
             pending = runtime.get("pending_hooks", [])

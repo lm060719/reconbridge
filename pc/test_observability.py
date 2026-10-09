@@ -125,3 +125,44 @@ def test_jni_inspection_is_read_only(monkeypatch):
 def test_client_sends_epoch(monkeypatch):
     monkeypatch.setattr(obs.client, "get_json", lambda path, params: params)
     assert obs.client.get_recent(0, 5, "old")["stream_id"] == "old"
+
+
+@pytest.mark.parametrize("runtime,expected", [
+    ({"native_status_version": 1, "hooks": [{"id": "n1", "status": "installed"}]}, "ok"),
+    ({"native_status_version": 1, "hooks": [{"id": "n1", "status": "pending"}]}, "warning"),
+    ({"native_status_version": 1, "hooks": [{"id": "n1", "status": "installing"}]}, "warning"),
+    ({"native_status_version": 1, "hooks": [{"id": "n1", "status": "failed", "detail": {"code": -7}}]}, "warning"),
+    ({"native_status_version": 1, "hooks": [{"id": "n1", "status": "timeout"}]}, "warning"),
+    ({"native_status_version": 1, "hooks": [{"id": "n1", "status": "rejected"}]}, "warning"),
+    ({"native_status_version": 1, "hooks": [{"id": "old", "status": "installed"}]}, "warning"),
+    ({"engine": {"status": "failed", "error": "missing library"}}, "error"),
+    ({"configuration": {"status": "failed", "error": "bad offset"}}, "error"),
+    ({"jni_observers": []}, "warning"),
+])
+def test_native_diagnostic_matches_desired_to_actual(monkeypatch, runtime, expected):
+    monkeypatch.setattr(obs.external, "toolchain_status", lambda: {})
+    responses = {"/health": {"status": "ok"}, "/packages": {"packages": []},
+        "/hooks": {"hooks": [{"package": "com.example.app", "targets": [{"id": "n1", "lib": "libx.so"}]}]},
+        "/runtime_status": {"processes": [{"connected": True, "process": "com.example.app", "runtime": runtime}]}}
+    monkeypatch.setattr(obs.client, "get_json", lambda path, params=None: responses[path])
+    monkeypatch.setattr(obs.client, "get_recent", lambda **kw: snapshot())
+    check = next(c for c in obs.diagnose_target("com.example.app")["checks"] if c["check"] == "native_runtime")
+    assert check["status"] == expected
+    assert check["detail"]["runtime"] == runtime
+    assert check["detail"]["missing_ids"] == ([] if expected == "ok" else ["n1"])
+
+
+@pytest.mark.parametrize("rows,desired,expected", [
+    ([{"connected": True, "runtime": {"kind": "native", "jni_observers": []}}], [], "unknown"),
+    ([], [{"id": "n1", "kind": "native"}], "warning"),
+    ([{"connected": False, "runtime": {"native_status_version": 1}}], [], "warning"),
+])
+def test_native_diagnostic_does_not_call_legacy_or_absent_runtime_healthy(monkeypatch, rows, desired, expected):
+    monkeypatch.setattr(obs.external, "toolchain_status", lambda: {})
+    responses = {"/health": {"status": "ok"}, "/packages": {"packages": []},
+        "/hooks": {"hooks": [{"package": "com.example.app", "targets": desired}]},
+        "/runtime_status": {"processes": rows}}
+    monkeypatch.setattr(obs.client, "get_json", lambda path, params=None: responses[path])
+    monkeypatch.setattr(obs.client, "get_recent", lambda **kw: snapshot())
+    check = next(c for c in obs.diagnose_target("com.example.app")["checks"] if c["check"] == "native_runtime")
+    assert check["status"] == expected

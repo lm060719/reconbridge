@@ -4411,7 +4411,7 @@ def list_hooks() -> dict:
 
 @mcp.tool()
 def runtime_hook_status(package: str = "") -> dict:
-    """查看运行中 M5 Runtime 的真实状态。
+    """查看目标进程 Java/Native Hook 与 M5 Runtime 的运行状态。
 
     与 list_hooks 不同，这里返回目标进程当前实际 installed / pending Java/Runtime target、
     HookRegistry live reconcile / Runtime Command 能力、进程/pid、动态 ClassLoader/watcher，以及
@@ -4420,6 +4420,8 @@ def runtime_hook_status(package: str = "") -> dict:
     lifecycle_runtime 会报告 attach watcher、ActivityLifecycleCallbacks 和生命周期事件计数。
     pending_hooks 会显示等待类名、重试次数和最后错误；context_runtime 会显示当前
     Application/Context/Activity 与 activity_state，lifecycle_runtime 会显示 callbacks/events；
+    native_status_version=1 的 native Runtime 提供 engine/configuration/hooks 安装结果与错误；
+    pending 不是已安装，installed 不保证库尚未卸载；native 修改仍需重启进程。
     package 为空时列出全部连接进程。
     """
     params = None

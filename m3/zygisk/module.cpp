@@ -31,12 +31,15 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <cerrno>
+#include <stdexcept>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "third_party/json.hpp"
+#include "native_status.h"
 #if defined(__aarch64__)
 #include "third_party/shadowhook.h"
 #elif defined(__x86_64__)
@@ -88,6 +91,7 @@ static int connect_inject_socket() {
 static int (*sh_init)(int, bool) = nullptr;
 static void* (*sh_hook_sym_name)(const char*, const char*, void*, void**) = nullptr;
 static void* (*sh_hook_sym_addr)(void*, void*, void**) = nullptr;
+static decltype(&shadowhook_hook_sym_name_callback) sh_hook_sym_callback = nullptr;
 static int (*sh_get_errno)(void) = nullptr;
 static const char* (*sh_to_errmsg)(int) = nullptr;
 static int (*sh_reg_dl_init)(shadowhook_dl_info_t, shadowhook_dl_info_t, void*) = nullptr;
@@ -96,10 +100,11 @@ static bool resolve_shadowhook(void* h) {
     sh_init = (decltype(sh_init))dlsym(h, "shadowhook_init");
     sh_hook_sym_name = (decltype(sh_hook_sym_name))dlsym(h, "shadowhook_hook_sym_name");
     sh_hook_sym_addr = (decltype(sh_hook_sym_addr))dlsym(h, "shadowhook_hook_sym_addr");
+    sh_hook_sym_callback = (decltype(sh_hook_sym_callback))dlsym(h, "shadowhook_hook_sym_name_callback");
     sh_get_errno = (decltype(sh_get_errno))dlsym(h, "shadowhook_get_errno");
     sh_to_errmsg = (decltype(sh_to_errmsg))dlsym(h, "shadowhook_to_errmsg");
     sh_reg_dl_init = (decltype(sh_reg_dl_init))dlsym(h, "shadowhook_register_dl_init_callback");
-    return sh_init && sh_hook_sym_name && sh_hook_sym_addr;
+    return sh_init && sh_hook_sym_name && sh_hook_sym_addr && sh_get_errno;
 }
 
 #elif defined(__x86_64__)
@@ -148,12 +153,15 @@ struct Target {
     // 运行时
     void* orig = nullptr;
     void* stub = nullptr;
-    bool applied = false;
+    size_t status_key = 0;
 };
 
 static const int MAX_HOOKS = 64;
 static Target g_slots[MAX_HOOKS];
-static int g_nslots = 0;
+static std::atomic<int> g_nslots{0};
+static NativeHookStatus g_native_status;
+static std::atomic<bool> g_status_ready{false};
+static std::mutex g_status_publish_mutex;
 
 static std::string g_package;
 static int g_evt_fd = -1;
@@ -275,6 +283,29 @@ static void send_framed(char type, const void* data, uint32_t len) {
 static void send_event(const std::string& line) {
     send_framed('E', line.data(), (uint32_t)line.size());
 }
+// Serialize snapshot creation and delivery so an older snapshot cannot arrive last.
+static void publish_native_status() {
+    if (!g_status_ready.load()) return;
+    std::lock_guard<std::mutex> lock(g_status_publish_mutex);
+    json status = g_native_status.snapshot();
+    status["process"] = g_package;
+    status["pid"] = getpid();
+    const auto payload = status.dump();
+    send_framed('S', payload.data(), static_cast<uint32_t>(payload.size()));
+}
+
+static void native_result(size_t key, const std::string& state, json detail = json::object()) {
+    if (g_native_status.update(key, state, std::move(detail))) publish_native_status();
+}
+
+static void engine_failure(const std::string& engine, const std::string& message, int code = -1) {
+    g_native_status.engine({{"name", engine}, {"status", "failed"}, {"error", message}, {"code", code}});
+    g_native_status.configuration({{"status", "not_applied"}, {"reason", "engine_unavailable"}});
+    g_status_ready = true;
+    // Keep IPC open until process exit: daemon only retains connected runtimes.
+    publish_native_status();
+}
+
 // dump payload = [namelen:2][name][data]
 static void send_dump(const std::string& name, const std::string& data) {
     std::string p;
@@ -499,53 +530,48 @@ static uintptr_t find_lib_base(const std::string& lib) {
 
 static void apply_offset_hook(int idx, uintptr_t base) {
     Target& t = g_slots[idx];
-    if (t.applied) return;
+    if (!g_native_status.claim(t.status_key)) return;
+    if (t.offset > UINTPTR_MAX - base) {
+        native_result(t.status_key, "failed", {{"reason", "address_overflow"}});
+        return;
+    }
     void* addr = (void*)(base + t.offset);
 #if defined(__aarch64__)
     t.stub = sh_hook_sym_addr(addr, g_proxy[idx], &t.orig);
-    if (t.stub) {
-        t.applied = true;
-        LOGI("offset hook applied: %s+0x%llx @%p", t.lib.c_str(), (unsigned long long)t.offset, addr);
-    } else {
-        int e = sh_get_errno ? sh_get_errno() : -1;
-        LOGE("offset hook fail %s+0x%llx: %s", t.lib.c_str(), (unsigned long long)t.offset,
-             sh_to_errmsg ? sh_to_errmsg(e) : "?");
-    }
+    int code = sh_get_errno ? sh_get_errno() : -1;
+    native_result(t.status_key, t.stub ? "installed" : "failed",
+        {{"address", (uintptr_t)addr}, {"code", t.stub ? 0 : code},
+         {"message", t.stub ? "installed" : (sh_to_errmsg ? sh_to_errmsg(code) : "ShadowHook failed")}});
 #elif defined(__x86_64__)
-    int rc = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
-    if (rc == 0) {
-        t.stub = addr;
-        t.applied = true;
-        LOGI("offset hook applied: %s+0x%llx @%p", t.lib.c_str(), (unsigned long long)t.offset, addr);
-    } else {
-        LOGE("offset hook fail %s+0x%llx: DobbyHook rc=%d", t.lib.c_str(), (unsigned long long)t.offset, rc);
-    }
+    int code = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
+    if (code == 0) t.stub = addr;
+    native_result(t.status_key, code == 0 ? "installed" : "failed",
+        {{"address", (uintptr_t)addr}, {"code", code}, {"message", code == 0 ? "installed" : "DobbyHook failed"}});
 #endif
 }
 
-// dlopen 后回调：为尚未挂上的 offset hook 补挂
 #if defined(__aarch64__)
 static bool g_dl_cb_registered = false;
+static void on_symbol_hooked(int code, const char*, const char*, void* address,
+                            void*, void*, void* data) {
+    auto* target = static_cast<Target*>(data);
+    native_result(target->status_key, code == 0 ? "installed" : code == SHADOWHOOK_ERRNO_PENDING ? "pending" : "failed",
+        {{"code", code}, {"address", (uintptr_t)address},
+         {"message", sh_to_errmsg ? sh_to_errmsg(code) : "ShadowHook callback"}});
+}
 #endif
+
 static void on_dl_post(struct dl_phdr_info* info, size_t, void*) {
     if (!info->dlpi_name) return;
     std::string bn = base_name(info->dlpi_name);
-    for (int i = 0; i < g_nslots; i++) {
+    for (int i = 0; i < g_nslots.load(); i++) {
         Target& t = g_slots[i];
-        if (t.has_offset && !t.applied && t.lib == bn)
+        if (t.has_offset && g_native_status.pending(t.status_key) && t.lib == bn)
             apply_offset_hook(i, (uintptr_t)info->dlpi_addr);
     }
 }
 
 #if defined(__x86_64__)
-// ---------------------------------------------------------------------------
-// Dobby 版 pending 补挂：symbol 型重试 DobbySymbolResolver，offset 型复用
-// on_dl_post（签名与 dl_iterate_phdr 回调一致，直接手动全量重扫触发）。
-// 每 150ms 一轮，30s 后放弃——目标 lib 多数在 App 启动早期就已加载，
-// 实测（arm64/shadowhook 路径）命中通常在第 1-2 轮内完成。
-// ---------------------------------------------------------------------------
-// dl_iterate_phdr 要求回调返回 int，on_dl_post 因 shadowhook_dl_info_t 签名要求是
-// void 返回值（arm64 分支用它注册回调），这里包一层薄 trampoline 适配。
 static int dl_iter_trampoline(struct dl_phdr_info* info, size_t size, void* data) {
     on_dl_post(info, size, data);
     return 0;
@@ -553,47 +579,37 @@ static int dl_iter_trampoline(struct dl_phdr_info* info, size_t size, void* data
 
 static void apply_symbol_hook(int idx) {
     Target& t = g_slots[idx];
-    if (t.applied) return;
+    if (!g_native_status.pending(t.status_key)) return;
     void* addr = db_resolve ? db_resolve(t.lib.c_str(), t.symbol.c_str()) : nullptr;
-    if (!addr) return;
-    int rc = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
-    if (rc == 0) {
-        t.stub = addr;
-        t.applied = true;
-        LOGI("sym hook %s!%s -> applied", t.lib.c_str(), t.symbol.c_str());
-    } else {
-        LOGE("sym hook %s!%s fail: DobbyHook rc=%d", t.lib.c_str(), t.symbol.c_str(), rc);
-    }
+    if (!addr || !g_native_status.claim(t.status_key)) return;
+    int code = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
+    if (code == 0) t.stub = addr;
+    native_result(t.status_key, code == 0 ? "installed" : "failed",
+        {{"address", (uintptr_t)addr}, {"code", code}, {"message", code == 0 ? "installed" : "DobbyHook failed"}});
 }
 
 static std::vector<int> g_pending_sym_idx;
 static std::vector<int> g_pending_offset_idx;
-static std::mutex g_pending_mtx;
-static std::atomic<bool> g_poll_running{false};
 
+// Called after all slots are published. Only this thread mutates pending lists.
 static void start_pending_poll() {
-    bool expected = false;
-    if (!g_poll_running.compare_exchange_strong(expected, true)) return;  // 只起一次
+    if (g_pending_sym_idx.empty() && g_pending_offset_idx.empty()) return;
     std::thread([]() {
         for (int tick = 0; tick < 200; tick++) {
             usleep(150 * 1000);
-            std::vector<int> sym_todo, off_todo;
-            {
-                std::lock_guard<std::mutex> lk(g_pending_mtx);
-                sym_todo = g_pending_sym_idx;
-                off_todo = g_pending_offset_idx;
-            }
-            if (sym_todo.empty() && off_todo.empty()) return;
-            for (int idx : sym_todo) apply_symbol_hook(idx);
-            if (!off_todo.empty()) dl_iterate_phdr(dl_iter_trampoline, nullptr);
-            std::lock_guard<std::mutex> lk(g_pending_mtx);
-            g_pending_sym_idx.erase(std::remove_if(g_pending_sym_idx.begin(), g_pending_sym_idx.end(),
-                                                    [](int i) { return g_slots[i].applied; }),
-                                     g_pending_sym_idx.end());
-            g_pending_offset_idx.erase(std::remove_if(g_pending_offset_idx.begin(), g_pending_offset_idx.end(),
-                                                       [](int i) { return g_slots[i].applied; }),
-                                        g_pending_offset_idx.end());
+            for (int idx : g_pending_sym_idx) apply_symbol_hook(idx);
+            if (!g_pending_offset_idx.empty()) dl_iterate_phdr(dl_iter_trampoline, nullptr);
+            auto done = [](int i) { return !g_native_status.pending(g_slots[i].status_key); };
+            g_pending_sym_idx.erase(std::remove_if(g_pending_sym_idx.begin(), g_pending_sym_idx.end(), done),
+                                    g_pending_sym_idx.end());
+            g_pending_offset_idx.erase(std::remove_if(g_pending_offset_idx.begin(), g_pending_offset_idx.end(), done),
+                                       g_pending_offset_idx.end());
+            if (g_pending_sym_idx.empty() && g_pending_offset_idx.empty()) return;
         }
+        for (const auto& list : {g_pending_sym_idx, g_pending_offset_idx})
+            for (int idx : list)
+                native_result(g_slots[idx].status_key, "timeout",
+                    {{"reason", "library_or_symbol_not_resolved"}, {"poll_attempts", 200}, {"retry_interval_ms", 150}});
     }).detach();
 }
 #endif
@@ -605,7 +621,8 @@ static ArgType parse_type(const std::string& s) {
     if (s == "ptr") return T_PTR;
     if (s == "string") return T_STR;
     if (s == "bytes") return T_BYTES;
-    return T_INT;
+    if (s == "int") return T_INT;
+    throw std::invalid_argument("unsupported native capture type: " + s);
 }
 
 #include "jni_observer.h"
@@ -614,136 +631,159 @@ static void apply_hooks(const std::string& cfg_text, JNIEnv* env) {
     json cfg;
     try {
         cfg = json::parse(cfg_text);
-    } catch (...) {
-        LOGE("hook 配置解析失败");
+        if (!cfg.is_object() || !cfg.contains("targets") || !cfg["targets"].is_array())
+            throw std::invalid_argument("targets must be an array");
+    } catch (const std::exception& e) {
+        g_native_status.configuration({{"status", "failed"}, {"error", e.what()}});
+        g_status_ready = true;
+        publish_native_status();
         return;
     }
-    if (!cfg.contains("targets") || !cfg["targets"].is_array()) return;
 
     json jni_status = json::array();
+    size_t config_index = 0;
     for (auto& jt : cfg["targets"]) {
-        if (!jt.is_object()) continue;
-        const auto kind = jt.value("kind", std::string("native"));
+        const size_t ordinal = config_index++;
+        const std::string kind = jt.is_object() && jt.contains("kind") && jt["kind"].is_string()
+            ? jt["kind"].get<std::string>() : "native";
         if (kind == "jni") {
-            jni_status.push_back(install_jni_observer(env, jt.value("id", "__rb_jni")));
+            try {
+                jni_status.push_back(install_jni_observer(env, jt.value("id", "__rb_jni")));
+            } catch (const std::exception& e) {
+                jni_status.push_back({{"status", "failed"}, {"error", e.what()}, {"config_index", ordinal}});
+            }
             continue;
         }
         if (kind != "native") continue;
-        if (g_nslots >= MAX_HOOKS) {
-            LOGE("hook 数超过上限 %d", MAX_HOOKS);
-            break;
+        json metadata = {{"config_index", ordinal}, {"id", "h" + std::to_string(ordinal)}};
+        for (const auto* field : {"id", "lib", "symbol"})
+            if (jt.is_object() && jt.contains(field) && jt[field].is_string()) metadata[field] = jt[field];
+        if (jt.is_object() && jt.contains("offset")) metadata["offset"] = jt["offset"];
+        const auto key = g_native_status.add(metadata);
+        if (g_nslots.load() >= MAX_HOOKS) {
+            native_result(key, "rejected", {{"reason", "capacity_exceeded"}, {"limit", MAX_HOOKS}});
+            continue;
         }
-        int idx = g_nslots;
+        int idx = g_nslots.load();
         Target& t = g_slots[idx];
         t = Target{};
-        t.id = jt.value("id", std::string("h") + std::to_string(idx));
-        t.lib = jt.value("lib", "");
-        if (jt.contains("symbol") && jt["symbol"].is_string()) t.symbol = jt["symbol"].get<std::string>();
-        if (jt.contains("offset")) {
-            t.has_offset = true;
-            if (jt["offset"].is_string()) {
-                std::string os = jt["offset"];
-                t.offset = strtoull(os.c_str(), nullptr, os.rfind("0x", 0) == 0 ? 16 : 10);
-            } else {
-                t.offset = jt["offset"].get<uint64_t>();
-            }
-        }
-        // capture
-        if (jt.contains("capture")) {
-            auto& cap = jt["capture"];
-            if (cap.contains("args") && cap["args"].is_array()) {
-                for (auto& ja : cap["args"]) {
-                    ArgSpec s;
-                    s.index = ja.value("index", 0);
-                    s.type = parse_type(ja.value("type", std::string("int")));
-                    s.len = ja.value("len", -1);
-                    s.len_from = ja.value("len_from", -1);
-                    s.max = ja.value("max", 256);
-                    t.args.push_back(s);
+        t.status_key = key;
+        try {
+            if (!jt.is_object()) throw std::invalid_argument("target must be an object");
+            if (jt.contains("kind") && !jt["kind"].is_string())
+                throw std::invalid_argument("kind must be a string");
+            t.id = jt.value("id", metadata["id"].get<std::string>());
+            t.lib = jt.value("lib", "");
+            t.symbol = jt.value("symbol", "");
+            t.has_offset = jt.contains("offset");
+            if (t.lib.empty() || base_name(t.lib) != t.lib)
+                throw std::invalid_argument("lib must be a nonempty basename");
+            if (t.has_offset == !t.symbol.empty())
+                throw std::invalid_argument("specify exactly one of symbol or offset");
+            if (t.has_offset) {
+                if (jt["offset"].is_string()) {
+                    const auto value = jt["offset"].get<std::string>();
+                    char* tail = nullptr;
+                    errno = 0;
+                    t.offset = strtoull(value.c_str(), &tail, value.rfind("0x", 0) == 0 ? 16 : 10);
+                    if (value.empty() || value[0] == '-' || value[0] == '+' ||
+                        (value[0] < '0' || value[0] > '9') || errno || tail != value.c_str() + value.size())
+                        throw std::invalid_argument("invalid offset");
+                } else {
+                    if (!jt["offset"].is_number_integer() || jt["offset"] < 0)
+                        throw std::invalid_argument("offset must be a nonnegative integer");
+                    t.offset = jt["offset"].get<uint64_t>();
                 }
             }
-            if (cap.contains("ret")) {
-                t.cap_ret = cap["ret"].value("capture", false);
-                t.ret_type = parse_type(cap["ret"].value("type", std::string("int")));
+            // capture
+            if (jt.contains("capture")) {
+                auto& cap = jt["capture"];
+                if (cap.contains("args") && cap["args"].is_array()) {
+                    for (auto& ja : cap["args"]) {
+                        ArgSpec s;
+                        s.index = ja.value("index", 0);
+                        s.type = parse_type(ja.value("type", std::string("int")));
+                        s.len = ja.value("len", -1);
+                        s.len_from = ja.value("len_from", -1);
+                        s.max = ja.value("max", 256);
+                        t.args.push_back(s);
+                    }
+                }
+                if (cap.contains("ret")) {
+                    t.cap_ret = cap["ret"].value("capture", false);
+                    t.ret_type = parse_type(cap["ret"].value("type", std::string("int")));
+                }
+                t.backtrace = cap.value("backtrace", false);
+                if (cap.contains("dump")) {
+                    auto& dp = cap["dump"];
+                    t.has_dump = true;
+                    t.dump_base_arg = dp.value("base_arg", -1);
+                    t.dump_size_arg = dp.value("size_arg", -1);
+                    t.dump_size_fixed = dp.value("size", (long)-1);
+                    t.dump_max = dp.value("max", 32 * 1024 * 1024);
+                    t.dump_ext = dp.value("ext", std::string("bin"));
+                }
             }
-            t.backtrace = cap.value("backtrace", false);
-            if (cap.contains("dump")) {
-                auto& dp = cap["dump"];
-                t.has_dump = true;
-                t.dump_base_arg = dp.value("base_arg", -1);
-                t.dump_size_arg = dp.value("size_arg", -1);
-                t.dump_size_fixed = dp.value("size", (long)-1);
-                t.dump_max = dp.value("max", 32 * 1024 * 1024);
-                t.dump_ext = dp.value("ext", std::string("bin"));
+            // action
+            if (jt.contains("action")) {
+                auto& ac = jt["action"];
+                std::string at = ac.value("type", std::string("observe"));
+                t.action = (at == "replace_ret") ? ACT_REPLACE_RET : (at == "replace_arg") ? ACT_REPLACE_ARG : ACT_OBSERVE;
+                if (ac.contains("ret_value")) t.ret_value = ac["ret_value"].get<long>();
+                if (ac.contains("arg_overrides") && ac["arg_overrides"].is_array())
+                    for (auto& ov : ac["arg_overrides"])
+                        t.arg_overrides.push_back({ov.value("index", 0), (long)ov.value("value", 0)});
             }
-        }
-        // action
-        if (jt.contains("action")) {
-            auto& ac = jt["action"];
-            std::string at = ac.value("type", std::string("observe"));
-            t.action = (at == "replace_ret") ? ACT_REPLACE_RET : (at == "replace_arg") ? ACT_REPLACE_ARG : ACT_OBSERVE;
-            if (ac.contains("ret_value")) t.ret_value = ac["ret_value"].get<long>();
-            if (ac.contains("arg_overrides") && ac["arg_overrides"].is_array())
-                for (auto& ov : ac["arg_overrides"])
-                    t.arg_overrides.push_back({ov.value("index", 0), (long)ov.value("value", 0)});
-        }
 
-        g_nslots++;  // 占用该 slot
-
-        // 注入
+        } catch (const std::exception& e) {
+            native_result(key, "rejected", {{"reason", "invalid_config"}, {"message", e.what()}});
+            continue;
+        }
+        native_result(key, "pending", {{"reason", "library_or_symbol_not_resolved"}});
+        ++g_nslots;  // Publish only fully parsed slots to loader callbacks.
 #if defined(__aarch64__)
         if (!t.symbol.empty()) {
-            t.stub = sh_hook_sym_name(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig);
-            int e = sh_get_errno ? sh_get_errno() : 0;
-            if (t.stub || e == SHADOWHOOK_ERRNO_PENDING) {
-                t.applied = (t.stub != nullptr);
-                LOGI("sym hook %s!%s -> %s", t.lib.c_str(), t.symbol.c_str(),
-                     t.applied ? "applied" : "pending");
+            g_native_status.claim(key);
+            if (sh_hook_sym_callback) {
+                t.stub = sh_hook_sym_callback(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig,
+                                              on_symbol_hooked, &t);
             } else {
-                LOGE("sym hook %s!%s fail: %s", t.lib.c_str(), t.symbol.c_str(),
-                     sh_to_errmsg ? sh_to_errmsg(e) : "?");
+                t.stub = sh_hook_sym_name(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig);
             }
-        } else if (t.has_offset) {
-            uintptr_t base = find_lib_base(t.lib);
-            if (base) {
-                apply_offset_hook(idx, base);
-            } else {
-                // lib 尚未加载：注册 dlopen 回调延迟补挂
-                if (!g_dl_cb_registered && sh_reg_dl_init) {
-                    sh_reg_dl_init(nullptr, on_dl_post, nullptr);
-                    g_dl_cb_registered = true;
-                }
-                LOGI("offset hook %s+0x%llx pending(dlopen)", t.lib.c_str(),
-                     (unsigned long long)t.offset);
+            const int code = sh_get_errno ? sh_get_errno() : -1;
+            if (g_native_status.symbol_result(key, t.stub != nullptr, code, SHADOWHOOK_ERRNO_PENDING,
+                    sh_hook_sym_callback != nullptr, sh_to_errmsg ? sh_to_errmsg(code) : "unknown ShadowHook result"))
+                publish_native_status();
+        } else {
+            // Register before scanning: avoid losing a load between the scan and registration.
+            int registration = 0;
+            if (!g_dl_cb_registered) {
+                registration = sh_reg_dl_init ? sh_reg_dl_init(nullptr, on_dl_post, nullptr) : -1;
+                g_dl_cb_registered = registration == 0;
             }
+            const uintptr_t base = find_lib_base(t.lib);
+            if (base) apply_offset_hook(idx, base);
+            else if (!g_dl_cb_registered)
+                native_result(key, "failed", {{"reason", "loader_callback_unavailable"}, {"code", registration}});
         }
 #elif defined(__x86_64__)
         if (!t.symbol.empty()) {
             apply_symbol_hook(idx);
-            if (!t.applied) {
-                std::lock_guard<std::mutex> lk(g_pending_mtx);
-                g_pending_sym_idx.push_back(idx);
-                start_pending_poll();
-                LOGI("sym hook %s!%s -> pending(poll)", t.lib.c_str(), t.symbol.c_str());
-            }
-        } else if (t.has_offset) {
-            uintptr_t base = find_lib_base(t.lib);
-            if (base) {
-                apply_offset_hook(idx, base);
-            } else {
-                std::lock_guard<std::mutex> lk(g_pending_mtx);
-                g_pending_offset_idx.push_back(idx);
-                start_pending_poll();
-                LOGI("offset hook %s+0x%llx pending(poll)", t.lib.c_str(),
-                     (unsigned long long)t.offset);
-            }
+            if (g_native_status.pending(key)) g_pending_sym_idx.push_back(idx);
+        } else {
+            const uintptr_t base = find_lib_base(t.lib);
+            if (base) apply_offset_hook(idx, base);
+            if (g_native_status.pending(key)) g_pending_offset_idx.push_back(idx);
         }
 #endif
     }
-    json status = {{"kind", "native"}, {"process", g_package}, {"pid", getpid()},
-        {"jni_observers", jni_status}, {"live_unhook", false}};
-    const auto payload = status.dump();
-    send_framed('S', payload.data(), static_cast<uint32_t>(payload.size()));
+    g_native_status.jni(std::move(jni_status));
+    g_native_status.configuration({{"status", "parsed"}, {"target_count", config_index}, {"native_slots", g_nslots.load()}});
+    g_status_ready = true;
+    publish_native_status();
+#if defined(__x86_64__)
+    start_pending_poll();
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -804,31 +844,36 @@ public:
             return;
         }
 
+        g_evt_fd = fd;
         // 从 /system/lib64 按名加载 hook 引擎（模块把它挂到系统库目录，处于默认命名空间；
         // arm64=shadowhook 需同级 libshadowhook_nothing.so 供其 linker init dlopen；
         // x86_64=Dobby，无此要求，直接 dlopen 即可）。
 #if defined(__aarch64__)
         void* h = dlopen("libshadowhook.so", RTLD_NOW);
         if (!h || !resolve_shadowhook(h)) {
-            LOGE("加载 shadowhook 失败: %s", dlerror());
-            close(fd);
+            const char* error = dlerror();
+            engine_failure("shadowhook", error ? error : "required engine symbol missing");
             return;  // 已尝试连接，保持加载
         }
         int rc = sh_init(SHADOWHOOK_MODE_UNIQUE, false);
         if (rc != 0) {
-            LOGE("shadowhook_init 失败 rc=%d (%s)", rc, sh_to_errmsg ? sh_to_errmsg(rc) : "?");
-            close(fd);
+            engine_failure("shadowhook", sh_to_errmsg ? sh_to_errmsg(rc) : "initialization failed", rc);
             return;
         }
 #elif defined(__x86_64__)
         void* h = dlopen("libdobby.so", RTLD_NOW);
         if (!h || !resolve_dobby(h)) {
-            LOGE("加载 dobby 失败: %s", dlerror());
-            close(fd);
+            const char* error = dlerror();
+            engine_failure("dobby", error ? error : "required engine symbol missing");
             return;  // 已尝试连接，保持加载
         }
 #endif
-        g_evt_fd = fd;  // 保留用于回传事件
+#if defined(__aarch64__)
+        g_native_status.engine({{"name", "shadowhook"}, {"status", "ready"},
+                                {"symbol_completion_callback", sh_hook_sym_callback != nullptr}});
+#elif defined(__x86_64__)
+        g_native_status.engine({{"name", "dobby"}, {"status", "ready"}});
+#endif
         LOGI("为 %s 注入 hook（配置 %u 字节）", g_package.c_str(), clen);
         apply_hooks(cfg, env);
         // 有 hook：不 unload，保持代理常驻

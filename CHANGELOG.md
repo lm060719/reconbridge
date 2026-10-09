@@ -57,5 +57,19 @@
 
 ### 后续工作
 
-native Hook 真实状态及错误报告、实时生命周期与浮点支持；UI 采集/回放；异步关联；报告/故障包；
+native Hook 实时生命周期与浮点支持；UI 采集/回放；异步关联；报告/故障包；
 JNI 静态导出与注销/卸载跟踪；apkanalyzer/UI Automator/Perfetto 接入。
+
+## 2026-10-09：后续 native Hook 安装状态与错误反馈
+
+- 第一批提交 `415d394` 已推送到 `master`，远端 8 个 CI 任务全部通过。
+- Native Runtime 回报引擎状态、配置解析结果及每条 Hook 的真实安装结果。
+- 修正非空 ShadowHook pending 句柄被误判为安装成功的问题，接入符号完成回调。
+- 区分 pending/installing/installed/failed/timeout/rejected，保留错误码、原因和可获得的地址。
+- x86_64 超时显式报告；永久安装失败停止重试。arm64 offset 注册加载回调后再次扫描，避免漏过加载窗口。
+- 并发回调只允许一次安装；较晚到达的 pending 返回值不能覆盖安装完成结果。
+- 无效配置与超出 slot 限制可见；引擎加载失败保持诊断连接至进程结束。
+- PC 诊断对比期望与实际 native ID，不再把仅有 JNI/旧状态的连接认定为 Hook 健康。
+- 更新双架构设备二进制、文档及 CI 宿主测试。
+- 本地 Python 回归 189 项通过，新增 C++ 状态并发/异步顺序回归通过；详见 [后续验证记录](docs/validation/2026-10-09/native-status/README.md)。
+- 仍未执行真机测试；native 实时卸载/替换、库卸载跟踪及浮点 ABI 支持留待后续。

@@ -74,7 +74,12 @@
       "sha256": "f0094128a406d7cdf595729b816b2bff6432dadd55e92f0f36319253d3d0913e"
     }
   },
-  "remote_ci": "pending first push; authoritative result in GitHub Actions",
+  "remote_ci": {
+    "commit": "415d39434cdb7a97e5f88f92930b2ac076f3b671",
+    "conclusion": "success",
+    "jobs": 8,
+    "url": "https://github.com/lm060719/reconbridge/actions/runs/37913555340"
+  },
   "notes": [
     "Native binary sources and tracked module binaries match these manifests.",
     "Previously untracked m5/ReconBridge-Tracer.apk is not included.",

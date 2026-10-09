@@ -11,13 +11,36 @@ diagnose_target("com.example.app")
 ```
 
 检查本地工具、daemon 连通性/版本/能力、目标与 Tracer 的安装信息、期望 Hook、
-各进程实际 Java Hook/pending 类、native JNI observer 状态及事件缓冲能力。
+各进程实际 Java Hook/pending 类、native Hook 安装/JNI observer 状态及事件缓冲能力。
 某项失败仍返回已取得的检查结果，不安装 Hook、不重启 App；连接使用现有 adb/wifi 初始化流程。
 `ok` 只有在所有检查项均正常时才为 true；`warning/unknown` 应查看具体检查项。
 
 没有在线 Runtime **不能直接证明 LSPosed 作用域没勾选**：进程未启动、还没有 Hook 配置、
 Tracer 未启用也可能造成同样现象。安装版本与进程里正在运行的 Tracer 版本分别报告；
 旧 Tracer 未报告 `tracer_version` 时返回 null。
+
+### Native Hook 安装状态
+
+`runtime_hook_status(package)` 的 native `runtime` 回报 `native_status_version: 1`，
+包含 `engine`、`configuration`、`hooks`、`jni_observers` 与递增 `revision`。
+每条 Hook 记录配置中的 `config_index`、`id`、库名及符号/偏移。
+
+| 状态 | 含义 |
+|---|---|
+| `pending` | 等待库/符号可解析；有 ShadowHook 任务句柄不代表已经安装 |
+| `installing` | 引擎安装调用正在执行 |
+| `installed` | 引擎已确认安装成功 |
+| `failed` | 安装或延迟回调注册失败，`detail` 提供错误码和原因 |
+| `timeout` | x86_64 轮询 200 次仍未找到库/符号；重试间隔 150ms |
+| `rejected` | 无效配置或超出 64 个 native slot；包括不支持的采集类型 |
+
+arm64 符号使用 ShadowHook 完成回调更新状态，offset 使用库加载回调；旧引擎若缺少符号完成回调，
+延迟安装只能保持 pending，并标记 `completion_callback: false`。arm64 不设与 x86_64 相同的轮询期限。
+引擎加载/初始化失败也通过 IPC 保留报告，进程退出后连接记录随之移除。
+
+`diagnose_target` 对比期望 native ID 与成功安装 ID，报告缺失、等待、失败和引擎错误。
+旧模块缺少状态协议时不推断为健康。`installed` 仅表示本次进程中的安装结果；
+尚未跟踪库卸载，也未实现 native 实时增删替换。修改配置仍需重启目标进程。
 
 ## 事件完整性
 

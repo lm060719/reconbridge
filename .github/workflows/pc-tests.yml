@@ -98,6 +98,8 @@ jobs:
           /tmp/event-stream-test
           g++ -std=c++17 -Isrc -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" tests/jni_observer_test.cpp -o /tmp/jni-observer-test
           /tmp/jni-observer-test
+          g++ -std=c++17 -pthread tests/native_status_test.cpp -o /tmp/native-status-test
+          /tmp/native-status-test
 
   native:
     runs-on: ubuntu-24.04

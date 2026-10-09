@@ -172,7 +172,7 @@ static std::string read_whole_file(const std::string& path) {
 // LSPosed Runtime Phase 1：注入连接注册表 + 实时配置同步。
 // 每个 tracer 连接注册进来；'H' 声明支持 live reconcile，daemon 用 'R' 下发完整期望配置。
 // tracer 的 HookRegistry 据此执行 add/remove/replace，并通过 'S' 帧回报真实运行时状态。
-// native 层不发 'H'/'S'，仍保持原有下次启动/重启生效语义。
+// native 层发 'S' 报告安装状态，不发 'H'，仍保持下次启动/重启生效语义。
 // ---------------------------------------------------------------------------
 struct RuntimeCommandWaiter {
     std::mutex m;

@@ -1,0 +1,6 @@
+UTC: 2026-10-09T14:22:09.627082+00:00
+Command: python scripts/build_native.py --ndk <NDK-r27c>
+Built arm64-v8a: <repo>\build\native\arm64-v8a\build-manifest.json
+Built x86_64: <repo>\build\native\x86_64\build-manifest.json
+
+Exit code: 0

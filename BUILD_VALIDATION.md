@@ -60,7 +60,7 @@ build/native/x86_64/
 |---|---|
 | pytest | Windows/Linux/macOS 的 Python 测试、真实测试启动脚本、自动工具清单一致性 |
 | tracer | Kotlin 单元测试与 debug APK 构建 |
-| daemon-syntax | C++ 语法、事件广播器与 JNI 观察器的宿主测试 |
+| daemon-syntax | C++ 语法、事件广播器、JNI 观察器与 native 安装状态并发测试 |
 | native | 固定 NDK 下分别构建 arm64-v8a/x86_64 的 daemon 与 Zygisk |
 | module-package | 等待以上检查成功，再收集新构建产物、打包、校验并上传 ZIP |
 
