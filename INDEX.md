@@ -52,6 +52,8 @@ Native v3 生命周期入口见 [NATIVE_LIFECYCLE.md](pc/NATIVE_LIFECYCLE.md)：
 
 ## 3. 文档索引
 
+真机测试从 [验收测试清单](docs/2026-10-10_真机验收测试清单.md) 开始：55 项用例，含环境、夹具、操作步骤、通过标准、证据要求和结果模板。
+
 | 文件 | 内容 |
 |---|---|
 | [`README.md`](README.md) / [`README_en.md`](README_en.md) | 项目总览、快速开始、安装方式、免责声明。 |
