@@ -680,8 +680,34 @@ private class TraceCallback(
 
     private val action = spec.optJSONObject("action")
     private val tamper = action != null
+    private val asyncLink = spec.optJSONObject("async_link")
+    private val correlate = asyncLink != null || capture.optBoolean("correlation", false)
+    private val correlationKey = "rb.correlation.$id"
+    init {
+        asyncLink?.let {
+            require(it.optString("role") in setOf("enqueue", "execute")) { "async_link.role must be enqueue/execute" }
+            require(Regex("[A-Za-z0-9_.-]{1,64}").matches(it.optString("namespace"))) { "invalid async namespace" }
+            require(it.optString("task") == "this" || Regex("arg:[0-9]{1,2}").matches(it.optString("task"))) { "task must be this or arg:N" }
+        }
+    }
+    private fun beginCorrelation(param: MethodHookParam) {
+        if (!correlate) return
+        val data = TraceCorrelation.begin()
+        param.setObjectExtra(correlationKey, data)
+        asyncLink?.let { link ->
+            val selector = link.getString("task")
+            val task = if (selector == "this") param.thisObject else param.args.getOrNull(selector.substring(4).toInt())
+            val namespace = link.getString("namespace")
+            val observation = if (link.getString("role") == "enqueue")
+                TraceCorrelation.tasks.enqueue(task, namespace, data.getString("span_id"))
+            else TraceCorrelation.tasks.execute(task, namespace)
+            observation.put("role", link.getString("role"))
+            data.put("async", observation)
+        }
+    }
 
     override fun beforeHookedMethod(param: MethodHookParam) {
+        try { beginCorrelation(param) } catch (t: Throwable) { log("correlation error: $t") }
         val ctx = ActionContext(
             param = param,
             classLoader = classLoader,
@@ -715,8 +741,22 @@ private class TraceCallback(
         } catch (t: Throwable) {
             log("[$pkg] $id action(after) 失败: $t")
         }
-        // 事件里的 ret 反映最终（可能已被替换/生成的）返回值
-        if (whenPhase == "after" || whenPhase == "both") emit(param, "after", withRet = true)
+        val correlation = param.getObjectExtra(correlationKey) as? JSONObject
+        try {
+            correlation?.optJSONObject("async")?.let { link ->
+                if (link.optString("role") == "enqueue") {
+                    val accepted = !param.hasThrowable() && param.result != false
+                    link.put("enqueue_returned_successfully", accepted)
+                    if (!accepted) TraceCorrelation.tasks.cancel(link.optString("task_id"))
+                }
+            }
+            // 事件里的 ret 反映最终（可能已被替换/生成的）返回值
+            if (whenPhase == "after" || whenPhase == "both") emit(param, "after", withRet = true)
+        } catch (t: Throwable) {
+            log("[$pkg] $id correlation(after) error: $t")
+        } finally {
+            correlation?.optString("span_id")?.let { TraceCorrelation.end(it) }
+        }
     }
 
 
@@ -732,6 +772,10 @@ private class TraceCallback(
             o.put("pid", Process.myPid())
             o.put("tid", Process.myTid())
             o.put("phase", phase)
+            if (correlate) {
+                o.put("process_instance", TraceCorrelation.processInstance)
+                o.put("correlation", param.getObjectExtra(correlationKey) ?: JSONObject.NULL)
+            }
             if (withRet && param.hasThrowable()) {
                 o.put("threw", true)
                 o.put("error", param.throwable?.toString())

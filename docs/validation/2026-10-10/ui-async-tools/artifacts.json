@@ -1,0 +1,41 @@
+{
+  "baseline": "1133177cf5a39992493a93f8044e6a2f47ec341e",
+  "python": "211 passed, 1 skipped",
+  "tracer_tests": 58,
+  "tracer_version": "1.2.0",
+  "tools": {
+    "pc": 103,
+    "mobile": 49
+  },
+  "device_validation": false,
+  "files": {
+    "dist/ReconBridge-Tracer-1.2.0-debug.apk": {
+      "bytes": 1766247,
+      "sha256": "8ad51447669a77db7a6c04443cca48e263ae38696d784e876b5740321b2c5a48"
+    },
+    "pc/reconbridge_mcp/async_analysis.py": {
+      "bytes": 6155,
+      "sha256": "bc0272481a363d7713e05b53f00c685cc675d3c3ec291ae5633dc198f7c7c73c"
+    },
+    "pc/reconbridge_mcp/device_tools.py": {
+      "bytes": 6308,
+      "sha256": "171e652180141ed05bd18a01942a00d5316ff0ebc4857d57882795b1495e49b7"
+    },
+    "pc/reconbridge_mcp/reports.py": {
+      "bytes": 6977,
+      "sha256": "c2368aa532faf43038d6b2eb2e0e73593b0d67973118ab7958b1cdf266bb8050"
+    },
+    "pc/reconbridge_mcp/ui_workflow.py": {
+      "bytes": 10739,
+      "sha256": "e32e2ac0607e9e458ee496773335f7652e536bc2e0f98ad290d2497486d3d7b2"
+    },
+    "pc/reconbridge_mcp/workflow_artifacts.py": {
+      "bytes": 1129,
+      "sha256": "2c729a60facc9d32428520ed75180d2a10030ea960f48de803888396072297bc"
+    },
+    "m5/tracer/app/src/main/java/com/reconbridge/tracer/AsyncCorrelation.kt": {
+      "bytes": 3080,
+      "sha256": "076d45d151ab3482c6c3b5b79f689c2b936c4cd4ac415188d07879754d12557f"
+    }
+  }
+}

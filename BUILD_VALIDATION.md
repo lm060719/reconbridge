@@ -58,7 +58,7 @@ build/native/x86_64/
 
 | Job | 检查 |
 |---|---|
-| pytest | Windows/Linux/macOS 的 Python 测试、真实测试启动脚本、自动工具清单一致性 |
+| pytest | Windows/Linux/macOS 的 Python 测试、测试启动脚本、工具清单；Linux 额外用真实 Tracer APK 验证 SDK apkanalyzer |
 | tracer | Kotlin 单元测试与 debug APK 构建 |
 | daemon-syntax | C++ 语法、事件/JNI/native 状态、实时配置分派与实际 socket 协议集成测试 |
 | native | 固定 NDK 下分别构建 arm64-v8a/x86_64 的 daemon 与 Zygisk |
@@ -66,6 +66,10 @@ build/native/x86_64/
 
 启动脚本测试使用可控的小脚本验证参数传递，不下载真实 jadx/Ghidra 做完整反编译。
 工作流上传的是构建 artifact，不会自动发布 Release 或部署手机。
+
+`scripts/check_android_tools.py <APK>` 通过生产入口执行 apkanalyzer 的 summary/manifest/permissions/files。
+CI 的 pytest 等待 tracer 并下载其 APK；该 SDK 检查使用 runner 上真实的 Android cmdline-tools。
+设备 UI Automator/Perfetto 及异步 Xposed 联调不属于无设备 CI 的验证范围。
 
 本地回归：
 

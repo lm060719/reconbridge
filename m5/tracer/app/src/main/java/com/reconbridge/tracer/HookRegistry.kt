@@ -358,6 +358,8 @@ internal class HookRegistry(
                 put("process", processName)
                 put("pid", pid)
                 put("tracer_version", BuildConfig.VERSION_NAME)
+                put("async_correlation", JSONObject().put("version", 1).put("opt_in", true)
+                    .put("task_identity", "weak_reference").put("capacity", 2048).put("ttl_seconds", 60))
                 put("live_unhook", true)
                 put("guarded_actions", true)
                 put("replace_supported", true)

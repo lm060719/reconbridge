@@ -57,6 +57,17 @@ def test_jadx_executes_platform_launcher(tmp_path, monkeypatch):
     assert result["java_file_count"] == 1
 
 
+def test_apkanalyzer_executes_platform_launcher(tmp_path, monkeypatch):
+    from reconbridge_mcp import device_tools
+    launcher = fake_launcher(tmp_path / "SDK tools & spaces", "apkanalyzer")
+    monkeypatch.setenv("RECONBRIDGE_APKANALYZER", str(launcher))
+    apk = tmp_path / "input & sample.apk"
+    apk.write_bytes(b"fixture")
+    result = device_tools.analyze_apk_metadata(str(apk), "summary")
+    assert result["ok"], result
+    assert json.loads(result["output_tail"].strip()) == ["apk", "summary", str(apk.resolve())]
+
+
 def test_ghidra_executes_platform_launcher(tmp_path, monkeypatch):
     launcher = fake_launcher(tmp_path / "ghidra tools", "analyzeHeadless")
     monkeypatch.setattr(external, "_find_ghidra_headless", lambda: launcher)

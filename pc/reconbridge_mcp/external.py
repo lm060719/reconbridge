@@ -90,6 +90,7 @@ def _find_jdk21() -> Optional[Path]:
 
 
 def toolchain_status() -> dict:
+    from .device_tools import find_apkanalyzer
     jadx = _find_jadx()
     ghidra = _find_ghidra_headless()
     jdk = _find_jdk21()
@@ -106,6 +107,9 @@ def toolchain_status() -> dict:
         "system_java": shutil.which("java"),
         "adb": settings.adb if Path(settings.adb).is_file() else shutil.which(settings.adb),
         "hermes_hbctool": shutil.which("hbctool"),
+        "apkanalyzer": str(find_apkanalyzer()) if find_apkanalyzer() else None,
+        "uiautomator": "device probe required; use android_tool_status(probe_device=True)",
+        "perfetto": "device probe required; use android_tool_status(probe_device=True)",
         "resource_limits": {
             "max_parallel": settings.heavy_max_parallel,
             "log_tail_kb": settings.process_log_tail_kb,

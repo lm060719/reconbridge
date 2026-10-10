@@ -49,6 +49,8 @@ datas += copy_metadata("cryptography")
 hiddenimports += collect_submodules("httpx")
 hiddenimports += collect_submodules("anyio")
 hiddenimports += ["reconbridge_mcp", "reconbridge_mcp.server",
+                  "reconbridge_mcp.device_tools", "reconbridge_mcp.ui_workflow",
+                  "reconbridge_mcp.async_analysis", "reconbridge_mcp.reports", "reconbridge_mcp.workflow_artifacts",
                   "reconbridge_mcp.register", "reconbridge_mcp.webconsole",
                   "reconbridge_mcp.client", "reconbridge_mcp.external",
                   "reconbridge_mcp.settings", "reconbridge_mcp.resource",

@@ -7,6 +7,13 @@ App 进程里，通过抽象 socket `@reconbridge_inject` 直连守护进程 —
 
 ## 前置条件
 
+Tracer 1.2.0 可在 target 中设置 `capture.correlation=true`，事件附加进程实例 UUID、span ID
+和线程嵌套 parent。设置 `async_link={"role":"enqueue","namespace":"jobs","task":"arg:0"}`
+或 `{"role":"execute","namespace":"jobs","task":"this"}` 可观察同一任务对象跨线程执行。
+必须采集 before/after 以保留成功入队证据；重复提交标记歧义，弱引用缓存 2048 项/60 秒。
+状态中的 `async_correlation` 表示运行时支持能力，配置成功不等于安装或关联成功。
+完整用法与限制见 [UI_ASYNC_WORKFLOW.md](../pc/UI_ASYNC_WORKFLOW.md)。
+
 1. 设备已刷 ReconBridge 模块（M1–M4，含守护进程 + sepolicy）。
 2. 安装 `ReconBridge Tracer` APK（`m5/tracer/app/build/outputs/apk/debug/app-debug.apk`）。
 3. 在 **LSPosed 管理器**里启用该模块，并把要侦察的目标 App 勾进**作用域**。

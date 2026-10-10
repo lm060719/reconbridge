@@ -5640,6 +5640,11 @@ from . import observability
 observability.register(mcp)
 from . import jni
 jni.register(mcp)
+from . import device_tools, ui_workflow, async_analysis, reports
+device_tools.register(mcp)
+ui_workflow.register(mcp)
+async_analysis.register(mcp)
+reports.register(mcp)
 
 
 def main() -> None:

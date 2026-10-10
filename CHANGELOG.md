@@ -1,5 +1,17 @@
 # 变更日志
 
+## 2026-10-10：UI、异步关联、报告与 Android 工具
+
+- 新增 UI 层级/截图采集、精确选择器回放、前后快照与逐步事件窗口；变化/歧义/输入失败时停止。
+- Tracer 1.2.0 增加可选 span 与弱引用任务身份关联；重复提交、TTL 和淘汰保留不确定性。
+- PC 按进程实例、任务 ticket 与成功入队证据重建关联，不凭时间邻近推断因果。
+- 新增离线 HTML/JSON 报告与脱敏故障 ZIP，导出清单 SHA-256 自检，排除原始 XML/图像/二进制。
+- 接入 SDK apkanalyzer、设备 UI Automator 与有界 Perfetto 采集；PC 工具 103 个，手机仍为 49。
+- Python 本地 211 passed / 1 skipped；Tracer 58 tests，debug APK 构建成功。
+- CI 三平台回归，Linux 使用实际构建的 Tracer APK 检查四种 apkanalyzer 操作。
+- 说明：[UI_ASYNC_WORKFLOW.md](pc/UI_ASYNC_WORKFLOW.md)；[验证与完整日志索引](docs/validation/2026-10-10/ui-async-tools/README.md)。
+- 按用户安排未进行设备部署/联调；手势录制、自动 coroutine/Binder 传播、Perfetto 指标解码不在本次实现范围。
+
 ## 2026-10-09：动作学习、可观测性、JNI 注册观察与跨平台构建
 
 本次将工作区中此前未提交的动作学习基础，与后续补齐的诊断、事件、JNI 和构建工作一起纳入版本控制。

@@ -57,6 +57,7 @@
 | [`m5/README.md`](m5/README.md) / [`_en`](m5/README_en.md) | M5 tracer 用法、`trace_java` / `patch_java`。 |
 | [`m5/JAVA_HOOK_PROTOCOL.md`](m5/JAVA_HOOK_PROTOCOL.md) | M5 Java hook / Action Pipeline / Runtime Program 协议。 |
 | [`LICENSE`](LICENSE) | 许可证。 |
+| [`pc/UI_ASYNC_WORKFLOW.md`](pc/UI_ASYNC_WORKFLOW.md) | UI 采集/回放、任务对象异步关联、离线报告与 Android 工具入口。 |
 
 ---
 
@@ -68,6 +69,10 @@ Python 包,入口 `python -m reconbridge_mcp`(stdio MCP)。
 | 文件 | 职责 |
 |---|---|
 | [`observability.py`](pc/reconbridge_mcp/observability.py) | 统一诊断、事件完整性判定与会话 JSONL 采集。 |
+| [`device_tools.py`](pc/reconbridge_mcp/device_tools.py) | 有界二进制 adb、SDK apkanalyzer 与设备 Perfetto。 |
+| [`ui_workflow.py`](pc/reconbridge_mcp/ui_workflow.py) | UI 层级/截图、精确选择器回放与事件窗口回执。 |
+| [`async_analysis.py`](pc/reconbridge_mcp/async_analysis.py) | 显式任务 Hook 配置与跨线程对象身份关联。 |
+| [`reports.py`](pc/reconbridge_mcp/reports.py) / [`workflow_artifacts.py`](pc/reconbridge_mcp/workflow_artifacts.py) | 会话证据归档、HTML/JSON 报告、脱敏故障包及哈希清单。 |
 | [`jni.py`](pc/reconbridge_mcp/jni.py) | 显式配置 native JNI 注册观察器与读取映射历史。 |
 | [`server.py`](pc/reconbridge_mcp/server.py) | **MCP 工具总入口**(~187 KB):把 M1 静态接口 + 本地工具链 + 各分析器注册为 Claude Code 可调用工具。 |
 | [`__main__.py`](pc/reconbridge_mcp/__main__.py) / [`__init__.py`](pc/reconbridge_mcp/__init__.py) | 包入口。 |

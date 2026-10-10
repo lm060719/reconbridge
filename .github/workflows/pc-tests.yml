@@ -11,6 +11,7 @@ on:
 
 jobs:
   pytest:
+    needs: tracer
     strategy:
       fail-fast: false
       matrix:
@@ -47,6 +48,19 @@ jobs:
           pytest -q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python ../scripts/generate_tool_catalog.py --check
+
+      - name: 下载实际 Tracer APK 供 SDK 工具验证
+        if: runner.os == 'Linux'
+        uses: actions/download-artifact@v4
+        with:
+          name: ReconBridge-Tracer-debug
+          path: build/sdk-smoke
+      - name: 验证真实 apkanalyzer 启动与 APK 分析
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export RECONBRIDGE_APKANALYZER="$ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer"
+          python ../scripts/check_android_tools.py ../build/sdk-smoke/app-debug.apk
 
   tracer:
     runs-on: ubuntu-latest

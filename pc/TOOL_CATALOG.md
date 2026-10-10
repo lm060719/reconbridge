@@ -2,16 +2,20 @@
 
 由 `scripts/generate_tool_catalog.py` 自动生成。PC 来自实际注册；手机端来自源码声明，非真机探测。
 
-PC：**95**；手机端：**49**。接口及功能范围以各工具说明为准。
+PC：**103**；手机端：**49**。接口及功能范围以各工具说明为准。
 
 | 工具 | PC | 手机 | 说明 |
 |---|---|---|---|
+| `analyze_apk_metadata` | ✓ | — | Run SDK apkanalyzer summary/manifest/permissions/files on a local APK with limits. |
 | `analyze_scenario_divergence` | ✓ | — | 从 A/B 调用图场景首次分叉自动定位源码条件。 |
+| `android_tool_status` | ✓ | — | Locate SDK apkanalyzer and optionally probe device UI Automator/Perfetto via adb. |
 | `begin_action_capture` | ✓ | — | Arm click/long-click + exact candidate methods, then return for manual demonstration. |
 | `capture_call_graph_scenario` | ✓ | — | 围绕同一目标方法采集一次可做 A/B 差分的真实调用图场景。 |
 | `capture_divergence_probe` | ✓ | — | 采集 A/B 首次分叉条件的一个运行时值探针。 |
 | `capture_event_window` | ✓ | — | Poll events into a session JSONL file (up to 60s). Report every gap/restart/error. |
+| `capture_perfetto` | ✓ | — | Capture a bounded device Perfetto trace via adb and save it in the session. No upload. |
 | `capture_scenario` | ✓ | ✓ | 记录一个「场景」的命中时间线，存盘供 diff_scenarios 比对（P2）。 |
+| `capture_ui` | ✓ | — | Capture target UI hierarchy and optional screenshot via adb into the investigation session. |
 | `check_action_compatibility` | ✓ | — | Check installed version and all locally bound APK hashes before execution. |
 | `close_investigation` | ✓ | — | 结束分析会话；默认同时清理该目标包由分析过程留下的 hook。 |
 | `collect_events` | ✓ | ✓ | 连 hook 事件流(SSE)收集命中事件（参数/返回值/调用栈/dump 通知）。 |
@@ -19,7 +23,9 @@ PC：**95**；手机端：**49**。接口及功能范围以各工具说明为准
 | `compare_divergence_probes` | ✓ | — | 比较已经采集的 A/B 条件探针值，并判断是否与源码 true/false 分支方向一致。 |
 | `compare_root_cause_hypothesis` | ✓ | — | 重新比较已采集的根因假设实验，并返回验证前/后的根因排名变化。 |
 | `compare_value_lineage_runtime` | ✓ | — | 比较已采集的 A/B Runtime Value Lineage，找最早稳定值差异。 |
+| `configure_async_trace` | ✓ | — | Install two explicit Java hooks to observe the SAME task object across enqueue/execute. |
 | `configure_jni_capture` | ✓ | ✓ | Enable/disable observation of future successful RegisterNatives/UnregisterNatives calls. |
+| `correlate_async_events` | ✓ | — | Reconstruct recorded task identity links; retain unresolved evidence and save a session artifact. |
 | `create_action_plan` | ✓ | — | Generate a module draft. Dynamic args require input/live-path bindings. |
 | `decompile_apk` | ✓ | ✓ | 用 jadx 反编译 apk 到 Java 源码目录，返回反编译输出目录。 |
 | `device_status` | ✓ | ✓ | 探测手机守护进程状态与连接方式，返回 /health 及当前传输配置。用于排查连不上的问题。 |
@@ -33,6 +39,7 @@ PC：**95**；手机端：**49**。接口及功能范围以各工具说明为准
 | `execute_action_plan` | ✓ | — | Preview or attempt once; verify independent outcomes; halt on ambiguity/failure. |
 | `explain_evidence` | ✓ | — | 解释某个关键词/类/方法/字段当前已有的证据链。 |
 | `export_action_plan` | ✓ | — | Export a reviewable plan + executable Runtime Program manifest (not a signed bundle). |
+| `export_investigation_report` | ✓ | — | Export offline JSON and escaped HTML reports plus a sanitized support ZIP with hashes. |
 | `finish_action_capture` | ✓ | — | Finish a demonstration, associate clicks with methods and clean only its hooks. |
 | `ghidra_analyze` | ✓ | ✓ | 用 Ghidra headless 分析 .so，返回导出表 / 导入表 / 字符串 / 函数列表 / 可疑函数。 |
 | `hermes_decompile` | ✓ | ✓ | 反编译 React Native Hermes 字节码 .hbc（通常在 apk 的 assets/index.android.bundle）。 |
@@ -66,6 +73,7 @@ PC：**95**；手机端：**49**。接口及功能范围以各工具说明为准
 | `read_remote_file` | ✓ | ✓ | root 读取设备上任意文件（流式）。 |
 | `recent_events` | ✓ | ✓ | 取守护进程环形缓冲里**最近的命中事件**（事后采集，P0-1）——无需正连着 SSE。 |
 | `remote_shell` | ✓ | ✓ | 在设备上以 root 执行**白名单内**命令。优先用 argv 数组（安全，无需引号）。 |
+| `replay_ui_steps` | ✓ | — | Validate or execute up to 50 UI actions; save fresh before/after snapshots and stop on mismatch. |
 | `runtime_activity_action` | ✓ | ✓ | 在当前 Activity 上直接执行现有 Action Pipeline，不创建 Java Hook。 |
 | `runtime_context_status` | ✓ | ✓ | 实时读取目标进程当前 Application/Context/Activity/Lifecycle 状态。 |
 | `runtime_event_emit` | ✓ | ✓ | 从 PC 直接向在线 M5 Runtime EventBus 发事件。 |
