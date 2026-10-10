@@ -150,7 +150,7 @@ jobs:
         if: runner.arch == 'X64'
         run: |
           git -C build/dobby-src apply "$GITHUB_WORKSPACE/m3/dobby-android-build-fix.patch"
-          cmake -S build/dobby-src -B build/dobby-host -DCMAKE_BUILD_TYPE=Release -DDOBBY_DEBUG=OFF
+          cmake -S build/dobby-src -B build/dobby-host -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release -DDOBBY_DEBUG=OFF
           cmake --build build/dobby-host --target dobby_static -j2
           g++ -std=c++17 -O2 -fpatchable-function-entry=32 -DRB_REAL_ENGINE -pthread tests/native_gateway_test.cpp m3/zygisk/native_bridge.S build/dobby-host/libdobby.a -ldl -o /tmp/native-engine-test
           /tmp/native-engine-test
