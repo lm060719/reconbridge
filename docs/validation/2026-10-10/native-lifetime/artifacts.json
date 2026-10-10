@@ -1,0 +1,62 @@
+{
+  "baseline": "0a43ce7a00bc51a1b2b4ade2c03e4f015a7b5612",
+  "implementation_commit": "2aa007179023f0e26c237a75d64568e73aba85aa",
+  "ci_commit": "4ed4e1a5c8a511aa055e1e29ae42db90e62356db",
+  "native_manifests": {
+    "arm64-v8a": {
+      "abi": "arm64-v8a",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "213974f8145e2ce7a81109d3ff3933cff6f8bdb27eb2dfeb62226ba638f8f8ff",
+      "files": {
+        "bin/reconbridge_daemon": {
+          "sha256": "cea4ca6442ab9919c09c544e2381dfa1e1ce2269b4b90c2b08c502f312ad89d8",
+          "bytes": 1742016
+        },
+        "zygisk/arm64-v8a.so": {
+          "sha256": "ee8fc0569b63e7574bd06ee41ceebb900ea941690e895a4949b3480bb4e452f4",
+          "bytes": 685552
+        }
+      }
+    },
+    "x86_64": {
+      "abi": "x86_64",
+      "api": 26,
+      "ndk_revision": "27.2.12479018",
+      "source_sha256": "213974f8145e2ce7a81109d3ff3933cff6f8bdb27eb2dfeb62226ba638f8f8ff",
+      "files": {
+        "bin/reconbridge_daemon_x86_64": {
+          "sha256": "682ddd6e04f2519e9957a47ee3fa0bff38abfe849b220248b038e5a86567992a",
+          "bytes": 1746160
+        },
+        "zygisk/x86_64.so": {
+          "sha256": "a71f47448d5ec215f92defbdebefa6ceca19cb12afd3ecb25529daccb172631f",
+          "bytes": 691048
+        }
+      }
+    }
+  },
+  "packages": {
+    "dist/ReconBridge-native-lifetime.zip": {
+      "bytes": 1970822,
+      "sha256": "db5f263bc03855a63adf0f3e14f8f7d08b4de1a1d0f22fadb0464fdc3c5c8690"
+    },
+    "dist/ReconBridge-PC-native-lifetime-win64.zip": {
+      "bytes": 31985097,
+      "sha256": "b2e0197b31b409f5209262cb69bb6dfa25b3efc125176e355d6586892ade16f8"
+    }
+  },
+  "local_tests": {
+    "frozen_mcp_tools": 103,
+    "python_skipped": 1,
+    "python_passed": 216,
+    "cpp": [
+      "native_lifetime",
+      "native_live",
+      "native_status",
+      "jni_mappings",
+      "jni_observer"
+    ]
+  },
+  "device_used": false
+}
