@@ -1,0 +1,15 @@
+package: name='com.reconbridge.tracer' versionCode='4' versionName='1.2.0' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'
+sdkVersion:'27'
+targetSdkVersion:'34'
+application-label:'ReconBridge Tracer'
+application-icon-160:'res/drawable/ic_tracer.xml'
+application: label='ReconBridge Tracer' icon='res/drawable/ic_tracer.xml'
+application-debuggable
+feature-group: label=''
+  uses-feature: name='android.hardware.faketouch'
+  uses-implied-feature: name='android.hardware.faketouch' reason='default feature for all apps'
+other-activities
+supports-screens: 'small' 'normal' 'large' 'xlarge'
+supports-any-density: 'true'
+locales: '--_--'
+densities: '160'

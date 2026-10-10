@@ -32,3 +32,9 @@ Kotlin 检查任务对象身份（不用 equals）、真实 JVM 跨线程、重�
 这些生成日志与 APK 留在 dist，不提交二进制或原始运行数据。
 
 本轮未连接/部署 Android 设备。UI/Perfetto 及 Xposed 回调联调未执行；无设备测试不代表真机兼容性验证。
+
+首次 CI（38025007841）的三平台 Python 回归通过，但真实 apkanalyzer permissions 失败。
+本机 aapt 复现为系统图标引用 `0x01080093` 无法解析，已将 Tracer 图标改为 APK 内置资源。
+首次 CI 全日志保留在 `dist/ui-async-tools-ci-first.log`；后续 CI 继续执行全部四种 SDK 操作。
+Windows 冻结版另通过 stdio MCP 的 103 工具枚举、离线 UI 预览、模拟任务关联、报告导出及 ZIP 哈希检查，
+输出为 `dist/ui-async-tools-frozen-smoke.log`，交付包为 `dist/ReconBridge-PC-ui-async-tools-win64.zip`。
