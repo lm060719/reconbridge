@@ -1,6 +1,6 @@
 # JNI 映射：注册生命周期与静态导出
 
-更新 daemon 和 Zygisk 模块后重启目标进程。daemon `/health` 声明 `jni_mappings: 2`、
+更新 daemon 和 Zygisk 模块后重启目标进程。daemon `/health` 声明 `jni_mappings: 3`、
 `jni_exports: 1`；运行时 `jni_observers[].observer_version: 2` 表示生命周期观察器版本。
 观察器的 `register_natives` / `unregister_natives` 分别报告安装结果，两者成功才为 `installed`，
 仅一项成功为 `partial`。daemon 版本不能代替进程内观察器状态检查。
@@ -27,6 +27,8 @@ inspect_jni_exports("/data/app/.../lib/arm64/libsample.so", class_filter="Native
 | `class_collected` | 后续 JNI 观察中发现该类的弱引用已被清除 |
 | `runtime_disconnected` | Runtime 通道断开；不等同于确认进程已退出 |
 | `identity_unknown` | 旧观察器、身份表已满或弱引用创建失败，不能可靠归并 |
+| `module_unloading` | 已观察到该库进入 fini；尚不等于已经 unmap |
+| `module_unloaded` | 已观察到该库离开/被新加载代次取代；旧注册不再算活跃记录 |
 
 类身份键包含 daemon 连接编号、进程实例和 `class_id`。不按“类名相同”归并不同 ClassLoader 的类；
 PID 重用或下一次连接也不会复用旧绑定身份。`class_id` 来自弱全局引用比较，不是裸 JNI handle 地址。
@@ -44,7 +46,7 @@ PID 重用或下一次连接也不会复用旧绑定身份。`class_id` 来自�
 - `module_path_mismatch` / `mapped_file_deleted`：映射路径变化，或映射文件已删除。
 - `mapped_identity_unknown` / `unknown`：缺少模块身份，或进程断线、maps 不可读/不可解析。
 
-这些是查询时的地址检查，不是 linker 卸载通知。APK 内嵌库的路径形式可能不一致；
+这些是查询时的地址检查。v3 另接入持续 loader 事件，详见 [NATIVE_LIFECYCLE.md](NATIVE_LIFECYCLE.md)。APK 内嵌库的路径形式可能不一致；
 同地址卸载后重载也不能仅凭 maps 识别。`current_bindings_verified` 始终为 false。
 并发 VM 操作的观察完成顺序不保证等于真实绑定修改顺序，未观察到的调用和上游丢失仍未知。
 
@@ -74,4 +76,5 @@ ELF64 小端共享库，文件上限 128 MiB、动态符号上限 100 万、查�
 实现依据：[JNI 原生方法名称规则](https://docs.oracle.com/en/java/javase/26/docs/specs/jni/design.html#resolving-native-method-names)、
 [JNI 函数与弱引用](https://docs.oracle.com/en/java/javase/11/docs/specs/jni/functions.html)。
 本批验证覆盖假 JNI 表的语义保持、身份/状态回归、真实编译 ELF 和 daemon socket 协议；
-Android 真机 Hook 引擎兼容性仍待验收，物理撤钩和持续 linker 卸载跟踪不在本批完成范围内。
+Android 真机 Hook 引擎兼容性仍待验收。后续 v3 已接入 Native 物理撤钩和持续 loader 卸载观察，
+JNI/loader 共同观察序号防止延迟的旧卸载误标同地址的新注册；缺少序号的旧记录不参与该推断。

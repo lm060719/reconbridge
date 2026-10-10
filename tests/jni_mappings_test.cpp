@@ -52,6 +52,28 @@ int main(int argc, char** argv) {
     assert(mappings.snapshot("another.pkg","",100,true)["count"] == 0);
     assert(mappings.snapshot("com.example.app","Native",1,true)["result_truncated"] == true);
 
+    JniBindings loader;
+    auto old = registration("loader1", "0x1100"); old["module"] = "/one/libfixture.so"; old["observation_order"] = uint64_t(10);
+    auto fresh = registration("loader2", "0x1100"); fresh["module"] = "/one/libfixture.so"; fresh["observation_order"] = uint64_t(30);
+    auto foreign = old; foreign["class_id"] = "foreign";
+    loader.ingest(old, 50); loader.ingest(fresh, 50); loader.ingest(foreign, 51);
+    json unload = {{"type", "native_library_unloading"}, {"module", "/one/libfixture.so"},
+        {"executable_ranges", json::array({json::array({"0x1000", "0x1200"})})}, {"observation_order", uint64_t(20)}};
+    loader.ingest(unload, 50); // delivered late, after newer registration
+    auto view = loader.snapshot("com.example.app", "", 100, true);
+    assert(view["bindings"][0]["binding_status"] == "module_unloading");
+    assert(view["bindings"][1]["binding_status"] == "observed_registered");
+    assert(view["bindings"][2]["binding_status"] == "observed_registered");
+    unload["type"] = "native_library_unloaded";
+    loader.ingest(unload, 50);
+    view = loader.snapshot("com.example.app", "", 100, true);
+    assert(view["bindings"][0]["binding_status"] == "module_unloaded");
+    assert(loader.snapshot("com.example.app", "", 100, false)["count"] == 2);
+    unload["executable_ranges"][0][1] = "invalid";
+    unload["observation_order"] = uint64_t(100);
+    loader.ingest(unload, 50);
+    assert(loader.snapshot("com.example.app", "", 100, false)["count"] == 2);
+
     auto long_name = decode_jni_export("Java_p_q_A_00024Inner_do_1work__I_3Ljava_lang_String_2");
     assert(long_name["class"] == "p.q.A$Inner" && long_name["method"] == "do_work");
     assert(long_name["parameter_descriptor"] == "I[Ljava/lang/String;" && long_name["signature"].is_null());

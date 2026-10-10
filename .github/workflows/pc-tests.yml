@@ -135,6 +135,25 @@ jobs:
         run: |
           g++ -std=c++17 -O2 -pthread tests/native_abi_test.cpp m3/zygisk/native_bridge.S -o /tmp/native-abi-test
           /tmp/native-abi-test
+          g++ -std=c++17 -O2 -pthread tests/native_lifetime_test.cpp -o /tmp/native-lifetime-test
+          /tmp/native-lifetime-test
+          g++ -std=c++17 -O2 -pthread tests/native_gateway_test.cpp m3/zygisk/native_bridge.S -o /tmp/native-gateway-test
+          /tmp/native-gateway-test
+      - name: Checkout pinned Dobby for real Linux unhook test
+        if: runner.arch == 'X64'
+        uses: actions/checkout@v4
+        with:
+          repository: jmpews/Dobby
+          ref: 5dfc8546954ce3b3198132ab13fddb89ee92cdd7
+          path: build/dobby-src
+      - name: Verify actual Dobby patch restoration and repeated slot reuse
+        if: runner.arch == 'X64'
+        run: |
+          git -C build/dobby-src apply "$GITHUB_WORKSPACE/m3/dobby-android-build-fix.patch"
+          cmake -S build/dobby-src -B build/dobby-host -DCMAKE_BUILD_TYPE=Release -DDOBBY_DEBUG=OFF
+          cmake --build build/dobby-host --target dobby_static -j2
+          g++ -std=c++17 -O2 -fpatchable-function-entry=32 -DRB_REAL_ENGINE -pthread tests/native_gateway_test.cpp m3/zygisk/native_bridge.S build/dobby-host/libdobby.a -ldl -o /tmp/native-engine-test
+          /tmp/native-engine-test
 
   native:
     runs-on: ubuntu-24.04

@@ -84,3 +84,7 @@ python ../scripts/generate_tool_catalog.py --check
 `native-abi` 在 Linux ARM64 与 x86_64 实际执行生产汇编网关（混合参数、栈参数、浮点替换、特殊值、异常展开），是模块打包的前置检查。源码指纹包括 `.S` 汇编。
 
 JNI 回归在 daemon-syntax 中运行观察器、生命周期/地址检查与真实 ELF 导出解析，socket 集成测试覆盖注册、替换、注销和断线。
+
+Native v3 增加两种 CPU 的 RX 入口、异常展开及旧入口隔离测试；x86_64 从固定源码编译 Dobby，
+实际安装/撤钩 100 次并比对原指令。生命周期回归覆盖 2,000 次逻辑槽位复用、在途计数、失败保留、
+库卸载/同址重载和 JNI 乱序；socket 测试验证卸载事件使映射失效。这些测试不替代 Android linker 真机验收。

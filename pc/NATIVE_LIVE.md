@@ -25,9 +25,9 @@ runtime_hook_status("com.example.app")
 |---|---|
 | 新 Hook 点 | 分配稳定槽位并安装；等待库加载时报告 pending |
 | 同一点修改行为或 ID | 复用原跳板，用新配置处理后续调用 |
-| 同 ID 移到另一点 | 原点停用，新点安装；状态分别显示在 retained_hooks/hooks |
-| 删除 | 新调用透传原函数，不再采集、dump 或修改参数/返回值 |
-| 重新启用同一点 | 复用原槽位与安装结果，不重复安装、不消耗额外槽位 |
+| 同 ID 移到另一点 | 原点停用并等待撤钩，新点安装；状态分别显示在 retained_hooks/hooks |
+| 删除 | 新调用先透传，v3 在途调用结束后物理撤钩并回收逻辑槽位 |
+| 重新启用同一点 | 尚未撤钩时复用；已回收后分配新的入口代次 |
 | 无效配置、重复 ID/同点多目标、容量不足 | 整批配置不切换，configuration.failed 保留错误和 retained_previous_config |
 
 配置校验通过后才发布完整不可变快照。每次调用在进入时选定一个版本，一直持有到返回。
@@ -37,17 +37,16 @@ runtime_hook_status("com.example.app")
 
 ## 状态与边界
 
-- v2 的 `hooks` 只列当前启用项；`retained_hooks` 列停用槽位及其 `installation_status`。
-- `live_disable: true`、`removal_mode: passthrough` 表示行为停用。
-  `physical_unhook: false`、`live_unhook: false` 明确表示没有恢复机器码或释放跳板。
-- 最多保留 **64 个不同选择器对应的 Hook 点/进程生命周期**。删除不回收槽位；重启可清空。
+- v3 的 `hooks` 列当前配置，`retained_hooks` 列撤钩/卸载历史；检查 removed、draining、unhook_failed。
+- v3 `removal_mode: physical_after_drain`，引擎撤钩成功后回收槽位；v2 仍仅 passthrough。
+- 同时最多占用 64 个逻辑槽位，正常撤钩后可以复用。独立入口记录最多 4096 个并保留到进程退出。
 - 同一地址的不同符号/offset 别名不保证能共同安装，最终以引擎结果为准。
-- 已失败/超时的保留槽位不会因重复配置自动重试；可重启进程重新安装。
-  pending 在停用期间不进行 Dobby 轮询；ShadowHook 已登记的 pending 任务仍可能完成，但代理保持透传。
+- 解析/安装失败可删除并待回收后重新添加；物理撤钩失败会保留槽位，不重复使用可能已经失效的引擎句柄。
 - 进程退出或通道断开后不自动重连；已安装行为保持最后配置，新的配置需等下次连接/启动。
 - JNI 观察器仍按启动配置安装；变更时 `configuration.jni_restart_required: true`，需要重启。
 - float / double 需完整签名，见 [Native 浮点支持](NATIVE_FLOAT.md)；同一保留点不可运行中更改签名。
-- 未增加类/库卸载跟踪；`installed` 是安装结果，不是持续有效性证明。
+- v3 增加库卸载跟踪及重载安装，机制和能力缺失见 `loader`。installed 仍不是全量运行正确性的证明。
+- 锁顺序、入口保留、x86_64 close 期间漏采及覆盖边界见 [NATIVE_LIFECYCLE.md](NATIVE_LIFECYCLE.md)。
 
 ## 实现与验证
 
@@ -57,8 +56,8 @@ daemon 在 H 握手后补发最新磁盘配置（配置已删除则发空 target
 
 引擎接口参考：[ShadowHook 手册](https://github.com/bytedance/android-inline-hook/blob/main/doc/manual.md)、
 [Dobby 拦截器实现](https://github.com/jmpews/Dobby/blob/master/source/Interceptor.h)。
-本实现选择保留跳板来维持在途调用的有效引用；Dobby 安装统一在单个工作线程执行。
-这不等于已经解决所有原生库加载/卸载或设备兼容性问题。
+v3 对在途调用计数并延迟撤钩，用独立代次入口防止槽位复用串线；引擎修改在 linker 锁下串行化。
+引擎内部内存释放依赖引擎实现，Android 兼容性仍需真机验收。
 
 `tests/native_live_test.cpp` 执行真实配置管理器与代理分派逻辑，验证并发更新与在途调用。
 `tests/native_ipc_test.cpp` 使用真实 daemon handler 和 socketpair，验证追加、删除、握手窗口与旧 Java H 兼容。

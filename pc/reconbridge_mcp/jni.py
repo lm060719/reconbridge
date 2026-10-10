@@ -37,6 +37,7 @@ def inspect_jni_bindings(package: str, class_filter: str = "", limit: int = 500,
     an enumeration of current VM bindings; registrations before capture are absent.
     Static JNI exports are separate (inspect_jni_exports). Version 2 tracks re-registration, unregister,
     weak class identity and disconnect; include_inactive=False keeps observed_registered only.
+    Version 3 also marks observed module unloading/unloaded with ordering protection against stale events.
     Query-time proc maps checks do not prove that a binding remains current.
     """
     validate_package(package)

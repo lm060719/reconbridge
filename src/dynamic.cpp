@@ -595,7 +595,8 @@ static void inject_client(int fd) {
             g_broadcaster.broadcast(payload);
             auto event = json::parse(payload, nullptr, false);
             if (event.is_object() && (event.value("type", "") == "jni_registration" ||
-                event.value("type", "") == "jni_unregistration" || event.value("type", "") == "jni_class_collected")) {
+                event.value("type", "") == "jni_unregistration" || event.value("type", "") == "jni_class_collected" ||
+                event.value("type", "") == "native_library_unloading" || event.value("type", "") == "native_library_unloaded")) {
                 event["package"] = base_pkg;
                 event["process"] = pkg;
                 g_jni_bindings.ingest(event, conn->jni_connection);

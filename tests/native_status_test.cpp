@@ -59,5 +59,13 @@ int main() {
     status.symbol_result(failed, false, 22, 1, true, "symbol not found");
     assert(status.snapshot()["hooks"][failed]["status"] == "failed");
     assert(status.snapshot()["hooks"][failed]["detail"]["code"] == 22);
+    for (int i = 0; i < 1000; ++i) {
+        auto key = status.add({{"id", "recycled"}});
+        status.lifecycle(key, "removed");
+        status.history(key);
+    }
+    assert(status.snapshot()["hooks"].size() <= 256);
+    assert(status.snapshot()["history_evicted"] > 0);
+    status.lifecycle(999999, "installed"); // late notification for an evicted row is harmless
     std::cout << "Native status tests passed\n";
 }

@@ -2,6 +2,7 @@
 // Observes future registration lifecycle; never changes VM results or exceptions.
 #include <mutex>
 #include <vector>
+#include "native_observation.h"
 static jint (*g_register_original)(JNIEnv*, jclass, const JNINativeMethod*, jint) = nullptr;
 static jint (*g_unregister_original)(JNIEnv*, jclass) = nullptr;
 static std::mutex g_jni_identity_mutex;
@@ -26,6 +27,7 @@ static json jni_event(const char* type, const char* source) {
         {"hook_id", g_jni_hook_id}, {"package", g_package}, {"pid", getpid()},
         {"tid", syscall(__NR_gettid)}, {"process_instance", g_jni_instance},
         {"observation_seq", ++g_jni_sequence},
+        {"observation_order", ++native_observation_sequence},
         {"ts", int64_t(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000}};
 }
 static std::string jni_class_id(JNIEnv* env, jclass clazz) {

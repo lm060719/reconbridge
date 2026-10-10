@@ -205,3 +205,22 @@ def test_v2_diagnostic_ignores_retained_disabled_hooks(monkeypatch):
     responses["/runtime_status"]["processes"][0]["runtime"]["configuration"] = {"jni_restart_required": True}
     native = next(c for c in obs.diagnose_target("com.example.app")["checks"] if c["check"] == "native_runtime")
     assert native["status"] == "warning"
+
+
+@pytest.mark.parametrize("retained,loader,expected", [
+    ([{"status": "removed"}], "installed", "ok"),
+    ([{"status": "draining"}], "installed", "warning"),
+    ([{"status": "unhook_failed"}], "installed", "warning"),
+    ([{"status": "unloaded", "detail": {"engine_handle_quarantined": True}}], "installed", "warning"),
+    ([], "partial", "warning"),
+])
+def test_v3_reports_pending_removal_and_loader_gaps(monkeypatch, retained, loader, expected):
+    monkeypatch.setattr(obs.external, "toolchain_status", lambda: {})
+    runtime = {"kind": "native", "native_status_version": 3, "hooks": [],
+               "retained_hooks": retained, "loader": {"status": loader}}
+    responses = {"/health": {"status": "ok"}, "/packages": {"packages": []}, "/hooks": {"hooks": []},
+        "/runtime_status": {"processes": [{"kind": "native", "connected": True, "runtime": runtime}]}}
+    monkeypatch.setattr(obs.client, "get_json", lambda path, params=None: responses[path])
+    monkeypatch.setattr(obs.client, "get_recent", lambda **kw: snapshot())
+    native = next(c for c in obs.diagnose_target("com.example.app")["checks"] if c["check"] == "native_runtime")
+    assert native["status"] == expected and native["detail"]["status_supported"]

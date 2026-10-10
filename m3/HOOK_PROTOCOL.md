@@ -58,7 +58,7 @@ PC 侧下发**数据驱动**的 hook 配置，手机侧通用执行器解析并�
 {"package": "com.target.app"}          // 移除该包全部期望 hook
 {"package": "com.target.app", "id": "enc1"}   // 只移除某个 hook 点
 ```
-对 **M5 Java Tracer**，daemon 会同步剩余完整配置（或 `targets:[]`），HookRegistry 立即执行 live unhook；对支持实时配置的 **M3 native**，后续调用透传原函数，在途调用保留旧配置；未物理撤钩。
+对 **M5 Java Tracer**，daemon 会同步剩余完整配置（或 `targets:[]`），HookRegistry 执行 live unhook。**M3 native v3** 在途调用保留旧配置，计数归零后物理撤钩并回收逻辑槽位；通过 runtime 状态确认 removed，投递成功不代表撤钩完成。旧 v2 仅透传。
 
 ## 查询：`GET /hooks` / `GET /runtime_status`
 `GET /hooks` 返回磁盘上的**期望 hook 配置**（读 `/data/adb/reconbridge/hooks/*.json`）：
@@ -99,7 +99,7 @@ hook 命中实时推流。每条事件：
 
 > 当前版本的 native 层直接连接 daemon 的注入 IPC，接收配置和回传事件。
 > 支持 H(kind=native) / R 完整配置 / S 状态的版本可运行中新增、停用和替换；
-> 停用保留透传跳板，物理撤钩仍未实现。用法和限制见 [Native 实时配置](../pc/NATIVE_LIVE.md)。
+> v3 支持物理撤钩、槽位复用和持续库生命周期观察。用法和资源保留限制见 [Native 生命周期](../pc/NATIVE_LIFECYCLE.md)。
 > 下图为早期 companion 方案，保留作历史背景，不代表当前部署链路。
 ```
 POST /hook ─► 守护进程写 /data/adb/reconbridge/hooks/<pkg>.json

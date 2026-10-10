@@ -116,14 +116,17 @@ def diagnose_target(package: str) -> dict:
                 config_failed = runtime.get("configuration", {}).get("status") in {"failed", "not_applied"}
                 jni_restart = runtime.get("configuration", {}).get("jni_restart_required", False)
                 missing = sorted(native_ids - installed)
-                supported = runtime.get("native_status_version") in {1, 2}
+                supported = runtime.get("native_status_version") in {1, 2, 3}
+                retirements = [h for h in runtime.get("retained_hooks", []) if h.get("status") in {"draining", "unhook_failed"}
+                    or h.get("detail", {}).get("engine_handle_quarantined")]
+                loader_incomplete = runtime.get("native_status_version") == 3 and runtime.get("loader", {}).get("status") != "installed"
                 state = "error" if engine_failed or config_failed else (
-                    "warning" if unresolved or failed_jni or missing or jni_restart or not row.get("connected", False)
+                    "warning" if unresolved or failed_jni or missing or jni_restart or retirements or loader_incomplete or not row.get("connected", False)
                     else "ok" if supported else "unknown")
                 add("native_runtime", state, {**row, "installed_ids": sorted(installed - {None}),
-                    "missing_ids": missing, "unresolved_hooks": unresolved, "status_supported": supported},
-                    "live_reconcile=true 支持 native 运行中增删替换；删除为透传停用，已有调用可按旧配置完成。"
-                    "JNI 配置变更仍需重启，库卸载尚未跟踪；旧模块可能需重启生效。")
+                    "missing_ids": missing, "unresolved_hooks": unresolved, "pending_retirements": retirements, "status_supported": supported},
+                    "v3 删除先停用，待在途调用结束后物理撤钩并回收槽位；核对 removed/draining/unhook_failed。"
+                    "库卸载覆盖以 loader.status/mechanism 为准，旧版仍仅透传停用；JNI 配置变更需重启。")
                 continue
             installed = {h.get("id") for h in runtime.get("hooks", [])}
             pending = runtime.get("pending_hooks", [])

@@ -42,6 +42,9 @@
 #include "native_status.h"
 #include "native_live.h"
 #include "native_abi.h"
+#include "native_lifetime.h"
+#include "library_lifetime.h"
+#include "native_gateway.h"
 #if defined(__aarch64__)
 #include "third_party/shadowhook.h"
 #elif defined(__x86_64__)
@@ -97,6 +100,11 @@ static decltype(&shadowhook_hook_sym_name_callback) sh_hook_sym_callback = nullp
 static int (*sh_get_errno)(void) = nullptr;
 static const char* (*sh_to_errmsg)(int) = nullptr;
 static int (*sh_reg_dl_init)(shadowhook_dl_info_t, shadowhook_dl_info_t, void*) = nullptr;
+static decltype(&shadowhook_register_dl_fini_callback) sh_reg_dl_fini = nullptr;
+static decltype(&shadowhook_unhook) sh_unhook = nullptr;
+static decltype(&shadowhook_dlopen) sh_open = nullptr;
+static decltype(&shadowhook_dlclose) sh_close = nullptr;
+static decltype(&shadowhook_dlsym) sh_symbol = nullptr;
 
 static bool resolve_shadowhook(void* h) {
     sh_init = (decltype(sh_init))dlsym(h, "shadowhook_init");
@@ -106,15 +114,22 @@ static bool resolve_shadowhook(void* h) {
     sh_get_errno = (decltype(sh_get_errno))dlsym(h, "shadowhook_get_errno");
     sh_to_errmsg = (decltype(sh_to_errmsg))dlsym(h, "shadowhook_to_errmsg");
     sh_reg_dl_init = (decltype(sh_reg_dl_init))dlsym(h, "shadowhook_register_dl_init_callback");
+    sh_reg_dl_fini = (decltype(sh_reg_dl_fini))dlsym(h, "shadowhook_register_dl_fini_callback");
+    sh_unhook = (decltype(sh_unhook))dlsym(h, "shadowhook_unhook");
+    sh_open = (decltype(sh_open))dlsym(h, "shadowhook_dlopen");
+    sh_close = (decltype(sh_close))dlsym(h, "shadowhook_dlclose");
+    sh_symbol = (decltype(sh_symbol))dlsym(h, "shadowhook_dlsym");
     return sh_init && sh_hook_sym_name && sh_hook_sym_addr && sh_get_errno;
 }
 
 #elif defined(__x86_64__)
 static int (*db_hook)(void*, void*, void**) = nullptr;           // DobbyHook(addr, fake, &orig) -> 0=ok
+static int (*db_destroy)(void*) = nullptr;
 static void* (*db_resolve)(const char*, const char*) = nullptr;  // DobbySymbolResolver(lib, sym) -> addr|null
 
 static bool resolve_dobby(void* h) {
     db_hook = (decltype(db_hook))dlsym(h, "DobbyHook");
+    db_destroy = (decltype(db_destroy))dlsym(h, "DobbyDestroy");
     db_resolve = (decltype(db_resolve))dlsym(h, "DobbySymbolResolver");
     return db_hook && db_resolve;
 }
@@ -128,11 +143,27 @@ struct Target : NativeSpec {
     void* stub = nullptr;
     size_t status_key = 0;
     std::atomic<int> poll_attempts{0};
+    size_t slot = 0;
+    uint64_t generation = 0, library_generation = 0;
+    uintptr_t address = 0;
+    std::string module_key;
+    void* gateway = nullptr;
+    NativeLifetime lifetime;
+    std::atomic<bool> module_valid{true};
+    bool quarantined = false;
+    bool rearm_pending = false;
+    bool unhook_failed = false;
+    bool removal_requested = false;
 };
 
 static const int MAX_HOOKS = 64;
-static Target g_slots[MAX_HOOKS];
-static std::atomic<int> g_nslots{0};
+static std::array<std::shared_ptr<Target>, MAX_HOOKS> g_slots;
+static std::vector<std::shared_ptr<Target>> g_ingress_guards;
+static std::recursive_mutex g_lifecycle_mutex;
+static NativeLibraries g_libraries;
+static json g_loader_status = {{"status", "starting"}, {"continuous", false}};
+static std::atomic<uint64_t> g_library_sequence{0};
+static std::string g_runtime_instance;
 static NativeHookStatus g_native_status;
 static NativeLiveRegistry g_live;
 static std::atomic<bool> g_control_connected{false};
@@ -267,47 +298,59 @@ static void send_event(const std::string& line) {
 static void publish_native_status() {
     if (!g_status_ready.load()) return;
     std::lock_guard<std::mutex> lock(g_status_publish_mutex);
+    std::unique_lock<std::recursive_mutex> lifecycle(g_lifecycle_mutex);
     json status = g_native_status.snapshot();
     auto plan = g_live.snapshot();
     json active = json::array(), retained = json::array();
-    for (size_t i = 0; i < status["hooks"].size(); ++i) {
-        auto row = status["hooks"][i];
-        row["slot"] = i;
-        const auto& spec = plan->active[i];
-        if (spec) {
-            row["id"] = spec->id;
-            row["config_index"] = spec->config_index;
+    for (const auto& item : status["hooks"]) {
+        auto row = item;
+        const size_t slot = row.value("slot", size_t(MAX_HOOKS));
+        if (slot >= MAX_HOOKS) continue;
+        const auto& spec = plan->active[slot];
+        const bool current = spec && row.value("generation", uint64_t(0)) == plan->generations[slot];
+        row["active"] = current;
+        if (current) {
+            row["id"] = spec->id; row["config_index"] = spec->config_index;
             row["requested"] = spec->requested;
-            row["active"] = true;
             active.push_back(std::move(row));
-        } else {
-            row["installation_status"] = row["status"];
-            row["status"] = "disabled";
-            row["active"] = false;
-            row["removal_mode"] = "passthrough";
-            retained.push_back(std::move(row));
-        }
+        } else retained.push_back(std::move(row));
     }
+    const size_t history = retained.size();
+    if (history > 128) retained.erase(retained.begin(), retained.begin() + (history - 128));
     status["hooks"] = std::move(active);
     status["retained_hooks"] = std::move(retained);
-    status["native_status_version"] = 2;
+    status["history_truncated"] = history > 128;
+    status["native_status_version"] = 3;
     status["native_float_abi"] = {{"version", 1}, {"types", {"float", "double"}}, {"max_args", 8}, {"explicit_signature", true}};
     status["config_revision"] = plan->revision;
     status["live_reconcile"] = g_control_connected.load();
     status["live_disable"] = g_control_connected.load();
-    status["physical_unhook"] = false;
-    status["removal_mode"] = "passthrough";
-    status["installation_scope"] = "connected_process";
+#if defined(__aarch64__)
+    status["physical_unhook"] = sh_unhook != nullptr;
+#else
+    status["physical_unhook"] = db_destroy != nullptr;
+#endif
+    status["live_unhook"] = status["physical_unhook"] == true && g_control_connected.load();
+    status["removal_mode"] = "physical_after_drain";
+    status["installation_scope"] = "process_lifetime";
     status["slot_capacity"] = MAX_HOOKS;
-    status["slots_used"] = status["hooks"].size() + status["retained_hooks"].size();
+    size_t used = 0; for (const auto& target : g_slots) if (target) ++used;
+    status["slots_used"] = used;
+    status["ingress_guards"] = g_ingress_guards.size();
+    status["ingress_guard_capacity"] = 4096;
+    status["loader"] = g_loader_status;
+    status["loader"]["loaded_images"] = g_libraries.loaded().size();
+    status["loader"]["latest_seq"] = g_library_sequence.load();
+    status["unload_tracking"] = g_loader_status.value("continuous", false);
+    status["process_instance"] = g_runtime_instance;
     status["process"] = g_package;
     status["pid"] = getpid();
+    lifecycle.unlock();
     const auto payload = status.dump();
+    static std::string previous;
+    if (payload == previous) return;
+    previous = payload;
     send_framed('S', payload.data(), static_cast<uint32_t>(payload.size()));
-}
-
-static void native_result(size_t key, const std::string& state, json detail = json::object()) {
-    if (g_native_status.update(key, state, std::move(detail))) publish_native_status();
 }
 
 static void engine_failure(const std::string& engine, const std::string& message, int code = -1) {
@@ -475,193 +518,27 @@ static void build_and_send(const NativeSpec& t, uint64_t revision, const long a[
 // ---------------------------------------------------------------------------
 // 代理池：每个 hook 点一个独立 proxy_i，转发到 proxy_common(i, x0..x7)
 // ---------------------------------------------------------------------------
-extern "C" __attribute__((visibility("hidden"))) void rb_native_dispatch(int idx, NativeFrame* frame) {
-    const auto& retained = g_slots[idx];
-    invoke_native_frame(g_live, idx, retained, retained.orig, *frame,
+extern "C" __attribute__((visibility("hidden"))) void rb_native_dispatch(uintptr_t context, NativeFrame* frame) {
+    auto& target = *reinterpret_cast<Target*>(context);
+    // A thread delayed before entering the gateway may arrive after unhook.
+    // Never call the freed engine trampoline or another slot owner's signature.
+    invoke_native_generation(g_live, target, *frame,
         [](const NativeSpec& spec, uint64_t revision, const std::array<long, 8>& args, long result) {
             build_and_send(spec, revision, args.data(), result);
         });
 }
 
-#define PROXY(i) extern "C" void rb_proxy_##i();
-// 生成 64 个
-PROXY(0) PROXY(1) PROXY(2) PROXY(3) PROXY(4) PROXY(5) PROXY(6) PROXY(7)
-PROXY(8) PROXY(9) PROXY(10) PROXY(11) PROXY(12) PROXY(13) PROXY(14) PROXY(15)
-PROXY(16) PROXY(17) PROXY(18) PROXY(19) PROXY(20) PROXY(21) PROXY(22) PROXY(23)
-PROXY(24) PROXY(25) PROXY(26) PROXY(27) PROXY(28) PROXY(29) PROXY(30) PROXY(31)
-PROXY(32) PROXY(33) PROXY(34) PROXY(35) PROXY(36) PROXY(37) PROXY(38) PROXY(39)
-PROXY(40) PROXY(41) PROXY(42) PROXY(43) PROXY(44) PROXY(45) PROXY(46) PROXY(47)
-PROXY(48) PROXY(49) PROXY(50) PROXY(51) PROXY(52) PROXY(53) PROXY(54) PROXY(55)
-PROXY(56) PROXY(57) PROXY(58) PROXY(59) PROXY(60) PROXY(61) PROXY(62) PROXY(63)
-
-#define PROXY_REF(i) (void*)rb_proxy_##i
-static void* g_proxy[MAX_HOOKS] = {
-    PROXY_REF(0), PROXY_REF(1), PROXY_REF(2), PROXY_REF(3), PROXY_REF(4), PROXY_REF(5), PROXY_REF(6), PROXY_REF(7),
-    PROXY_REF(8), PROXY_REF(9), PROXY_REF(10), PROXY_REF(11), PROXY_REF(12), PROXY_REF(13), PROXY_REF(14), PROXY_REF(15),
-    PROXY_REF(16), PROXY_REF(17), PROXY_REF(18), PROXY_REF(19), PROXY_REF(20), PROXY_REF(21), PROXY_REF(22), PROXY_REF(23),
-    PROXY_REF(24), PROXY_REF(25), PROXY_REF(26), PROXY_REF(27), PROXY_REF(28), PROXY_REF(29), PROXY_REF(30), PROXY_REF(31),
-    PROXY_REF(32), PROXY_REF(33), PROXY_REF(34), PROXY_REF(35), PROXY_REF(36), PROXY_REF(37), PROXY_REF(38), PROXY_REF(39),
-    PROXY_REF(40), PROXY_REF(41), PROXY_REF(42), PROXY_REF(43), PROXY_REF(44), PROXY_REF(45), PROXY_REF(46), PROXY_REF(47),
-    PROXY_REF(48), PROXY_REF(49), PROXY_REF(50), PROXY_REF(51), PROXY_REF(52), PROXY_REF(53), PROXY_REF(54), PROXY_REF(55),
-    PROXY_REF(56), PROXY_REF(57), PROXY_REF(58), PROXY_REF(59), PROXY_REF(60), PROXY_REF(61), PROXY_REF(62), PROXY_REF(63),
-};
-
-// ---------------------------------------------------------------------------
-// 加载 shadowhook（memfd + android_dlopen_ext，无 DT_NEEDED）
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// offset 模式：找 lib 的加载基址 / 延迟到 dlopen 后再挂
-// ---------------------------------------------------------------------------
-static std::string base_name(const std::string& p) {
-    size_t s = p.find_last_of('/');
-    return s == std::string::npos ? p : p.substr(s + 1);
-}
-
-struct BaseFind {
-    std::string lib;
-    uintptr_t base;
-};
-static int base_iter_cb(struct dl_phdr_info* info, size_t, void* data) {
-    BaseFind* bf = (BaseFind*)data;
-    if (info->dlpi_name && base_name(info->dlpi_name) == bf->lib) {
-        bf->base = (uintptr_t)info->dlpi_addr;
-        return 1;
-    }
-    return 0;
-}
-static uintptr_t find_lib_base(const std::string& lib) {
-    BaseFind bf{lib, 0};
-    dl_iterate_phdr(base_iter_cb, &bf);
-    return bf.base;
-}
-
-static void apply_offset_hook(int idx, uintptr_t base) {
-    Target& t = g_slots[idx];
-    if (!g_native_status.claim(t.status_key)) return;
-    if (t.offset > UINTPTR_MAX - base) {
-        native_result(t.status_key, "failed", {{"reason", "address_overflow"}});
-        return;
-    }
-    void* addr = (void*)(base + t.offset);
-#if defined(__aarch64__)
-    t.stub = sh_hook_sym_addr(addr, g_proxy[idx], &t.orig);
-    int code = sh_get_errno ? sh_get_errno() : -1;
-    native_result(t.status_key, t.stub ? "installed" : "failed",
-        {{"address", (uintptr_t)addr}, {"code", t.stub ? 0 : code},
-         {"message", t.stub ? "installed" : (sh_to_errmsg ? sh_to_errmsg(code) : "ShadowHook failed")}});
-#elif defined(__x86_64__)
-    int code = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
-    if (code == 0) t.stub = addr;
-    native_result(t.status_key, code == 0 ? "installed" : "failed",
-        {{"address", (uintptr_t)addr}, {"code", code}, {"message", code == 0 ? "installed" : "DobbyHook failed"}});
-#endif
-}
-
-#if defined(__aarch64__)
-static bool g_dl_cb_registered = false;
-static void on_symbol_hooked(int code, const char*, const char*, void* address,
-                            void*, void*, void* data) {
-    auto* target = static_cast<Target*>(data);
-    native_result(target->status_key, code == 0 ? "installed" : code == SHADOWHOOK_ERRNO_PENDING ? "pending" : "failed",
-        {{"code", code}, {"address", (uintptr_t)address},
-         {"message", sh_to_errmsg ? sh_to_errmsg(code) : "ShadowHook callback"}});
-}
-
-static void on_dl_post(struct dl_phdr_info* info, size_t, void*) {
-    if (!info->dlpi_name) return;
-    std::string bn = base_name(info->dlpi_name);
-    for (int i = 0; i < g_nslots.load(); i++) {
-        Target& t = g_slots[i];
-        if (t.has_offset && g_live.snapshot()->active[i] && g_native_status.pending(t.status_key) && t.lib == bn)
-            apply_offset_hook(i, (uintptr_t)info->dlpi_addr);
-    }
-}
-
-#endif
-
-#if defined(__x86_64__)
-static void apply_symbol_hook(int idx) {
-    Target& t = g_slots[idx];
-    if (!g_native_status.pending(t.status_key)) return;
-    void* addr = db_resolve ? db_resolve(t.lib.c_str(), t.symbol.c_str()) : nullptr;
-    if (!addr || !g_native_status.claim(t.status_key)) return;
-    int code = db_hook ? db_hook(addr, g_proxy[idx], &t.orig) : -1;
-    if (code == 0) t.stub = addr;
-    native_result(t.status_key, code == 0 ? "installed" : "failed",
-        {{"address", (uintptr_t)addr}, {"code", code}, {"message", code == 0 ? "installed" : "DobbyHook failed"}});
-}
-
-// One process-lifetime poller. Reconciles only publish new immutable slots;
-// the poller never iterates a vector that the control reader can mutate.
-static void start_pending_poll() {
-    std::thread([]() {
-        while (g_control_connected.load()) {
-            usleep(150 * 1000);
-            auto plan = g_live.snapshot();
-            for (int idx = 0; idx < g_nslots.load(); ++idx) {
-                auto& t = g_slots[idx];
-                if (!plan->active[idx] || !g_native_status.pending(t.status_key)) continue;
-                if (t.has_offset) {
-                    const uintptr_t base = find_lib_base(t.lib);
-                    if (base) apply_offset_hook(idx, base);
-                } else apply_symbol_hook(idx);
-                if (t.poll_attempts.fetch_add(1) + 1 >= 200 && g_native_status.pending(t.status_key))
-                    native_result(t.status_key, "timeout",
-                        {{"reason", "library_or_symbol_not_resolved"}, {"poll_attempts", 200}, {"retry_interval_ms", 150}});
-            }
-        }
-    }).detach();
-}
-#endif
+#include "native_runtime.h"
 
 // ---------------------------------------------------------------------------
 // 解析配置并注入
 // ---------------------------------------------------------------------------
 #include "jni_observer.h"
 
-static void install_slot(size_t idx) {
-    auto& t = g_slots[idx];
-    const auto key = t.status_key;
-#if defined(__aarch64__)
-    if (!t.symbol.empty()) {
-        if (!g_native_status.claim(key)) return;
-        if (sh_hook_sym_callback) {
-            t.stub = sh_hook_sym_callback(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig,
-                                          on_symbol_hooked, &t);
-        } else t.stub = sh_hook_sym_name(t.lib.c_str(), t.symbol.c_str(), g_proxy[idx], &t.orig);
-        const int code = sh_get_errno();
-        if (g_native_status.symbol_result(key, t.stub != nullptr, code, SHADOWHOOK_ERRNO_PENDING,
-                sh_hook_sym_callback != nullptr, sh_to_errmsg ? sh_to_errmsg(code) : "unknown ShadowHook result"))
-            publish_native_status();
-    } else {
-        int registration = 0;
-        if (!g_dl_cb_registered) {
-            registration = sh_reg_dl_init ? sh_reg_dl_init(nullptr, on_dl_post, nullptr) : -1;
-            g_dl_cb_registered = registration == 0;
-        }
-        const uintptr_t base = find_lib_base(t.lib);
-        if (base) apply_offset_hook(idx, base);
-        else if (!g_dl_cb_registered)
-            native_result(key, "failed", {{"reason", "loader_callback_unavailable"}, {"code", registration}});
-    }
-#elif defined(__x86_64__)
-    // All Dobby installation calls run on the single poller. Its interceptor
-    // table is shared and must not be mutated concurrently by reader/poller.
-    (void)t;
-    (void)key;
-#endif
-}
-
-static void apply_hooks(const std::string& cfg_text, JNIEnv* env = nullptr) {
+static void apply_hooks_locked(const std::string& cfg_text, JNIEnv* env = nullptr) {
     try {
         const json cfg = json::parse(cfg_text);
-        auto change = g_live.reconcile(cfg, [](size_t idx, const NativeSpec& spec) {
-            auto& t = g_slots[idx];
-            static_cast<NativeSpec&>(t) = spec;
-            t.status_key = g_native_status.add({{"id", spec.id}, {"lib", spec.lib},
-                {"symbol", spec.symbol}, {"offset", spec.has_offset ? json(spec.offset) : json(nullptr)}});
-            g_nslots.store(static_cast<int>(idx + 1));
-        });
+        auto change = g_live.reconcile(cfg, prepare_native_target);
         json jni_config = json::array();
         for (const auto& target : cfg["targets"])
             if (target.value("kind", std::string("native")) == "jni") jni_config.push_back(target);
@@ -674,15 +551,7 @@ static void apply_hooks(const std::string& cfg_text, JNIEnv* env = nullptr) {
             }
             g_native_status.jni(std::move(observers));
         }
-        for (const auto& added : change.added) install_slot(added.slot);
-        // Re-enable retained offset slots whose library loaded while disabled.
-#if defined(__aarch64__)
-        for (int i = 0; i < g_nslots.load(); ++i)
-            if (change.plan->active[i] && g_slots[i].has_offset && g_native_status.pending(g_slots[i].status_key)) {
-                const uintptr_t base = find_lib_base(g_slots[i].lib);
-                if (base) apply_offset_hook(i, base);
-            }
-#endif
+        reconcile_native_runtime();
         g_native_status.configuration({{"status", "applied"}, {"config_revision", change.plan->revision},
             {"changed", change.changed}, {"native_targets", change.plan->desired.size()},
             {"jni_restart_required", jni_config != g_initial_jni_config},
@@ -692,6 +561,13 @@ static void apply_hooks(const std::string& cfg_text, JNIEnv* env = nullptr) {
             {"retained_previous_config", true}, {"config_revision", g_live.snapshot()->revision}});
     }
     g_status_ready = true;
+}
+
+static void apply_hooks(const std::string& text, JNIEnv* env = nullptr) {
+    with_loader_lock([&] {
+        std::lock_guard<std::recursive_mutex> lock(g_lifecycle_mutex);
+        apply_hooks_locked(text, env);
+    });
     publish_native_status();
 }
 
@@ -711,11 +587,9 @@ static void start_native_control(int fd) {
         if (g_evt_fd == fd) g_evt_fd = -1;
         close(fd);
     }).detach();
-    const std::string hello = R"({"kind":"native","protocol":1,"removal_mode":"passthrough"})";
+    const std::string hello = R"({"kind":"native","protocol":1,"removal_mode":"physical_after_drain"})";
     send_framed('H', hello.data(), static_cast<uint32_t>(hello.size()));
-#if defined(__x86_64__)
-    start_pending_poll();
-#endif
+    start_native_worker();
     publish_native_status();
 }
 
@@ -803,11 +677,12 @@ public:
 #endif
 #if defined(__aarch64__)
         g_native_status.engine({{"name", "shadowhook"}, {"status", "ready"},
-                                {"symbol_completion_callback", sh_hook_sym_callback != nullptr}});
+                                {"symbol_resolution", "loader_snapshot_poll"}});
 #elif defined(__x86_64__)
         g_native_status.engine({{"name", "dobby"}, {"status", "ready"}});
 #endif
         LOGI("为 %s 注入 hook（配置 %u 字节）", g_package.c_str(), clen);
+        initialize_native_loader();
         apply_hooks(cfg, env);
         start_native_control(fd);
         // 有 hook：不 unload，保持代理常驻

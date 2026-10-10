@@ -117,8 +117,24 @@ int main() {
             query.params.emplace("package",pkg);
             handle_jni_bindings(query,response);
             auto state = json::parse(response.body);
-            assert(state["mapping_version"] == 2 && state["bindings"][0]["binding_status"] == "superseded");
+            assert(state["mapping_version"] == 3 && state["bindings"][0]["binding_status"] == "superseded");
             assert(state["bindings"][0]["process"] == process && state["current_bindings_verified"] == false);
+            registration["type"] = "jni_registration";
+            registration["class_id"] = "loader-check";
+            registration["address"] = "0x3100";
+            registration["module"] = "/fixture.so";
+            registration["observation_order"] = uint64_t(1);
+            send_frame(fd, 'E', registration.dump());
+            send_frame(fd, 'E', json({{"type", "native_library_unloaded"}, {"module", "/fixture.so"},
+                {"executable_ranges", json::array({json::array({"0x3000", "0x3200"})})},
+                {"observation_order", uint64_t(2)}}).dump());
+            bool unloaded = false;
+            for (int i = 0; i < 100; ++i) {
+                auto state = g_jni_bindings.snapshot(pkg, "", 100, true);
+                if (state["count"] == 3 && state["bindings"][2]["binding_status"] == "module_unloaded") { unloaded = true; break; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            assert(unloaded);
         }
         shutdown(fd, SHUT_RDWR); close(fd); server.join();
         assert(runtime_status_snapshot(pkg)["processes"].empty());

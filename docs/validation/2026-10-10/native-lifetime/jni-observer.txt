@@ -1,0 +1,2 @@
+jni_observer_test.cpp
+JNI observer tests passed

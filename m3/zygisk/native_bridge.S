@@ -18,9 +18,12 @@ RB_PROXY \n
 .endr
 
 .p2align 2
+.global rb_native_entry
+.hidden rb_native_entry
 .type rb_native_entry, %function
 rb_native_entry:
 .cfi_startproc
+    hint #34
     sub sp, sp, #176
 .cfi_def_cfa_offset 176
     stp x29, x30, [sp, #160]
@@ -37,7 +40,7 @@ rb_native_entry:
     stp d6, d7, [sp, #112]
     add x9, sp, #176
     str x9, [sp, #144]
-    mov w0, w16
+    mov x0, x16
     mov x1, sp
     bl rb_native_dispatch
     ldr x0, [sp, #128]
@@ -99,9 +102,12 @@ RB_PROXY \n
 .endr
 
 .p2align 4
+.global rb_native_entry
+.hidden rb_native_entry
 .type rb_native_entry, @function
 rb_native_entry:
 .cfi_startproc
+    endbr64
     sub $168, %rsp
 .cfi_def_cfa_offset 176
     mov %rdi, 0(%rsp)
@@ -120,7 +126,7 @@ rb_native_entry:
     movq %xmm7, 120(%rsp)
     lea 176(%rsp), %rax
     mov %rax, 144(%rsp)
-    mov %r10d, %edi
+    mov %r10, %rdi
     mov %rsp, %rsi
     call rb_native_dispatch
     mov 128(%rsp), %rax

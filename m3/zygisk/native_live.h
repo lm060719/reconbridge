@@ -233,13 +233,15 @@ inline NativeSpec parse_native_spec(const nlohmann::json& jt, size_t ordinal) {
 
 // A proxy takes ONE immutable snapshot per invocation. Removing/replacing a
 // hook changes future invocations; in-flight invocations own their old config.
-// Slots are stable for the process lifetime: engine trampolines are not freed.
+// Slots are released only after the runtime confirms physical removal. Each
+// allocation has a generation; a delayed old gateway cannot adopt a reused slot.
 class NativeLiveRegistry {
 public:
     static constexpr size_t capacity = 64;
     struct Plan {
         uint64_t revision = 0;
         std::array<std::shared_ptr<const NativeSpec>, capacity> active{};
+        std::array<uint64_t, capacity> generations{};
         nlohmann::json desired = nlohmann::json::array();
     };
     struct Added { size_t slot; std::shared_ptr<const NativeSpec> spec; };
@@ -249,8 +251,26 @@ private:
     std::unordered_map<std::string, size_t> sites_;
     std::unordered_map<std::string, std::string> signatures_;
     std::shared_ptr<const Plan> plan_ = std::make_shared<const Plan>();
+    std::array<uint64_t, capacity> generations_{};
 public:
     std::shared_ptr<const Plan> snapshot() const { return std::atomic_load(&plan_); }
+    bool release(size_t slot, const std::string& site) {
+        std::lock_guard<std::mutex> lock(writer_);
+        const auto found = sites_.find(site);
+        if (found == sites_.end() || found->second != slot || snapshot()->active.at(slot)) return false;
+        sites_.erase(found); signatures_.erase(site);
+        return true;
+    }
+    template<class Prepare> void renew(size_t slot, Prepare prepare) {
+        std::lock_guard<std::mutex> lock(writer_);
+        auto previous = snapshot();
+        if (!previous->active.at(slot)) throw std::logic_error("cannot renew an inactive slot");
+        auto next = std::make_shared<Plan>(*previous);
+        prepare(slot, *previous->active[slot]);
+        next->generations[slot] = ++generations_[slot];
+        std::shared_ptr<const Plan> committed = next;
+        std::atomic_store(&plan_, committed);
+    }
     template<class PrepareSlot>
     Change reconcile(const nlohmann::json& cfg, PrepareSlot prepare_slot) {
         using json = nlohmann::json;
@@ -276,6 +296,7 @@ public:
         auto sites = sites_;
         auto signatures = signatures_;
         auto next = std::make_shared<Plan>();
+        auto generations = generations_;
         next->revision = previous->revision + 1;
         next->desired = std::move(desired);
         std::vector<Added> added;
@@ -288,18 +309,23 @@ public:
                 slot = found->second;
             }
             else {
-                if (sites.size() >= capacity) throw std::invalid_argument("native slot capacity exhausted; restart required");
-                slot = sites.size();
+                if (sites.size() >= capacity) throw std::invalid_argument("native slots full; wait for physical removal/drain before retrying");
+                std::array<bool, capacity> used{};
+                for (const auto& pair : sites) used[pair.second] = true;
+                slot = 0; while (used[slot]) ++slot;
+                ++generations[slot];
                 sites[spec->site_key()] = slot;
                 signatures[spec->site_key()] = spec->abi_key();
                 added.push_back({slot, spec});
             }
             next->active[slot] = spec;
         }
+        next->generations = generations;
         // Validate the complete transaction before publishing any slot/config.
         for (const auto& item : added) prepare_slot(item.slot, *item.spec);
         sites_ = std::move(sites);
         signatures_ = std::move(signatures);
+        generations_ = generations;
         std::shared_ptr<const Plan> committed = next;
         std::atomic_store(&plan_, committed);
         return {committed, std::move(added), true};
@@ -308,9 +334,9 @@ public:
 
 template<class Original, class Emit>
 long invoke_native(const NativeLiveRegistry& registry, size_t slot,
-                   std::array<long, 8> args, Original original, Emit emit) {
+                   std::array<long, 8> args, Original original, Emit emit, uint64_t generation = 0) {
     auto plan = registry.snapshot();
-    const auto spec = plan->active.at(slot);
+    const auto spec = !generation || plan->generations.at(slot) == generation ? plan->active.at(slot) : nullptr;
     if (!spec) return original(args);
     if (spec->action == ACT_REPLACE_ARG)
         for (const auto& override : spec->arg_overrides) args[override.first] = override.second;

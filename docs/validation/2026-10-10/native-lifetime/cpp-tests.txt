@@ -1,0 +1,8 @@
+native_lifetime_test.cpp
+Native drain/failure/late ingress/exception/2000 slot reuses/library generations passed
+native_live_test.cpp
+Native live configuration/dispatch tests passed
+native_status_test.cpp
+Native status tests passed
+jni_mappings_test.cpp
+JNI lifecycle, static export decoding/ELF bounds and address mapping tests passed

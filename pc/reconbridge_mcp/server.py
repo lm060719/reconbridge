@@ -4426,6 +4426,7 @@ def runtime_hook_status(package: str = "") -> dict:
     Application/Context/Activity 与 activity_state，lifecycle_runtime 会显示 callbacks/events；
     native_status_version>=1 提供 engine/configuration/hooks 安装结果与错误；
     v2 增加 config_revision、运行中配置更新与 retained_hooks（透传停用的保留跳板）。
+    v3 增加物理撤钩/槽位回收、draining/removed/unhook_failed 和 loader 卸载跟踪状态。
     pending 不是已安装，installed 不保证库尚未卸载；JNI 配置变更仍需重启进程。
     package 为空时列出全部连接进程。
     """
@@ -5197,7 +5198,7 @@ def unhook(package: str, hook_id: str = "") -> dict:
 
     不给 hook_id 则清空该包全部期望 Hook；给了则只移除该 id。
     对支持 HookRegistry reconcile 的运行进程会立即调用 LSPosed Unhook，无需 force-stop。
-    Native 新调用透传原函数，已有调用可按旧配置完成；保留跳板，不做物理撤钩。
+    Native v3 等在途调用结束后物理撤钩并回收槽位，失败保留资源并报告；v2 仅透传停用。
     hot_unhooked 是投递数，实际结果以 runtime_hook_status 为准；JNI 观察器仍需重启停止。
     """
     _validate_package_name(package)

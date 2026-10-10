@@ -1,0 +1,2 @@
+Built arm64-v8a: E:\Users\limo2\Desktop\project\CS\逆向模块\build\native\arm64-v8a\build-manifest.json
+Built x86_64: E:\Users\limo2\Desktop\project\CS\逆向模块\build\native\x86_64\build-manifest.json

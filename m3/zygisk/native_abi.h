@@ -50,7 +50,7 @@ inline void native_store_args(const NativeSpec& signature, NativeFrame& frame, c
 
 template<class Emit>
 void invoke_native_frame(const NativeLiveRegistry& registry, size_t slot, const NativeSpec& retained_signature,
-                         void* original, NativeFrame& frame, Emit emit) {
+                         void* original, NativeFrame& frame, Emit emit, uint64_t generation = 0) {
     native_load_stack(retained_signature, frame);
     const auto logical = native_logical_args(retained_signature, frame);
     const long result = invoke_native(registry, slot, logical,
@@ -59,9 +59,18 @@ void invoke_native_frame(const NativeLiveRegistry& registry, size_t slot, const 
             frame.result_gp = frame.result_fp = 0;
             if (original) rb_native_call(original, &frame);
             return static_cast<long>(native_floating(retained_signature.signature_ret) ? frame.result_fp : frame.result_gp);
-        }, emit);
+        }, emit, generation);
     if (native_floating(retained_signature.signature_ret)) frame.result_fp = static_cast<uint64_t>(result);
     else frame.result_gp = static_cast<uint64_t>(result);
+}
+
+template<class Context, class Emit>
+void invoke_native_generation(const NativeLiveRegistry& registry, Context& target, NativeFrame& frame, Emit emit) {
+    auto lease = target.lifetime.enter();
+    if (!target.module_valid.load()) { frame.result_gp = frame.result_fp = 0; return; }
+    void* original = lease.removed ? reinterpret_cast<void*>(target.address) : target.orig;
+    invoke_native_frame(registry, target.slot, target, original, frame, emit,
+                        lease.removed ? UINT64_MAX : target.generation);
 }
 
 inline nlohmann::json native_float_capture(ArgType type, uint64_t bits) {

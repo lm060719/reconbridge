@@ -1,6 +1,7 @@
 #pragma once
 #include "third_party/json.hpp"
 #include <mutex>
+#include <map>
 #include <string>
 
 // Installation results, not a claim that libraries remain loaded forever.
@@ -9,7 +10,9 @@
 class NativeHookStatus {
     using json = nlohmann::json;
     mutable std::mutex mutex_;
-    json hooks_ = json::array();
+    std::map<size_t, json> hooks_;
+    size_t next_key_ = 0;
+    uint64_t history_evicted_ = 0;
     json engine_ = {{"status", "loading"}};
     json config_ = {{"status", "loading"}};
     json jni_ = json::array();
@@ -21,16 +24,27 @@ public:
     size_t add(json metadata) {
         std::lock_guard<std::mutex> lock(mutex_);
         metadata["status"] = "pending";
-        hooks_.push_back(std::move(metadata));
+        if (hooks_.size() >= 256) {
+            for (auto it = hooks_.begin(); it != hooks_.end(); ++it) {
+                if (it->second.value("historical", false)) { hooks_.erase(it); ++history_evicted_; break; }
+            }
+        }
+        const size_t key = next_key_++;
+        hooks_.emplace(key, std::move(metadata));
         ++revision_;
-        return hooks_.size() - 1;
+        return key;
     }
     bool pending(size_t key) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        return hooks_.at(key).at("status") == "pending";
+        return hooks_.count(key) && hooks_.at(key).at("status") == "pending";
+    }
+    void history(size_t key) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (hooks_.count(key)) { hooks_.at(key)["historical"] = true; ++revision_; }
     }
     bool claim(size_t key) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!hooks_.count(key)) return false;
         auto& row = hooks_.at(key);
         if (row["status"] != "pending") return false;
         row["status"] = "installing";
@@ -39,12 +53,23 @@ public:
     }
     bool update(size_t key, const std::string& state, json detail = json::object()) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!hooks_.count(key)) return false;
         auto& row = hooks_.at(key);
         if (terminal(row["status"].get<std::string>())) return false;
         row["status"] = state;
         row["detail"] = std::move(detail);
         ++revision_;
         return true;
+    }
+    // Lifecycle transitions are serialized by the runtime, independently of
+    // one-shot engine installation callbacks.
+    void lifecycle(size_t key, const std::string& state, json detail = json::object()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!hooks_.count(key)) return;
+        if (hooks_.at(key)["status"] == state && hooks_.at(key).value("detail", json::object()) == detail) return;
+        hooks_.at(key)["status"] = state;
+        hooks_.at(key)["detail"] = std::move(detail);
+        ++revision_;
     }
     bool symbol_result(size_t key, bool has_stub, int code, int pending_code,
                        bool completion_callback, const std::string& message) {
@@ -68,8 +93,9 @@ public:
     }
     json snapshot() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        json rows = json::array(); for (const auto& row : hooks_) rows.push_back(row.second);
         return {{"kind", "native"}, {"native_status_version", 1}, {"revision", revision_},
-                {"engine", engine_}, {"configuration", config_}, {"hooks", hooks_},
+                {"engine", engine_}, {"configuration", config_}, {"hooks", rows}, {"history_evicted", history_evicted_},
                 {"jni_observers", jni_}, {"live_unhook", false}, {"live_reconcile", false},
                 {"installation_scope", "process_start"}, {"unload_tracking", false}};
     }

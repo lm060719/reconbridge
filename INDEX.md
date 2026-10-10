@@ -29,6 +29,11 @@
 
 ## 2. 顶层目录速览
 
+Native v3 生命周期入口见 [NATIVE_LIFECYCLE.md](pc/NATIVE_LIFECYCLE.md)：
+`m3/zygisk/native_runtime.h` 管理引擎和 loader；`native_lifetime.h` 管理在途计数；
+`native_gateway.h` 提供不可变 RX 入口；`library_lifetime.h` 跟踪库代次；
+`native_observation.h` 为 JNI 与 loader 提供共同观察序号。
+
 | 路径 | 说明 |
 |---|---|
 | [`pc/`](pc/) | **PC 端 MCP server**(Python)+ 全部单元/e2e 测试。项目智能主体。 |
